@@ -30,14 +30,10 @@ pub(super) fn run(
     let _ = screen.terminal.show_cursor();
     drop(screen);
     // The TUI can be left with builds still running: the user quit once the
-    // run was over but added a package afterwards (see `run_over`). Nothing
-    // interrupts those builds, and the TUI no longer draws them, so the run
-    // would look hung until its summary. Once the terminal is back, plain
-    // output takes over for the rest of the run. It is switched on only here,
-    // after the alternate screen is left, so no line lands in the TUI's buffer.
-    if work.load(Ordering::SeqCst) != 0 {
-        ap_core::sink::set_quiet(false);
-    }
+    // run was over but added a package afterwards (see `run_over`). Those builds
+    // run on with the terminal given back, and quiet stays on for them: nothing
+    // from them is printed until the process ends, when the held lines are
+    // printed (see `session::print_exit_lines`). The run log has every event.
     result
 }
 
