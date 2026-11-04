@@ -538,7 +538,7 @@ pub fn is_newer(latest: &str, packaged: &str) -> bool {
 ///
 /// The actual parsing lives in [`ap_ecosystem::forge::parse`] so the three
 /// forge-URL readers in this codebase stay in sync.
-pub(super) fn git_repo_url(source: &str) -> Option<String> {
+pub(crate) fn git_repo_url(source: &str) -> Option<String> {
     // A `Source:` line may embed the forge URL inside something else (e.g.
     // `Source0: %{url}/archive/v%{version}.tar.gz`), so scan for a known host
     // marker and parse the slice starting at `https://`/`http://`/`git@`.
