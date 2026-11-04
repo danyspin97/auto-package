@@ -11,6 +11,14 @@ pub(super) fn obs_baseline_dir(config: &PipelineConfig) -> std::io::Result<PathB
     Workspace::open(&config.state_root, &config.rpm_name).map(|ws| ws.dir().join(OBS_BASELINE_DIR))
 }
 
+/// The workspace directory of `config`'s package, where a run keeps what it
+/// wrote or accepted (see `rpmlint_sources`).
+pub(super) fn run_dir(config: &PipelineConfig) -> Option<PathBuf> {
+    Workspace::open(&config.state_root, &config.rpm_name)
+        .ok()
+        .map(|ws| ws.dir().to_path_buf())
+}
+
 /// The checkout the run of `config`'s package writes: the OBS name its state
 /// records (the RPM name before one is recorded). A baseline saved from any
 /// other path is not restored into it (see `osc::restore_baseline`).

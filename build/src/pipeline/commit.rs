@@ -92,6 +92,47 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     }
     // The only write to OBS: nothing without a spec, without its sources, or
     // with a placeholder in it goes there, whatever an earlier stage let by.
+    // A filter file this run wrote or accepted, which no Source line names, is
+    // named in the spec that builds it, or refused with the line to add. Any
+    // other unnamed filter is not published: it is said, not silently dropped.
+    let written = osc::rpmlintrcs_written(ctx.ws.dir());
+    match osc::name_unnamed_rpmlintrcs(&ctx.checkout_dir, &written) {
+        Ok((added, left_out)) => {
+            for name in &added {
+                ctx.reporter.report(&Event::Warning {
+                    step: Some(commit_step.id),
+                    message: format!(
+                        "{}: named '{name}' in its spec: the package publishes its filter",
+                        ctx.rpm_name
+                    ),
+                });
+            }
+            for name in &left_out {
+                ctx.reporter.report(&Event::Warning {
+                    step: Some(commit_step.id),
+                    message: format!(
+                        "{}: rpmlintrc '{name}' is not published: this run did not write it \
+                         and no Source line names it; add one by hand if the filter is wanted",
+                        ctx.rpm_name
+                    ),
+                });
+            }
+            if !added.is_empty() {
+                append_notes(
+                    ctx.ws.dir().join("notes.md"),
+                    &format!(
+                        "\n## Commit — filter named in the spec\n{} added a Source line for: {}\n",
+                        ctx.rpm_name,
+                        added.join(", ")
+                    ),
+                );
+            }
+        }
+        Err(why) => {
+            commit_step.finish(StepOutcome::Failed);
+            return Err(ctx.failed(why));
+        }
+    }
     let expanded = match ensure_publishable(ctx, commit_step.id) {
         Ok(expanded) => expanded,
         Err(reason) => {
@@ -166,6 +207,10 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     }
     osc::wrap_unpublished_changes(&ctx.checkout_dir);
     let plan = osc::publish_plan(&ctx.checkout_dir);
+    if let Some(why) = osc::filter_claim_without_rpmlintrc(&ctx.checkout_dir, &plan.files) {
+        commit_step.finish(StepOutcome::Failed);
+        return Err(ctx.failed(why));
+    }
     // What the expanded spec names is what `%prep` reads. A plan that leaves
     // one of those files out is refused before anything is removed or sent.
     let named = osc::spec_source_names(&expanded);

@@ -210,6 +210,15 @@ pub(super) fn gate_turn_edit_without_accept(
     ) {
         return false;
     }
+    // The rpmlint filters an accepted edit wrote are this run's: the commit names
+    // them in their spec (see `rpmlint_sources`); other filters are not published.
+    if let Some(run) = run_dir(config) {
+        for name in files_needing_a_bullet(checkout_dir, snapshot, keep) {
+            if is_rpmlintrc(&name) {
+                crate::osc::note_rpmlintrc_written(&run, &name);
+            }
+        }
+    }
     // A patch the edit adds is named in `.changes` as an edit the turn is kept for
     // is: the bullet the turn gave, not one the agent wrote by hand. The pipeline
     // adds the `Drop` bullet of each patch the edit removed with a proof.

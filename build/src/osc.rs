@@ -118,6 +118,8 @@ mod ci_retry;
 mod ci_retry_tests;
 mod publish;
 pub use publish::*;
+mod rpmlint_sources;
+pub use rpmlint_sources::*;
 mod recipe_files;
 use recipe_files::recipe_file_unused;
 mod baseline;
@@ -187,6 +189,8 @@ mod rpmspec_sandbox_tests;
 
 #[cfg(test)]
 mod publish_plan_tests;
+#[cfg(test)]
+mod rpmlint_sources_tests;
 
 #[cfg(test)]
 mod service_validation_tests;

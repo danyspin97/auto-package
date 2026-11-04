@@ -125,6 +125,7 @@ pub(super) fn generate_multi_flavor_wheel_spec(
             &config.pkg_name,
             &first_wheel,
             layout.as_ref(),
+            run_dir(config).as_deref(),
         );
         let first_wheel = picked.into_iter().next().map(|(_, w)| w).ok_or_else(|| {
             GenSpecError::Other(format!(
@@ -151,10 +152,14 @@ fn write_wheel_rpmlintrc(
     pkg_name: &str,
     wheel_filename: &str,
     layout: Option<&ap_ecosystem::sdist::WheelLayout>,
+    run: Option<&Path>,
 ) {
     match crate::spec::wheel_rpmlintrc(pkg_name, wheel_filename, layout) {
         Some((file, text)) => {
             write_or_warn(checkout_dir.join(&file), text);
+            if let Some(run) = run {
+                crate::osc::note_rpmlintrc_written(run, &file);
+            }
             // An earlier release of the tool named it `python-<name>.rpmlintrc`.
             if let Err(why) = crate::spec::migrate_dot_rpmlintrc(checkout_dir, &file) {
                 ap_core::diag!("  {why}");
@@ -291,6 +296,7 @@ pub(super) fn generate_wheel_binary_spec(
         &config.pkg_name,
         &wheel.filename,
         layout.as_ref(),
+        run_dir(config).as_deref(),
     );
 
     Ok(GenSpecResult {

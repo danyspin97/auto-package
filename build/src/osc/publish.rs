@@ -295,7 +295,9 @@ fn is_publishable(
         "cargo-workspace-fix.txt",
     ];
     // An rpmlintrc (`<name>-rpmlintrc`, or an older `<name>.rpmlintrc`) is published
-    // only when a `Source:` names it: an unreferenced one is dropped with the commit.
+    // only when a `Source:` names it. The commit names the ones this run wrote or
+    // accepted (`rpmlint_sources`); any other unreferenced one is dropped with the
+    // commit, and the commit says so.
     const SUFFIXES: &[&str] = &[
         ".spec", ".changes", ".obsinfo", ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar",
         ".tgz", ".tbz", ".txz", ".zip", ".crate",
