@@ -1,0 +1,10 @@
+<request id="1400002" creator="carol">
+  <action type="submit">
+    <source project="home:carol" package="foo"/>
+    <target project="Base:System" package="foo"/>
+  </action>
+  <state name="accepted" who="dave" when="2026-11-03T12:00:00" created="2026-11-03T11:00:00">
+    <comment>ok</comment>
+  </state>
+  <description/>
+</request>

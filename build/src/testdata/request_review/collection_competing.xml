@@ -1,0 +1,16 @@
+<collection matches="2">
+  <request id="1394662" creator="dspinella">
+    <action type="submit">
+      <source project="home:dspinella:auto-package:branches:Base:System" package="cracklib" rev="3"/>
+      <target project="Base:System" package="cracklib"/>
+    </action>
+    <state name="new" who="dspinella" when="2026-11-03T11:14:47"/>
+  </request>
+  <request id="1394700" creator="eve">
+    <action type="submit">
+      <source project="home:eve" package="cracklib"/>
+      <target project="Base:System" package="cracklib"/>
+    </action>
+    <state name="review" who="eve" when="2026-11-03T11:30:00"/>
+  </request>
+</collection>

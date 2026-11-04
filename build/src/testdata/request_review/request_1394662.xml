@@ -1,0 +1,27 @@
+<request id="1394662" creator="dspinella">
+  <action type="submit">
+    <source project="home:dspinella:auto-package:branches:Base:System" package="cracklib" rev="3"/>
+    <target project="Base:System" package="cracklib"/>
+    <options>
+      <sourceupdate>cleanup</sourceupdate>
+    </options>
+  </action>
+  <state name="new" who="dspinella" when="2026-11-03T11:14:47" created="2026-11-03T11:14:44">
+    <comment/>
+  </state>
+  <description>- Update to 2.10.4&#xD;
+  * Fixed a buffer overflow in `Mangle()` where the caller's buffer&#xD;
+    could be overrun&#xD;
+  * Fixed `Reverse()` stepping before the start of its buffer&#xD;
+  * Fixed `Pluralise()` reading `string[-1]` for an empty string&#xD;
+  * Fixed negative char values reaching `ctype` functions&#xD;
+  * Added support for building on GNU/Hurd (`portable_endian.h`&#xD;
+    adapted)&#xD;
+  * Various Python improvements&#xD;
+  * Updated translations&#xD;
+  * Autotools build fixes and cleanups&#xD;
+- Refresh 0002-cracklib-2.9.2-visibility.patch&#xD;
+- Build the dict-small subpackage as noarch, since it ships only&#xD;
+  architecture-independent dictionary data&#xD;
+</description>
+</request>

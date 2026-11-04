@@ -426,6 +426,7 @@ pub mod keyring_accept;
 #[cfg(test)]
 mod keyring_accept_tests;
 mod keyring_listing;
+pub(crate) use keyring_listing::is_hidden;
 mod service_source;
 #[cfg(test)]
 mod service_source_tests;

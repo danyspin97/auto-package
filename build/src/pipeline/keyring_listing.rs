@@ -128,7 +128,7 @@ pub(super) fn printable(raw: &str) -> String {
 /// operators, the Mongolian and variation selectors, the interlinear
 /// annotation marks, the object replacement characters, the byte order mark
 /// and the tag block.
-pub(super) fn is_hidden(c: char) -> bool {
+pub(crate) fn is_hidden(c: char) -> bool {
     c.is_control()
         || is_bidi_override(c)
         || matches!(

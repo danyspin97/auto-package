@@ -1,0 +1,15 @@
+<request id="1400001" creator="alice">
+  <action type="submit">
+    <source project="home:alice:branches:Base:System" package="libsigc++" rev="0a1b2c3d4e5f60718293a4b5c6d7e8f9"/>
+    <target project="Base:System" package="libsigc++"/>
+  </action>
+  <action type="delete">
+    <target project="Base:System" package="old-thing"/>
+  </action>
+  <state name="review" who="alice" when="2026-11-03T10:00:00" created="2026-11-03T09:59:00">
+    <comment/>
+  </state>
+  <review state="new" by_group="factory-staging"/>
+  <review state="accepted" by_user="bob"/>
+  <description>Two actions &amp; a delete</description>
+</request>
