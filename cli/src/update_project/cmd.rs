@@ -243,7 +243,12 @@ pub(super) fn cmd_update_project(
                 &mut item,
                 a.follow_devel,
                 a.revision.as_deref(),
-                !continuing,
+                // A findings fix keeps the revision its review read: no rebase.
+                !continuing
+                    && !matches!(
+                        a.fix_task.as_deref(),
+                        Some(ap_build::bugfix::FixTask::Findings(_))
+                    ),
                 ctx,
             ) {
                 Ok(()) => {
