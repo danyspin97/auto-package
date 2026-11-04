@@ -166,6 +166,18 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     }
     osc::wrap_unpublished_changes(&ctx.checkout_dir);
     let plan = osc::publish_plan(&ctx.checkout_dir);
+    // What the expanded spec names is what `%prep` reads. A plan that leaves
+    // one of those files out is refused before anything is removed or sent.
+    let named = osc::spec_source_names(&expanded);
+    let left_out = osc::named_but_skipped(&named, &plan.skipped);
+    if !left_out.is_empty() {
+        commit_step.finish(StepOutcome::Failed);
+        return Err(ctx.failed(format!(
+            "not committed: the spec names {} but the publish plan leaves it out; \
+             nothing was sent to OBS",
+            left_out.join(", ")
+        )));
+    }
     for name in &plan.skipped {
         ctx.reporter.report(&Event::Warning {
             step: Some(commit_step.id),
@@ -187,7 +199,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
             message: format!("removing '{name}' from OBS: the package does not use it"),
         });
     }
-    for name in osc::discard_untracked_archives(&ctx.checkout_dir, &plan.skipped) {
+    for name in osc::discard_untracked_archives(&ctx.checkout_dir, &plan.skipped, &named) {
         ctx.reporter.report(&Event::Warning {
             step: Some(commit_step.id),
             message: format!("deleted '{name}' from the checkout: the package does not use it"),

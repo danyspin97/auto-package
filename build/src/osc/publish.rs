@@ -73,7 +73,7 @@ pub fn publish_plan(checkout_dir: &Path) -> PublishPlan {
 /// The file names the spec's `Source:`/`Patch:` lines stand for: a URL's last
 /// segment, or the name a `#/name` fragment gives it. A name that holds a macro
 /// keeps it, as a pattern [`matches_source_name`] reads.
-pub(super) fn spec_source_names(spec_text: &str) -> Vec<String> {
+pub fn spec_source_names(spec_text: &str) -> Vec<String> {
     // `Version`/`Name` are known, so a release archive of another version is
     // not named by `foo-%{version}.tar.gz`; any other macro stays a wildcard.
     let header = |tag: &str| {
@@ -450,11 +450,27 @@ pub fn remove_tracked_strays(
     removed
 }
 
+/// The names of `skipped` that `named` lists: files the publish plan leaves out
+/// although the expanded spec names them. Committing without them drops a
+/// source `%prep` needs, so the commit refuses them.
+pub fn named_but_skipped(named: &[String], skipped: &[String]) -> Vec<String> {
+    skipped
+        .iter()
+        .filter(|name| named.contains(name))
+        .cloned()
+        .collect()
+}
+
 /// Archives in the checkout that [`publish_plan`] left out and OBS does not
 /// track (an sdist fetched for a version that was then given up, the previous
 /// release's tarball), deleted from the checkout so they do not pile up there
-/// or show as added. Returns the names deleted.
-pub fn discard_untracked_archives(checkout_dir: &Path, skipped: &[String]) -> Vec<String> {
+/// or show as added. An archive `named` by the expanded spec is never deleted,
+/// whatever the plan said. Returns the names deleted.
+pub fn discard_untracked_archives(
+    checkout_dir: &Path,
+    skipped: &[String],
+    named: &[String],
+) -> Vec<String> {
     const ARCHIVES: &[&str] = &[
         ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar", ".tgz", ".tbz", ".txz", ".zip",
         ".crate", ".whl",
@@ -463,6 +479,7 @@ pub fn discard_untracked_archives(checkout_dir: &Path, skipped: &[String]) -> Ve
     let mut gone = Vec::new();
     for name in skipped {
         if tracked.contains(name)
+            || named.contains(name)
             || !is_safe_file_arg(name)
             || !ARCHIVES.iter().any(|s| name.ends_with(s))
         {

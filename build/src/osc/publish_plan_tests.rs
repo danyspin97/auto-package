@@ -193,3 +193,39 @@ fn each_spec_names_its_own_sources() {
     let names = all_spec_source_names(&[main.to_string(), sibling.to_string()]);
     assert_eq!(names, ["elfutils-0.197.tar.bz2", "elfutils-0.196.tar.bz2"]);
 }
+
+/// elfutils 0.197 was deleted from the checkout when the plan left it out: the
+/// spec of that run named it only through the sibling's version. The expanded
+/// spec names it, so the plan's skip is refused and the archive stays.
+#[test]
+fn an_archive_the_expanded_spec_names_is_kept_and_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    // The checkout's own spec does not expand to the new archive.
+    let stale = "Name: elfutils-debuginfod\nVersion: 0.196\nSource: elfutils-%{version}.tar.bz2\n";
+    fs::write(dir.path().join("elfutils-debuginfod.spec"), stale).unwrap();
+    fs::write(dir.path().join("elfutils-0.197.tar.bz2"), "").unwrap();
+    let plan = publish_plan(dir.path());
+    assert_eq!(plan.skipped, ["elfutils-0.197.tar.bz2"]);
+    // rpmspec's expansion of the main spec names it.
+    let expanded = "Name: elfutils\nVersion: 0.197\n\
+        Source0: https://sourceware.org/elfutils/ftp/0.197/elfutils-0.197.tar.bz2\n";
+    let named = spec_source_names(expanded);
+    assert_eq!(
+        named_but_skipped(&named, &plan.skipped),
+        ["elfutils-0.197.tar.bz2"]
+    );
+    let gone = discard_untracked_archives(dir.path(), &plan.skipped, &named);
+    assert!(gone.is_empty(), "{gone:?}");
+    assert!(dir.path().join("elfutils-0.197.tar.bz2").exists());
+}
+
+/// An archive that nothing names is still deleted, as before.
+#[test]
+fn an_archive_nothing_names_is_still_discarded() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("old-1.0.tar.gz"), "").unwrap();
+    let skipped = ["old-1.0.tar.gz".to_string()];
+    let gone = discard_untracked_archives(dir.path(), &skipped, &[]);
+    assert_eq!(gone, ["old-1.0.tar.gz"]);
+    assert!(!dir.path().join("old-1.0.tar.gz").exists());
+}
