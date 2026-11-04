@@ -210,6 +210,9 @@ pub enum Task {
     PostBuildReview,
     /// A fresh look at one rewritten patch.
     PatchReview,
+    /// Fixing a reported bug in the package at its current version
+    /// (`auto-package fix`).
+    FixBug,
 }
 
 impl std::fmt::Display for Task {
@@ -226,6 +229,7 @@ impl std::fmt::Display for Task {
             Task::PatchDependency => write!(f, "patch dependency"),
             Task::PostBuildReview => write!(f, "post-build review"),
             Task::PatchReview => write!(f, "patch review"),
+            Task::FixBug => write!(f, "fix bug"),
         }
     }
 }
@@ -519,6 +523,8 @@ pub enum Event {
         verdict: String,
         reason: String,
     },
+    /// One record of `auto-package fix` (see [`BugFixEvent`]).
+    BugFix(crate::fix_event::BugFixEvent),
 }
 
 /// One dependency a zig vendor archive holds.

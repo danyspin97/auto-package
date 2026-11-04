@@ -34,7 +34,8 @@ impl HumanSink {
             | Event::Progress { .. }
             | Event::HostAllowed { .. }
             | Event::ZigVendor { .. }
-            | Event::PatchReviewed { .. } => LogLevel::Info,
+            | Event::PatchReviewed { .. }
+            | Event::BugFix(_) => LogLevel::Info,
             Event::Command { .. }
             | Event::CommandDone { .. }
             | Event::ExtractResult { .. }
@@ -235,6 +236,7 @@ impl HumanSink {
                     HostSource::Tui => "the TUI",
                 },
             )),
+            Event::BugFix(e) => Some(e.line()),
             Event::PatchReviewed {
                 patch,
                 round,
@@ -494,5 +496,26 @@ mod tests {
         );
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event"], "patch_reviewed");
+    }
+
+    #[test]
+    fn a_bug_fix_record_is_one_info_line() {
+        let event = Event::BugFix(crate::fix_event::BugFixEvent {
+            step: None,
+            pkg: "foo".into(),
+            stage: crate::fix_event::BugFixStage::End,
+            refs: Vec::new(),
+            read: Vec::new(),
+            not_read: Vec::new(),
+            patch: None,
+            patch_sha256: None,
+            origin: None,
+            verdict: Some("no_fix".into()),
+            applied: None,
+            reason: "nothing found".into(),
+        });
+        assert_eq!(HumanSink::event_level(&event), LogLevel::Info);
+        let line = HumanSink::new(LogLevel::Info).format(&event).unwrap();
+        assert_eq!(line, "  bug fix no_fix: nothing found");
     }
 }

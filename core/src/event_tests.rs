@@ -47,3 +47,42 @@ fn arch_check_has_its_wire_form_and_old_logs_still_parse() {
         serde_json::from_str(r#"{"repo":"ports","arch":"s390x","state":"succeeded"}"#).unwrap();
     assert!(!bare.origin_fails && bare.detail.is_none() && bare.log.is_none());
 }
+
+#[test]
+fn bug_fix_has_its_wire_form_and_a_line_for_each_stage() {
+    use crate::fix_event::{BugFixEvent, BugFixStage};
+    let input = BugFixEvent {
+        step: None,
+        pkg: "foo".into(),
+        stage: BugFixStage::Input,
+        refs: vec!["bsc#1234567".into(), "CVE-2025-1234".into()],
+        read: vec!["api.osv.dev CVE-2025-1234".into()],
+        not_read: vec!["bsc#1234567: not public".into()],
+        patch: Some("foo-CVE-2025-1234.patch".into()),
+        patch_sha256: None,
+        origin: None,
+        verdict: None,
+        applied: None,
+        reason: String::new(),
+    };
+    let e = Event::BugFix(input.clone());
+    assert_eq!(
+        serde_json::to_string(&e).unwrap(),
+        r#"{"event":"bug_fix","pkg":"foo","stage":"input","refs":["bsc#1234567","CVE-2025-1234"],"read":["api.osv.dev CVE-2025-1234"],"not_read":["bsc#1234567: not public"],"patch":"foo-CVE-2025-1234.patch","reason":""}"#
+    );
+    let back: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+    assert!(matches!(back, Event::BugFix(b) if b == input));
+    assert_eq!(
+        input.line(),
+        "  bug fix input: bsc#1234567 CVE-2025-1234, staged foo-CVE-2025-1234.patch (1 not read)"
+    );
+    let end = BugFixEvent {
+        stage: BugFixStage::End,
+        verdict: Some("fixed".into()),
+        applied: Some("clean".into()),
+        reason: "applies".into(),
+        ..input
+    };
+    assert_eq!(end.line(), "  bug fix fixed (clean): applies");
+    assert_eq!(Task::FixBug.to_string(), "fix bug");
+}

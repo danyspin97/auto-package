@@ -127,6 +127,15 @@ round of the review of a patch an agent rewrote: `verdict` is `accepted`,
 `rewritten`, `rejected`, `gave_up`, `rolled_back` (a rewrite or an edit the gate
 refused), `slip` or `not_reviewed` (no turn could start; `reason` says why).
 Recipe: `jq -c 'select(.pkg==env.K and .event=="patch_reviewed")' "$R"`.
+`bug_fix` (`step`, `pkg`, `stage`, `refs`, `read`, `not_read`, `patch`,
+`patch_sha256`, `origin`, `verdict`, `applied`, `reason`) is a record of
+`auto-package fix`: `stage` `input` says what the tool read (hosts and files),
+what it could not (`not_read`, with the reason) and which upstream patch it
+staged; `end` says how the fix ended (`verdict`: `fixed`, `already_fixed`,
+`not_affected`, `no_fix`, `needs_maintainer` or `does_not_apply`; `applied`:
+`clean`, `refreshed`, `adapted` or `written`). The turn itself is `agent_prompt`
+with task `fix bug`.
+Recipe: `jq -c 'select(.pkg==env.K and .event=="bug_fix")' "$R"`.
 The workspace keeps three review files under `patch-review/`: `<name>.orig` (the
 patch before the rewrite, for the reviewer, removed after each round), `rewritten`
 (patches a reviewer rewrote itself, each with a hash of its bytes; the risk flag
