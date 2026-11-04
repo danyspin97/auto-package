@@ -27,8 +27,13 @@ mod parse;
 pub use parse::*;
 mod sources;
 pub use sources::*;
+mod conditions;
+pub(crate) use conditions::*;
 mod expand;
 pub use expand::*;
+
+#[cfg(test)]
+mod conditions_tests;
 
 mod generate;
 #[cfg(test)]

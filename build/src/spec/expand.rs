@@ -9,56 +9,18 @@
 /// a header reader, not an rpm interpreter.
 pub(crate) fn collect_simple_defines(spec: &str) -> std::collections::HashMap<String, String> {
     let mut macros = std::collections::HashMap::new();
-    // One frame per open `%if`. A define is only recorded when every frame's
-    // current branch is known to be taken: recording from an unevaluable
-    // branch could silently pick the wrong value.
-    let mut stack: Vec<CondFrame> = Vec::new();
+    // A define is only recorded when every open `%if` branch is known to be
+    // taken: recording from an unevaluable branch could silently pick the
+    // wrong value.
+    let mut stack = crate::spec::CondStack::new();
     for line in spec.lines() {
+        if stack.feed(line, &macros) {
+            continue;
+        }
+        if stack.taken() != Some(true) {
+            continue;
+        }
         let trimmed = line.trim_start();
-        if let Some(cond) = trimmed
-            .strip_prefix("%if ")
-            .or_else(|| trimmed.strip_prefix("%if\t"))
-        {
-            let state = eval_condition(cond, &macros);
-            stack.push(CondFrame::new(state));
-            continue;
-        }
-        if trimmed.starts_with("%ifarch")
-            || trimmed.starts_with("%ifnarch")
-            || trimmed.starts_with("%ifos")
-            || trimmed.starts_with("%ifnos")
-        {
-            stack.push(CondFrame::new(None));
-            continue;
-        }
-        if let Some(cond) = trimmed.strip_prefix("%elif ") {
-            if let Some(frame) = stack.last_mut() {
-                frame.advance();
-                frame.state = match frame.prior {
-                    Taken::No => eval_condition(cond, &macros),
-                    _ => None,
-                };
-            }
-            continue;
-        }
-        if trimmed == "%else" {
-            if let Some(frame) = stack.last_mut() {
-                frame.advance();
-                frame.state = match frame.prior {
-                    Taken::Yes => Some(false),
-                    Taken::Maybe => None,
-                    Taken::No => Some(true),
-                };
-            }
-            continue;
-        }
-        if trimmed == "%endif" {
-            stack.pop();
-            continue;
-        }
-        if stack.iter().any(|f| f.state != Some(true)) {
-            continue;
-        }
         let rest = trimmed
             .strip_prefix("%define ")
             .or_else(|| trimmed.strip_prefix("%global "));
@@ -80,61 +42,6 @@ pub(crate) fn collect_simple_defines(spec: &str) -> std::collections::HashMap<St
         macros.insert(name.to_string(), expand_once(value, &macros));
     }
     macros
-}
-
-/// Whether an earlier branch of the current `%if` chain was taken.
-#[derive(Clone, Copy, PartialEq)]
-enum Taken {
-    Yes,
-    No,
-    Maybe,
-}
-
-struct CondFrame {
-    /// `Some(true)` taken, `Some(false)` skipped, `None` cannot be evaluated.
-    state: Option<bool>,
-    prior: Taken,
-}
-
-impl CondFrame {
-    pub(super) fn new(state: Option<bool>) -> Self {
-        CondFrame {
-            state,
-            prior: Taken::No,
-        }
-    }
-
-    /// Fold the branch just left into `prior` before moving to the next one.
-    fn advance(&mut self) {
-        self.prior = match (self.prior, self.state) {
-            (Taken::Yes, _) | (_, Some(true)) => Taken::Yes,
-            (Taken::Maybe, _) | (_, None) => Taken::Maybe,
-            _ => Taken::No,
-        };
-    }
-}
-
-/// Evaluate the simple `%if` shapes: an integer literal, optionally with a
-/// `%{?name}` expansion (`0%{?name}`). A macro the spec itself never defined
-/// is unknown, not false — rpm's own config may define it.
-fn eval_condition(cond: &str, macros: &std::collections::HashMap<String, String>) -> Option<bool> {
-    let cond = cond.trim();
-    let mut expanded = String::new();
-    let mut rest = cond;
-    while let Some(pos) = rest.find("%{?") {
-        expanded.push_str(&rest[..pos]);
-        let after = &rest[pos + 3..];
-        let end = after.find('}')?;
-        let name = &after[..end];
-        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return None;
-        }
-        expanded.push_str(macros.get(name)?);
-        rest = &after[end + 1..];
-    }
-    expanded.push_str(rest);
-    let n: i64 = expanded.trim().parse().ok()?;
-    Some(n != 0)
 }
 
 /// Replace every `%{name}` or `%name` reference by its collected `%define`/
