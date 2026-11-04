@@ -55,7 +55,10 @@ mod ports_check {
         let out = check(&fake);
         let row = &out.rows[0];
         assert_eq!(row.repo, REPO);
-        assert!(row.baseline_fails && !row.blocks_submit(), "{row:?}");
+        assert!(
+            row.baseline == BaselineState::Fails && !row.blocks_submit(),
+            "{row:?}"
+        );
         assert!(
             fake.events
                 .borrow()
@@ -80,14 +83,15 @@ mod ports_check {
     }
 
     #[test]
-    fn a_port_failure_without_a_factory_result_blocks_as_no_baseline() {
+    fn a_port_failure_without_a_factory_result_is_a_note_as_no_baseline() {
         let fake = fixture();
         with_port(&fake);
         port_result(&fake, "failed", None);
         set_results(&fake, PORT, vec![]);
         let row = check(&fake).rows.remove(0);
         assert_eq!(row.state, ArchState::NoBaseline { detail: None });
-        assert!(row.blocks_submit());
+        assert_eq!(row.baseline, BaselineState::NoResult);
+        assert!(!row.blocks_submit());
     }
 
     #[test]
@@ -176,14 +180,17 @@ mod gate_ports {
     }
 
     #[test]
-    fn a_port_failure_without_a_factory_result_refuses() {
+    fn a_port_failure_without_a_factory_result_passes_with_a_note() {
         let fake = fixture();
         branch_with_port(&fake, "failed");
         set_results(&fake, PORT, vec![]);
-        let GateVerdict::Refuse(why) = gate(&fake) else {
-            panic!("a port failure Factory does not build blocks");
+        let GateVerdict::Pass { notes } = gate(&fake) else {
+            panic!("a port failure Factory has no result for is a note");
         };
-        assert!(why.contains("failed (no Factory baseline)"), "{why}");
+        assert!(
+            notes.iter().any(|n| n.contains("has no result")),
+            "{notes:?}"
+        );
     }
 
     #[test]

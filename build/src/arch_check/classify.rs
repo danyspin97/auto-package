@@ -31,7 +31,8 @@ pub enum ArchState {
         detail: Option<String>,
     },
     /// A port result that failed while Factory has no result of the package to
-    /// compare with, so the failure cannot be told from the update's.
+    /// compare with: Factory does not build it there, so it is a note, not a
+    /// blocker.
     NoBaseline {
         detail: Option<String>,
     },

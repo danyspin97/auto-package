@@ -140,7 +140,7 @@ pub(super) fn event_result(row: &ArchRow) -> ArchCheckResult {
         arch: row.arch.clone(),
         state: row.state.label(),
         detail: row.state.detail().map(str::to_string),
-        origin_fails: row.baseline_fails,
+        origin_fails: row.baseline == arch_check::BaselineState::Fails,
         log: row.log.clone(),
     }
 }

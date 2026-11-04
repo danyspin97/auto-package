@@ -23,6 +23,8 @@ mod meta;
 mod not_checked_tests;
 mod obs;
 mod ports;
+#[cfg(test)]
+mod rows_tests;
 mod summary;
 #[cfg(test)]
 mod tests;

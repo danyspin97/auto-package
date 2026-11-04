@@ -8,7 +8,9 @@ use std::path::Path;
 use super::fetch::RequestObs;
 use super::gather::ActionInputs;
 use super::{Finding, Severity, ids};
-use crate::arch_check::{ArchObs, ArchState, GateRow, blocks_submit, gate_inputs, read_results};
+use crate::arch_check::{
+    ArchObs, ArchState, BaselineState, GateRow, blocks_submit, gate_inputs, read_results,
+};
 use crate::obs_status::ResultEntry;
 
 /// [`ArchObs`] over the review's reads. The two writes of the trait refuse,
@@ -79,14 +81,13 @@ pub fn build_findings(
     }
     for r in rows {
         let name = format!("{}/{}", r.repo, r.arch);
-        let baseline_fails = r
-            .baseline
-            .as_ref()
-            .and_then(|b| b.state.as_ref())
-            .is_some_and(ArchState::is_failure);
+        // As the gate reads it: a failure without a baseline blocks.
+        let baseline = r.baseline.as_ref().map_or(BaselineState::Builds, |b| {
+            BaselineState::of(b.state.as_ref())
+        });
         let detail = r.state.detail().map_or(String::new(), |d| format!(": {d}"));
         match &r.state {
-            s if blocks_submit(s, baseline_fails) => out.push(mk(
+            s if blocks_submit(s, baseline) => out.push(mk(
                 ids::BUILD_FAILED,
                 Severity::Blocker,
                 &format!("{name} {}{detail}", s.label()),

@@ -4,7 +4,7 @@
 //! and a project-level disable, so that a package builds there only once it
 //! enables the repository in its own build flags.
 
-use super::{ArchState, classify, missing_from_details};
+use super::{ArchState, BaselineState, classify, missing_from_details};
 use crate::osc::{BuildStatus, child_indent, layout, open_tags};
 
 /// One port: the repository a branch adds, the project it paths to, and the
@@ -185,17 +185,21 @@ pub fn classify_port(status: &BuildStatus, details: Option<&str>) -> ArchState {
 
 /// A port's failure judged against Factory's result for the same arch:
 /// `baseline` is that result's state, `None` when Factory has no result of the
-/// package there. Returns the state and whether Factory fails too. A failure
-/// Factory builds is the update's (it blocks); one Factory fails too does not;
-/// one Factory has no result of is `NoBaseline`, which blocks.
-pub fn judge_port(state: ArchState, baseline: Option<&ArchState>) -> (ArchState, bool) {
+/// package there (or excludes it). Returns the state and what Factory has: a
+/// failure Factory builds is the update's (it blocks); one Factory fails too
+/// does not; one Factory has no result of is `NoBaseline`, a note.
+pub fn judge_port(state: ArchState, baseline: Option<&ArchState>) -> (ArchState, BaselineState) {
     match state {
         ArchState::Failed { detail } => match baseline {
-            None => (ArchState::NoBaseline { detail }, false),
-            Some(b) if b.is_failure() => (ArchState::Failed { detail }, true),
-            Some(ArchState::Succeeded) => (ArchState::Failed { detail }, false),
-            Some(_) => (ArchState::NotFinal("baseline building".to_string()), false),
+            None => (ArchState::NoBaseline { detail }, BaselineState::NoResult),
+            Some(b) if b.is_skipped() => (ArchState::Failed { detail }, BaselineState::Excluded),
+            Some(b) if b.is_failure() => (ArchState::Failed { detail }, BaselineState::Fails),
+            Some(ArchState::Succeeded) => (ArchState::Failed { detail }, BaselineState::Builds),
+            Some(_) => (
+                ArchState::NotFinal("baseline building".to_string()),
+                BaselineState::Builds,
+            ),
         },
-        other => (other, false),
+        other => (other, BaselineState::of(baseline)),
     }
 }

@@ -394,7 +394,7 @@ fn branch_call_owns_only_packages_missing_before_it() {
 #[test]
 fn the_arches_flag_is_validated_and_the_rows_become_events() {
     use super::arch;
-    use ap_build::arch_check::{ArchRow, ArchState};
+    use ap_build::arch_check::{ArchRow, ArchState, BaselineState};
     let mut a = args(&[]);
     assert_eq!(arch::wanted_arches(&a).unwrap(), None);
     a.arches = vec!["s390x".into(), "s390x".into(), "ppc64le".into()];
@@ -411,7 +411,7 @@ fn the_arches_flag_is_validated_and_the_rows_become_events() {
         state: ArchState::Failed {
             detail: Some("boom".into()),
         },
-        baseline_fails: true,
+        baseline: BaselineState::Fails,
         log: Some("/w/p.log".into()),
     };
     let ev = arch::event_result(&row);

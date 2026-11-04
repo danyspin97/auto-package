@@ -48,6 +48,20 @@ fn a_failure_the_baseline_does_not_have_is_a_blocker_and_one_it_has_is_a_note() 
 }
 
 #[test]
+fn a_failure_whose_baseline_was_not_read_is_a_blocker() {
+    let rows = [GateRow {
+        repo: "Tumbleweed".into(),
+        arch: "riscv64".into(),
+        state: failed(),
+        baseline: None,
+    }];
+    assert_eq!(
+        one(&build_findings("p", &rows, &[], None)),
+        (ids::BUILD_FAILED, Severity::Blocker)
+    );
+}
+
+#[test]
 fn a_pending_result_is_a_warning_and_a_port_that_is_not_final_a_note() {
     let rows = [row(
         "Tumbleweed",

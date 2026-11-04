@@ -10,24 +10,54 @@ pub struct ArchRow {
     pub repo: String,
     pub arch: String,
     pub state: ArchState,
-    /// The same repository and arch fail in the baseline too (the origin, or
-    /// for a port repository Factory), so the update did not cause it.
-    pub baseline_fails: bool,
+    /// What the baseline (the origin, or for a port repository Factory) has for
+    /// the same repository and arch. A failure is judged by it, see
+    /// [`blocks_submit`].
+    pub baseline: BaselineState,
     /// The saved build log of a failure, if it was fetched.
     pub log: Option<String>,
 }
 
-/// Whether a result keeps the package from being submitted: a failure that
-/// its baseline does not have too (`baseline_fails`). The one rule the summary
-/// rows and the submit gate both apply.
-pub fn blocks_submit(state: &ArchState, baseline_fails: bool) -> bool {
-    state.is_failure() && !baseline_fails
+/// What a baseline has for a failure's `(repo, arch)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaselineState {
+    /// The baseline fails there too: the update did not cause it.
+    Fails,
+    /// The baseline builds there (or has a result that is not a failure).
+    Builds,
+    /// The baseline has no result row of the package there (absent or 404):
+    /// it does not build there, so the failure is a note, not a blocker.
+    NoResult,
+    /// The baseline excludes or disables the package there. The update may
+    /// have enabled the arch, so the failure blocks, as a `Builds` one does.
+    Excluded,
+}
+
+impl BaselineState {
+    /// The state of a baseline whose result for the arch is `state` (`None`:
+    /// the baseline has no result row of the package there).
+    pub fn of(state: Option<&ArchState>) -> Self {
+        match state {
+            None => BaselineState::NoResult,
+            Some(s) if s.is_skipped() => BaselineState::Excluded,
+            Some(s) if s.is_failure() => BaselineState::Fails,
+            Some(_) => BaselineState::Builds,
+        }
+    }
+}
+
+/// Whether a result keeps the package from being submitted: a failure the
+/// baseline builds. A failure the baseline fails too is informational, and one
+/// the baseline has no result for is a note. The one rule the summary rows and
+/// the submit gate both apply.
+pub fn blocks_submit(state: &ArchState, baseline: BaselineState) -> bool {
+    state.is_failure() && matches!(baseline, BaselineState::Builds | BaselineState::Excluded)
 }
 
 impl ArchRow {
     /// Whether this row keeps the package from being submitted.
     pub fn blocks_submit(&self) -> bool {
-        blocks_submit(&self.state, self.baseline_fails)
+        blocks_submit(&self.state, self.baseline)
     }
 
     fn key(&self) -> (&str, &str, &str) {
@@ -66,9 +96,14 @@ pub fn section_lines(rows: &[ArchRow]) -> Vec<String> {
         if let Some(detail) = row.state.detail() {
             line.push_str(&format!(": {detail}"));
         }
-        if row.baseline_fails {
-            let who = if port { "Factory" } else { "the origin" };
-            line.push_str(&format!(" (also fails in {who})"));
+        let who = if port { "Factory" } else { "the origin" };
+        match row.baseline {
+            BaselineState::Fails => line.push_str(&format!(" (also fails in {who})")),
+            BaselineState::NoResult => {
+                line.push_str(&format!(" (no result in {who}: not blocking)"))
+            }
+            BaselineState::Excluded => line.push_str(&format!(" (excluded in {who}: blocking)")),
+            BaselineState::Builds => {}
         }
         if let ArchState::NotFinal(_) = row.state
             && port

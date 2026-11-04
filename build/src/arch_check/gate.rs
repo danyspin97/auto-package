@@ -1,7 +1,7 @@
 //! The submit gate: whether a package whose build status is a failure may be
 //! submitted, decided from its results. Pure: the reads are the caller's.
 
-use super::{ArchState, blocks_submit};
+use super::{ArchState, BaselineState, blocks_submit};
 
 /// One result of the package. A failure carries its baseline: the same
 /// `(repo, arch)` in the origin project, or in the port project for a port
@@ -33,8 +33,9 @@ pub enum GateVerdict {
 
 /// Decide the gate for `pkg`. `primary` is the `(repo, arch)` the package was
 /// built for: it must have succeeded. A result still pending refuses (the gate
-/// does not wait). A failure its baseline has too is not counted; any other
-/// failure refuses unless `allow` (`--allow-arch-failures`). When the overall
+/// does not wait). A failure its baseline fails too, or has no result for, is
+/// not counted; any other failure refuses unless `allow`
+/// (`--allow-arch-failures`). When the overall
 /// build status is a failure (`overall_failed`), a status no result explains
 /// refuses. Port results that are not testable or not final do not block.
 pub fn gate_verdict(
@@ -79,16 +80,17 @@ pub fn gate_verdict(
         .filter(|r| r.state.is_failure())
         .copied()
         .collect();
-    let baseline_fails = |r: &GateRow| {
-        r.baseline
-            .as_ref()
-            .and_then(|b| b.state.as_ref())
-            .is_some_and(ArchState::is_failure)
+    // A failure without a baseline was not read: it blocks, as an unread
+    // baseline does in the check.
+    let baseline_of = |r: &GateRow| {
+        r.baseline.as_ref().map_or(BaselineState::Builds, |b| {
+            BaselineState::of(b.state.as_ref())
+        })
     };
     let (blocking, shared): (Vec<&GateRow>, Vec<&GateRow>) = failing
         .iter()
         .copied()
-        .partition(|r| blocks_submit(&r.state, baseline_fails(r)));
+        .partition(|r| blocks_submit(&r.state, baseline_of(r)));
     if overall_failed && failing.is_empty() {
         return GateVerdict::Refuse(format!(
             "its build status is a failure, but no result of {pkg} fails"
@@ -105,10 +107,16 @@ pub fn gate_verdict(
     }
     notes.extend(shared.iter().map(|r| {
         let project = r.baseline.as_ref().map_or("", |b| b.project.as_str());
-        format!(
-            "{pkg} also fails in {project} on {}: not counted against the submit",
-            name(r)
-        )
+        match baseline_of(r) {
+            BaselineState::NoResult => format!(
+                "{pkg} fails on {}, and {project} has no result there: not counted against the submit",
+                name(r)
+            ),
+            _ => format!(
+                "{pkg} also fails in {project} on {}: not counted against the submit",
+                name(r)
+            ),
+        }
     }));
     if blocking.is_empty() {
         return GateVerdict::Pass { notes };

@@ -8,7 +8,7 @@ fn row(repo: &str, arch: &str, state: ArchState) -> ArchRow {
         repo: repo.into(),
         arch: arch.into(),
         state,
-        baseline_fails: false,
+        baseline: BaselineState::Builds,
         log: None,
     }
 }

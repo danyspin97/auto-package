@@ -109,7 +109,7 @@ fn a_failing_flavor_of_the_package_is_a_failing_row() {
             detail: Some("[ 1s] x.c: error: no such header".to_string())
         }
     );
-    assert!(!row.baseline_fails);
+    assert_eq!(row.baseline, BaselineState::Builds);
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn a_failure_the_origin_shares_is_marked_and_one_it_lacks_is_not() {
         vec![entry("p", "standard", "s390x", "failed")],
     );
     let out = check_other_arches(&fake, &request(dir.path(), &say, false, false)).unwrap();
-    assert!(out.rows[0].baseline_fails);
+    assert_eq!(out.rows[0].baseline, BaselineState::Fails);
     assert!(!out.rows[0].blocks_submit());
 
     set_results(
@@ -138,7 +138,7 @@ fn a_failure_the_origin_shares_is_marked_and_one_it_lacks_is_not() {
         vec![entry("p", "standard", "s390x", "succeeded")],
     );
     let out = check_other_arches(&fake, &request(dir.path(), &say, false, false)).unwrap();
-    assert!(!out.rows[0].baseline_fails);
+    assert_ne!(out.rows[0].baseline, BaselineState::Fails);
     assert!(out.rows[0].blocks_submit());
 }
 
@@ -187,8 +187,8 @@ fn a_baseline_the_origin_has_no_package_for_is_no_result() {
     );
     set_absent(&fake, ORIGIN);
     let out = check_other_arches(&fake, &request(dir.path(), &say, false, false)).unwrap();
-    assert!(!out.rows[0].baseline_fails);
-    assert!(out.rows[0].blocks_submit());
+    assert_eq!(out.rows[0].baseline, BaselineState::NoResult);
+    assert!(!out.rows[0].blocks_submit());
     assert!(
         !out.notes.iter().any(|n| n.contains("could not be read")),
         "{:?}",
@@ -197,7 +197,7 @@ fn a_baseline_the_origin_has_no_package_for_is_no_result() {
 }
 
 #[test]
-fn the_gate_reads_a_missing_baseline_as_no_result_and_refuses() {
+fn the_gate_reads_a_missing_baseline_as_no_result_and_passes_with_a_note() {
     let fake = fixture();
     with_branch_s390x(&fake);
     set_results(
@@ -214,7 +214,7 @@ fn the_gate_reads_a_missing_baseline_as_no_result_and_refuses() {
     assert!(failing.baseline.as_ref().unwrap().state.is_none());
     let verdict = gate_verdict("p", ("standard", "x86_64"), &rows, false, true);
     assert!(
-        matches!(&verdict, GateVerdict::Refuse(why) if why.contains("s390x")),
+        matches!(&verdict, GateVerdict::Pass { notes } if notes.iter().any(|n| n.contains("s390x") && n.contains("has no result"))),
         "{verdict:?}"
     );
 }
@@ -231,7 +231,8 @@ fn an_unreadable_origin_marks_nothing_and_says_so() {
         vec![entry("p", "standard", "s390x", "failed")],
     );
     let out = check_other_arches(&fake, &request(dir.path(), &say, false, false)).unwrap();
-    assert!(!out.rows[0].baseline_fails);
+    assert_eq!(out.rows[0].baseline, BaselineState::Builds);
+    assert!(out.rows[0].blocks_submit());
     assert!(
         out.notes.iter().any(|n| n.contains("could not be read")),
         "{:?}",
@@ -375,4 +376,25 @@ mod gate_reads {
                 .any(|e| e.starts_with(&origin_reads))
         );
     }
+}
+
+#[test]
+fn an_origin_that_excludes_the_arch_blocks_and_says_so() {
+    let fake = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let say = |_: String| {};
+    with_branch_s390x(&fake);
+    set_results(
+        &fake,
+        BRANCH,
+        vec![entry("p", "standard", "s390x", "failed")],
+    );
+    set_results(
+        &fake,
+        ORIGIN,
+        vec![entry("p", "standard", "s390x", "excluded")],
+    );
+    let out = check_other_arches(&fake, &request(dir.path(), &say, false, false)).unwrap();
+    assert_eq!(out.rows[0].baseline, BaselineState::Excluded);
+    assert!(out.rows[0].blocks_submit());
 }

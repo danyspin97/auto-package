@@ -85,6 +85,56 @@ fn a_failure_the_baseline_does_not_share_refuses_unless_allowed() {
 }
 
 #[test]
+fn a_failure_the_baseline_has_no_result_for_passes_with_a_note() {
+    let no_result = GateRow {
+        repo: "ports".to_string(),
+        arch: "s390x".to_string(),
+        state: failed(),
+        baseline: Some(Baseline {
+            project: "origin".to_string(),
+            state: None,
+        }),
+    };
+    let rows = vec![primary(), no_result];
+    let GateVerdict::Pass { notes } = gate_verdict("p", PRIMARY, &rows, false, true) else {
+        panic!("a failure the origin has no result for is a note, not a refusal");
+    };
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("has no result") && n.contains("ports/s390x")),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn a_failure_whose_baseline_was_not_read_refuses() {
+    let unread = GateRow {
+        repo: "ports".to_string(),
+        arch: "s390x".to_string(),
+        state: failed(),
+        baseline: None,
+    };
+    let rows = vec![primary(), unread];
+    let GateVerdict::Refuse(why) = gate_verdict("p", PRIMARY, &rows, false, true) else {
+        panic!("a failure without a baseline is not known to be shared");
+    };
+    assert!(why.contains("ports/s390x"), "{why}");
+}
+
+#[test]
+fn a_failure_the_origin_excludes_refuses() {
+    let rows = vec![
+        primary(),
+        row("ports", "s390x", failed(), Some(ArchState::Ignored)),
+    ];
+    assert!(matches!(
+        gate_verdict("p", PRIMARY, &rows, false, true),
+        GateVerdict::Refuse(_)
+    ));
+}
+
+#[test]
 fn a_failure_status_that_no_result_explains_refuses() {
     let rows = vec![primary(), row("ports", "s390x", ArchState::Succeeded, None)];
     assert!(matches!(

@@ -99,25 +99,33 @@ mod states {
         let failed = || ArchState::Failed { detail: None };
         assert_eq!(
             judge_port(failed(), Some(&failed())),
-            (ArchState::Failed { detail: None }, true),
+            (ArchState::Failed { detail: None }, BaselineState::Fails),
             "Factory fails too: not the update's"
         );
         assert_eq!(
             judge_port(failed(), Some(&ArchState::Succeeded)),
-            (ArchState::Failed { detail: None }, false),
+            (ArchState::Failed { detail: None }, BaselineState::Builds),
             "Factory builds it: the update's"
         );
         assert_eq!(
             judge_port(failed(), None),
-            (ArchState::NoBaseline { detail: None }, false),
-            "no Factory result: it blocks, and says so"
+            (ArchState::NoBaseline { detail: None }, BaselineState::NoResult),
+            "no Factory result: a note, and says so"
         );
         assert_eq!(
             judge_port(failed(), Some(&ArchState::Pending("building".into()))),
-            (ArchState::NotFinal("baseline building".into()), false)
+            (ArchState::NotFinal("baseline building".into()), BaselineState::Builds)
+        );
+        assert_eq!(
+            judge_port(failed(), Some(&ArchState::Ignored)),
+            (ArchState::Failed { detail: None }, BaselineState::Excluded),
+            "Factory excludes it: the update may have enabled it, so it blocks"
         );
         let not_testable = ArchState::NotTestable { detail: None };
-        assert_eq!(judge_port(not_testable.clone(), None), (not_testable, false));
+        assert_eq!(
+            judge_port(not_testable.clone(), None),
+            (not_testable, BaselineState::NoResult)
+        );
     }
 
     #[test]

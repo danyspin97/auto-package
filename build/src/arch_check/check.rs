@@ -209,7 +209,9 @@ fn wait_and_classify<O: ArchObs + ?Sized>(
                 repo: key.0.clone(),
                 arch: key.1.clone(),
                 state: state_in(&key.0, &status, details.as_deref()),
-                baseline_fails: false,
+                // Judged by `judge_baselines` for a failure. A failure whose
+                // baseline cannot be read keeps this and blocks, as before.
+                baseline: BaselineState::Builds,
                 log: None,
             }
         })
@@ -296,12 +298,11 @@ fn baseline_project(origin: &str, repo: &str) -> String {
     port_for_repo(repo).map_or_else(|| origin.to_string(), |p| p.project.to_string())
 }
 
-/// The state a baseline reports for `key`: `None` when it has no result of the
-/// package there, or excludes it.
+/// The state a baseline reports for `key`: `None` when it has no result row of
+/// the package there. An excluded or disabled result is kept, so it reads as
+/// [`BaselineState::Excluded`].
 pub(super) fn baseline_state(entries: &[ResultEntry], pkg: &str, key: &Key) -> Option<ArchState> {
-    deciding_entry(entries, pkg, key)
-        .map(|e| classify(&resolve_lenient(e), e.details.as_deref()))
-        .filter(|s| !s.is_skipped())
+    deciding_entry(entries, pkg, key).map(|e| classify(&resolve_lenient(e), e.details.as_deref()))
 }
 
 /// Read each failure's baseline, once per project: the origin for an ordinary
@@ -343,11 +344,11 @@ fn judge_baselines<O: ArchObs + ?Sized>(
         let key = baseline_key(&row.repo, &row.arch);
         let base = baseline_state(entries, req.pkg, &key);
         if is_port_repo(&row.repo) {
-            let (state, shared) = judge_port(row.state.clone(), base.as_ref());
+            let (state, baseline) = judge_port(row.state.clone(), base.as_ref());
             row.state = state;
-            row.baseline_fails = shared;
+            row.baseline = baseline;
         } else {
-            row.baseline_fails = base.is_some_and(|s| s.is_failure());
+            row.baseline = BaselineState::of(base.as_ref());
         }
     }
     rows
