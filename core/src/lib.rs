@@ -4,6 +4,8 @@ pub mod build_info;
 pub mod env;
 pub mod error;
 pub mod event;
+#[cfg(test)]
+mod event_tests;
 pub mod fsx;
 pub mod ledger;
 pub mod limits;
