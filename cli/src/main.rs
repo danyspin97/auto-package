@@ -402,7 +402,16 @@ fn main() -> color_eyre::Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(2));
         std::process::exit(130);
     }
-    result
+    match result {
+        Ok(()) => Ok(()),
+        // The message as the user needs it: the causes, without the source
+        // location. RUST_BACKTRACE asks for the full report.
+        Err(e) if std::env::var_os("RUST_BACKTRACE").is_none() => {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// What every command does before the process ends: keep the upstream cache,
