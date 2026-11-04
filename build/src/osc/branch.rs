@@ -29,6 +29,8 @@ mod request_read;
 pub use request_read::*;
 mod submit;
 pub use submit::*;
+mod supersede;
+pub use supersede::*;
 mod delete_request;
 pub use delete_request::*;
 mod origin_health;
