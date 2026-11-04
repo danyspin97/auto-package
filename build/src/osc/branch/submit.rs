@@ -123,6 +123,10 @@ pub struct OpenRequest {
     pub target_project: String,
     pub target_package: String,
     pub state: String,
+    /// The user who made the request.
+    pub creator: String,
+    /// The revision of the source package the request carries, when it names one.
+    pub source_rev: Option<String>,
 }
 
 /// The query for the open (`new` or in `review`) submit requests whose source
@@ -145,6 +149,13 @@ pub fn parse_open_requests(xml: &str) -> Vec<OpenRequest> {
         let Some(id) = crate::obs_xml::attr(head, "id") else {
             continue;
         };
+        let creator = crate::obs_xml::attr(head, "creator")
+            .or_else(|| {
+                req.split("<history ")
+                    .nth(1)
+                    .and_then(|h| crate::obs_xml::attr(&h[..h.find('>').unwrap_or(h.len())], "who"))
+            })
+            .unwrap_or_default();
         let state = req
             .split("<state ")
             .nth(1)
@@ -180,6 +191,8 @@ pub fn parse_open_requests(xml: &str) -> Vec<OpenRequest> {
                 target_project: tp,
                 target_package: tpkg,
                 state: state.clone(),
+                creator: creator.clone(),
+                source_rev: crate::obs_xml::attr(source, "rev").filter(|r| !r.is_empty()),
             });
         }
     }

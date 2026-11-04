@@ -486,12 +486,30 @@ const REQUESTS: &str = r#"<collection matches="3">
 </collection>"#;
 
 #[test]
+fn the_project_query_asks_for_open_submits_to_the_project() {
+    assert_eq!(
+        open_requests_to_project_path("Base:System"),
+        "/request?view=collection&roles=target&types=submit&states=new,review\
+             &project=Base%3ASystem"
+    );
+}
+
+#[test]
+fn a_request_without_a_creator_attribute_names_its_first_history_entry() {
+    let xml = r#"<request id="5"><action type="submit"><source project="a" package="p"/><target project="b" package="p"/></action><history who="bob" when="x"/><state name="new"/></request>"#;
+    assert_eq!(parse_open_requests(xml)[0].creator, "bob");
+}
+
+#[test]
 fn open_requests_are_parsed_per_submit_action() {
     let reqs = parse_open_requests(REQUESTS);
     assert_eq!(reqs.len(), 2);
     assert_eq!(reqs[0].id, "101");
     assert_eq!(reqs[0].state, "review");
     assert_eq!(reqs[0].target_project, "Base:System");
+    assert_eq!(reqs[0].creator, "u");
+    assert_eq!(reqs[0].source_rev.as_deref(), Some("3"));
+    assert_eq!(reqs[1].source_rev, None);
     assert_eq!(reqs[1].id, "102");
     assert_eq!(reqs[1].target_project, "openSUSE:Factory");
 }

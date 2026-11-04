@@ -219,6 +219,25 @@ pub fn open_requests_to_path(project: &str, package: &str) -> String {
     )
 }
 
+/// The query for every open submit request whose target is in `project`.
+pub fn open_requests_to_project_path(project: &str) -> String {
+    format!(
+        "/request?view=collection&roles=target&types=submit&states=new,review&project={}",
+        enc(project)
+    )
+}
+
+/// The open submit requests to any package of `project`, in one read.
+pub fn open_requests_to_project(project: &str, emit: Emit<'_>) -> Result<Vec<OpenRequest>, Error> {
+    check_obs_name("project", project)?;
+    let xml = api_get_within(
+        &open_requests_to_project_path(project),
+        emit,
+        OSC_QUERY_TIMEOUT,
+    )?;
+    Ok(parse_open_requests(&xml))
+}
+
 /// The open submit requests to `project/package`.
 pub fn open_requests_to(
     project: &str,
