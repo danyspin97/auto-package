@@ -15,6 +15,7 @@ ids! {
     REQUEST_NO_SOURCE_REV = "request.no-source-rev",
     REQUEST_ACTION_MALFORMED = "request.action-malformed",
     REQUEST_COMPETING = "request.competing",
+    REVIEW_INCOMPLETE = "review.incomplete",
 }
 
 #[cfg(test)]
@@ -31,6 +32,7 @@ mod tests {
                 "request.no-source-rev",
                 "request.action-malformed",
                 "request.competing",
+                "review.incomplete",
             ]
         );
         let mut sorted = ALL.to_vec();

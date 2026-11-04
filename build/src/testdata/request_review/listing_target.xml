@@ -1,0 +1,9 @@
+<directory name="cracklib" rev="c145070d1cbdcfada5874b8e60f72980" vrev="92" srcmd5="c145070d1cbdcfada5874b8e60f72980">
+  <linkinfo project="openSUSE:Factory" package="cracklib" srcmd5="e6fe3d090e15414b9276ee072c5e2569" baserev="e6fe3d090e15414b9276ee072c5e2569" lsrcmd5="1fd5bc4a70372d0a58823a9e4cf5a5de"/>
+  <entry name="0001-cracklib-magic.diff" md5="21f955516911ce2e41a31d5d6623a849" size="584" mtime="1471441408"/>
+  <entry name="0002-cracklib-2.9.2-visibility.patch" md5="2b90345d42153ed50ac233d259588ad3" size="4480" mtime="1736165192"/>
+  <entry name="baselibs.conf" md5="bf6d2f507bdc7793cb22e6d17160079a" size="162" mtime="1316303877"/>
+  <entry name="cracklib-2.10.3.tar.bz2" md5="e863aecb8c62a02aef960d48db309a06" size="630213" mtime="1736165192"/>
+  <entry name="cracklib.changes" md5="245ae8078b87c3c91221e72e766409e6" size="21790" mtime="1736165192"/>
+  <entry name="cracklib.spec" md5="4ee784aa5264cececbd850aaf6ca74bc" size="5718" mtime="1736165192"/>
+</directory>

@@ -1,0 +1,9 @@
+<directory name="cracklib" rev="8002a680d5ddba5efd407dae8a0b2835" vrev="95" srcmd5="8002a680d5ddba5efd407dae8a0b2835">
+  <linkinfo project="Base:System" package="cracklib" srcmd5="c145070d1cbdcfada5874b8e60f72980" baserev="c145070d1cbdcfada5874b8e60f72980" lsrcmd5="252690dbfac2feda1e2f5744adf653af"/>
+  <entry name="0001-cracklib-magic.diff" md5="21f955516911ce2e41a31d5d6623a849" size="584" mtime="1471441408"/>
+  <entry name="0002-cracklib-2.9.2-visibility.patch" md5="5418ab6dbe15d37f211fa0a631bdc70a" size="4133" mtime="1793635443"/>
+  <entry name="baselibs.conf" md5="bf6d2f507bdc7793cb22e6d17160079a" size="162" mtime="1316303877"/>
+  <entry name="cracklib-2.10.4.tar.bz2" md5="fd367adcc9b49e13a8f1224608392d2b" size="632143" mtime="1793635445"/>
+  <entry name="cracklib.changes" md5="12e405a64c3f54cd6ea20823fcd78a4f" size="22555" mtime="1793635556"/>
+  <entry name="cracklib.spec" md5="3b583bef39423a94405a68e80e40cf57" size="5758" mtime="1793635556"/>
+</directory>

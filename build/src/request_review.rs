@@ -5,6 +5,12 @@
 
 use serde::Serialize;
 
+pub mod fetch;
+#[cfg(test)]
+mod fetch_fake;
+pub mod gather;
+#[cfg(test)]
+mod gather_tests;
 pub mod ids;
 pub mod request;
 
