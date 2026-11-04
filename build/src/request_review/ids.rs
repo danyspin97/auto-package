@@ -44,6 +44,16 @@ ids! {
     RPMLINTRC_NON_FILTER = "rpmlintrc.non-filter",
     RPMLINTRC_SET_BADNESS = "rpmlintrc.set-badness",
     RPMLINTRC_NO_REASON = "rpmlintrc.no-reason",
+    RISK_NEW_SCRIPTLET = "risk.new_scriptlet",
+    RISK_CHANGED_SCRIPTLET = "risk.changed_scriptlet",
+    RISK_NEW_SOURCE_HOST = "risk.new_source_host",
+    RISK_NEW_SERVICE = "risk.new_service",
+    RISK_SHELL_EXPANSION = "risk.shell_expansion",
+    RISK_SCRIPT_DEPENDENCY = "risk.script_dependency",
+    RISK_PATCH_OUTSIDE_SET = "risk.patch_outside_set",
+    RISK_UNANALYSED = "risk.unanalysed",
+    RISK_LARGE_PATCH = "risk.large_patch",
+    RISK_LARGE_JUMP = "risk.large_jump",
 }
 
 #[cfg(test)]
@@ -89,6 +99,16 @@ mod tests {
                 "rpmlintrc.non-filter",
                 "rpmlintrc.set-badness",
                 "rpmlintrc.no-reason",
+                "risk.new_scriptlet",
+                "risk.changed_scriptlet",
+                "risk.new_source_host",
+                "risk.new_service",
+                "risk.shell_expansion",
+                "risk.script_dependency",
+                "risk.patch_outside_set",
+                "risk.unanalysed",
+                "risk.large_patch",
+                "risk.large_jump",
             ]
         );
         let mut sorted = ALL.to_vec();
