@@ -87,6 +87,19 @@ pub(super) const TURN_RESPONSE_SCHEMA: &str = r#"{
       "required": ["verdict", "reason"],
       "additionalProperties": false
     },
+    "fix": {
+      "type": "object",
+      "description": "FixBug only: your verdict on the bug in the Context. Leave it out for any other task.",
+      "properties": {
+        "verdict": {"type": "string", "enum": ["fixed", "already_fixed", "not_affected", "no_fix", "needs_maintainer"]},
+        "patch": {"type": "string"},
+        "upstream": {"type": "string"},
+        "reason": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}}
+      },
+      "required": ["verdict", "reason"],
+      "additionalProperties": false
+    },
     "stage_files": {
       "type": "array",
       "items": {
@@ -106,8 +119,8 @@ pub(super) const TURN_RESPONSE_SCHEMA: &str = r#"{
 }"#;
 
 /// The turn schema for one task. A RefreshPatches turn must answer with a
-/// non-empty `patches` list and a PatchReview turn with a `review`: the schema
-/// says so, and [`pick_turn_response_where`] refuses an answer without one.
+/// non-empty `patches` list, a PatchReview turn with a `review` and a FixBug turn
+/// with a `fix`: the schema says so, and [`pick_turn_response_where`] refuses an answer without one.
 pub(super) fn turn_response_schema(task: Task) -> String {
     let Ok(mut schema) = serde_json::from_str::<serde_json::Value>(TURN_RESPONSE_SCHEMA) else {
         return TURN_RESPONSE_SCHEMA.to_string();
@@ -124,6 +137,11 @@ pub(super) fn turn_response_schema(task: Task) -> String {
         && let Some(required) = schema.get_mut("required").and_then(|r| r.as_array_mut())
     {
         required.push("review".into());
+    }
+    if task == Task::FixBug
+        && let Some(required) = schema.get_mut("required").and_then(|r| r.as_array_mut())
+    {
+        required.push("fix".into());
     }
     if task == Task::RequestReview {
         if let Some(required) = schema.get_mut("required").and_then(|r| r.as_array_mut()) {
@@ -247,6 +265,8 @@ pub(super) struct TurnResponse {
     pub(super) patches: Vec<PatchAnswer>,
     #[serde(default)]
     pub(super) review: Option<PatchReviewAnswer>,
+    #[serde(default)]
+    pub(super) fix: Option<super::FixAnswer>,
     /// RequestReview only; absent for every other task.
     #[serde(default)]
     pub(super) findings: Option<Vec<AgentFinding>>,

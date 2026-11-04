@@ -310,3 +310,32 @@ fn named_variables_are_passed_through_but_not_osc_credentials() {
     // Without the list none of them gets through.
     assert!(scrub_env_for_agent(vars, &[]).is_empty());
 }
+
+#[test]
+fn a_bug_fix_schema_requires_a_fix_and_other_tasks_do_not() {
+    let fix: serde_json::Value = serde_json::from_str(&turn_response_schema(Task::FixBug)).unwrap();
+    let required = fix["required"].as_array().unwrap();
+    assert!(required.iter().any(|r| r == "fix"), "{required:?}");
+    assert!(required.iter().all(|r| r != "patches" && r != "review"));
+    let verdicts = fix["properties"]["fix"]["properties"]["verdict"]["enum"]
+        .as_array()
+        .unwrap();
+    assert_eq!(verdicts.len(), 5);
+    for task in [Task::RefreshPatches, Task::PatchReview, Task::FixAfterBuild] {
+        let other: serde_json::Value = serde_json::from_str(&turn_response_schema(task)).unwrap();
+        let required = other["required"].as_array().unwrap();
+        assert!(required.iter().all(|r| r != "fix"), "{task:?}");
+    }
+}
+
+#[test]
+fn a_fix_verdict_is_parsed_and_a_bad_one_is_refused() {
+    let payload = r#"{"action":"no_change","reasoning":"r","evidence":[],"confidence":"high",
+        "fix":{"verdict":"not_affected","reason":"the code is not here","evidence":["Read source/a.c"]}}"#;
+    let fix = pick_turn_response(payload, &[]).unwrap().fix.unwrap();
+    assert_eq!(fix.verdict, FixVerdict::NotAffected);
+    assert_eq!(fix.evidence, ["Read source/a.c"]);
+    assert!(fix.patch.is_empty() && fix.upstream.is_empty());
+    let bad = payload.replace("not_affected", "maybe");
+    assert!(pick_turn_response(&bad, &[]).is_none());
+}

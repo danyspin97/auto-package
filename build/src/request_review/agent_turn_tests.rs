@@ -53,6 +53,7 @@ fn outcome(findings: Vec<AgentFinding>, cost: f64) -> TurnOutcome {
         patch_answers: Vec::new(),
         patch_review: None,
         review_findings: findings,
+        bug_fix: None,
         confidence: Confidence::High,
         usage: Usage {
             cli_cost_usd: Some(cost),

@@ -411,11 +411,12 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
     // `result_event.result` empty even when the model DID produce a valid
     // `StructuredOutput` call before being cut off, and treating that as a
     // hard package failure throws away a usable fix for no good reason.
-    // A PatchReview turn that gives up (`blocked`) has no verdict to give.
+    // A PatchReview or FixBug turn that gives up (`blocked`) has no verdict to give.
     let needs_answer = |r: &TurnResponse| match req.task {
         Task::RefreshPatches => !r.patches.is_empty(),
         Task::PatchReview => r.review.is_some() || r.action == "blocked",
         Task::RequestReview => r.findings.is_some(),
+        Task::FixBug => r.fix.is_some() || r.action == "blocked",
         _ => true,
     };
     let resp = match pick_turn_response_where(&result_event.result, &tool_calls, needs_answer) {
@@ -455,14 +456,16 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
                     usage,
                 }
             } else {
-                // A RefreshPatches answer that names no patch, or a PatchReview
-                // answer without a verdict, is a retryable "no usable turn
+                // A RefreshPatches answer that names no patch, or a PatchReview or
+                // FixBug answer without a verdict, is a retryable "no usable turn
                 // response", the same as a missing answer.
                 let detail = if pick_turn_response(&result_event.result, &tool_calls).is_some() {
                     if req.task == Task::RequestReview {
                         "the answer has no `findings`, which a RequestReview turn must give"
                     } else if req.task == Task::PatchReview {
                         "the answer has no `review`, which a PatchReview turn must give"
+                    } else if req.task == Task::FixBug {
+                        "the answer has no `fix`, which a FixBug turn must give"
                     } else {
                         "the answer has no `patches` list, which a RefreshPatches turn must give"
                     }
@@ -541,6 +544,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
         stage_files: resp.stage_files,
         patch_answers: resp.patches,
         patch_review: resp.review,
+        bug_fix: resp.fix,
         review_findings: resp.findings.unwrap_or_default(),
         confidence: resp.confidence,
         usage,

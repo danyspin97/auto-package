@@ -453,6 +453,8 @@ pub struct TurnOutcome {
     pub patch_answers: Vec<PatchAnswer>,
     /// A PatchReview turn's verdict. `None` for every other task.
     pub patch_review: Option<PatchReviewAnswer>,
+    /// A FixBug turn's verdict on the bug. `None` for every other task.
+    pub bug_fix: Option<FixAnswer>,
     /// A RequestReview turn's findings. Empty for every other task.
     pub review_findings: Vec<AgentFinding>,
     pub confidence: Confidence,
