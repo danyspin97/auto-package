@@ -60,6 +60,31 @@ pub fn branch_state(
     }
 }
 
+/// Whether the branch holds a version newer than its origin's: a `lint` of
+/// the package then continues from the branch (an earlier update), instead of
+/// rebasing it onto the origin. A snapshot is a version like any other here
+/// (`1.3+git20260101` is newer than `1.0`). A branch equal to the origin or
+/// behind it is not ahead, and neither is one whose version cannot be compared
+/// (see [`branch_incomparable`]).
+/// [`branch_state`] cannot say this: its ahead case needs an upstream newer
+/// than the origin, and a lint has none.
+pub fn branch_ahead_of_origin(origin: &str, branch: &str, scheme: Scheme) -> bool {
+    !branch.contains('%')
+        && !origin.contains('%')
+        && version::cmp(branch, origin, scheme) == Some(std::cmp::Ordering::Greater)
+}
+
+/// Whether the branch differs from its origin and the two cannot be ordered (a
+/// macro such as `%{upstream}` left in a Version, or a string that is not a
+/// version). Such a branch is neither ahead nor behind: a lint leaves it alone
+/// with a warning, because a rebase onto the origin could discard its update.
+pub fn branch_incomparable(origin: &str, branch: &str, scheme: Scheme) -> bool {
+    branch != origin
+        && (branch.contains('%')
+            || origin.contains('%')
+            || version::cmp(branch, origin, scheme).is_none())
+}
+
 /// The `Version:` of `pkg` in `branch`, read from the branch's spec. `Ok(None)`
 /// when the branch does not hold the package; `Err` when it could not be read
 /// or its spec has no header, which says nothing about what the branch holds.
@@ -199,5 +224,32 @@ mod tests {
             version_of_read(Ok(spec.to_string())),
             Ok(Some("1.2".to_string()))
         );
+    }
+
+    #[test]
+    fn a_branch_is_ahead_of_its_origin_only_when_newer() {
+        let ahead = |o, b| branch_ahead_of_origin(o, b, Scheme::Generic);
+        assert!(ahead("5.3", "5.4"));
+        assert!(!ahead("5.3", "5.3"));
+        assert!(!ahead("5.3", "5.2"));
+        assert!(!ahead("5.3", "%{version}"));
+        assert!(!ahead("%{version}", "5.4"));
+    }
+
+    #[test]
+    fn a_snapshot_newer_than_the_origin_is_ahead() {
+        let ahead = |o, b| branch_ahead_of_origin(o, b, Scheme::Generic);
+        assert!(ahead("1.0", "1.3+git20260101.abc123"));
+        assert!(!ahead("1.3", "1.2+git20260101.abc123"));
+    }
+
+    #[test]
+    fn a_version_that_cannot_be_compared_is_incomparable() {
+        let incomparable = |o, b| branch_incomparable(o, b, Scheme::Generic);
+        assert!(incomparable("5.3", "%{version}"));
+        assert!(incomparable("5.3", "not a version"));
+        assert!(!incomparable("5.3", "5.3"));
+        assert!(!incomparable("5.3", "5.4"));
+        assert!(!incomparable("5.3", "5.2"));
     }
 }
