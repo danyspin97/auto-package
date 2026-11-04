@@ -249,6 +249,10 @@ pub enum Task {
     /// Look at one patch another turn rebased, wrote or edited, and accept it,
     /// rewrite it or reject it. May change that patch file only.
     PatchReview,
+    /// Fix one reported bug in the package at its current version
+    /// (`auto-package fix`): add the upstream fix, or one the turn writes, as a
+    /// patch.
+    FixBug,
     /// Read the files of an OBS submit request and say what the deterministic
     /// checks cannot (see `request_review`). Read-only: it grants no Edit, Write
     /// or Bash, and the pipeline never starts it.

@@ -17,6 +17,8 @@ pub(super) const MAX_AGENT_TURNS: u32 = 40;
 pub(crate) fn max_agent_turns(task: Task) -> u32 {
     match task {
         Task::RefreshPatches => 80,
+        // It may read the repository's history and rebase a patch.
+        Task::FixBug => 60,
         _ => MAX_AGENT_TURNS,
     }
 }

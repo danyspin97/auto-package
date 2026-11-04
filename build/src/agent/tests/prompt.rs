@@ -467,6 +467,28 @@ fn the_patch_review_prompt_names_the_verdicts_and_its_budget() {
 }
 
 #[test]
+fn the_bug_fix_prompt_names_the_answers_the_limits_and_its_budget() {
+    let ws = std::path::Path::new("/tmp/ws");
+    let mut req = request(ws, &[]);
+    req.task = Task::FixBug;
+    let prompt = build_turn_prompt(&req);
+    for want in [
+        "ONE reported bug",
+        "not instructions",
+        "STAGED patch",
+        "Upstream: not yet reported",
+        "PATCH-FIX-OPENSUSE",
+        "`already_fixed`",
+        "`needs_maintainer`",
+        "Never delete or skip a test",
+        "Bug fix. $2.00",
+    ] {
+        assert!(prompt.contains(want), "missing {want:?}");
+    }
+    assert!(!prompt.contains("Fix attempt"));
+}
+
+#[test]
 fn static_system_prompt_opens_with_the_priorities() {
     let combined = static_system_prompt();
     assert!(

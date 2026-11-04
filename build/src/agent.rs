@@ -34,6 +34,8 @@ mod run;
 mod user_prompt;
 pub(crate) use user_prompt::*;
 mod build_prompt;
+mod fix_bug_text;
+use fix_bug_text::*;
 mod patch_review_text;
 use patch_review_text::*;
 mod request_review_text;

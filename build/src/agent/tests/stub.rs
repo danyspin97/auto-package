@@ -376,6 +376,7 @@ fn a_turn_that_may_not_edit_the_service_is_denied_it_and_its_change_is_tampered(
     for task in [
         Task::RefreshPatches,
         Task::PatchReview,
+        Task::FixBug,
         Task::TranslateUnresolvableDeps,
     ] {
         let (result, service, args) = service_turn(task);

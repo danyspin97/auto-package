@@ -41,12 +41,13 @@ pub(super) fn denied_tools(workspace: &std::path::Path) -> Vec<String> {
 
 /// Whether a turn of `task` may write the checkout's `_service`. The `_service`
 /// is the source recipe of the package, which a rebase of its patches does not
-/// change, and a read-only translation writes nothing.
+/// change, a bug fix adds a patch and a read-only translation writes nothing.
 pub(super) fn may_edit_service(task: Task) -> bool {
     !matches!(
         task,
         Task::RefreshPatches
             | Task::PatchReview
+            | Task::FixBug
             | Task::TranslateUnresolvableDeps
             | Task::RequestReview
     )
