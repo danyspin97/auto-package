@@ -34,7 +34,7 @@ pub struct RequestAction {
     pub sourceupdate: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ActionSource {
     pub project: String,
     pub package: String,
@@ -42,7 +42,7 @@ pub struct ActionSource {
     pub rev: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ActionTarget {
     pub project: String,
     pub package: String,
