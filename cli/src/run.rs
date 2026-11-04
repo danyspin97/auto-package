@@ -548,6 +548,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                 result?;
             }
         }
+        Commands::Fix(args) => fix_cmd::run(args, summary)?,
         Commands::Hosts { command } => allow_host::hosts_command(&command)?,
         Commands::Keyring { command } => match command {
             keyring::KeyringCommand::Accept(args) => keyring::accept_command(&args)?,

@@ -5,6 +5,7 @@ mod cleanup;
 mod diffview;
 mod edit_bytes;
 mod explain_cmd;
+mod fix_cmd;
 mod keyring;
 mod local_opts;
 mod notes_cmd;
@@ -230,6 +231,19 @@ enum Commands {
     #[command(mut_arg("source", |a| a.long("project").value_name("PROJECT")))]
     Lint(update_project::UpdateProjectArgs),
 
+    /// Fix one reported bug in a package of a project, in a branch project.
+    ///
+    /// Reads the bug (a public bsc# bug once bugzilla.suse.com is allowed, a CVE
+    /// once its source is, or the text you give), finds the upstream fix in the
+    /// package's repository (or takes `--commit-url`), adds it as a patch with
+    /// the references in its header, the spec comment and the changelog, and
+    /// builds it. Without an upstream fix an agent looks for one or writes the
+    /// smallest fix, which is flagged for a person's review. The version stays
+    /// as it is. Nothing is submitted without `--submit` and a confirmation.
+    ///
+    /// Exits 3 when the bug needs no fix here, 4 when a maintainer must decide.
+    Fix(fix_cmd::FixArgs),
+
     /// Show or change the hosts that services and source fetches may contact.
     ///
     /// Allowing a host is a security decision: the tool sends its requests for
@@ -338,6 +352,12 @@ fn main() -> color_eyre::Result<()> {
     if let Some(reason) = ap_build::proc::abort_reason() {
         eprintln!("\nerror: run stopped: {reason}");
         std::process::exit(EXIT_AGENT_UNAVAILABLE);
+    }
+    if let Err(e) = &result
+        && let Some(exit) = e.downcast_ref::<fix_cmd::FixExit>()
+    {
+        eprintln!("\nfix: {}", exit.message);
+        std::process::exit(exit.code);
     }
     if ap_build::proc::shutting_down() {
         // Ctrl-C (or SIGTERM) stopped the scheduler, which returned an
