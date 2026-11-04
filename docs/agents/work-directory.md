@@ -7,7 +7,7 @@ is a different thing: it is what the packaging agent itself is taught.)
 
 ## Run this first
 
-    auto-package explain <pkg> --work-dir ~/Music/ap-work [--project <OBS project>] [--run <id>] [--json]
+    auto-package explain <pkg> --work-dir ~/Music/ap-work [--project <OBS project>] [--run <id>] [--format json]
 
 It reads the files below and prints, with no model and no network: how the
 version was chosen, the outcome and the last build-log errors, every attempt

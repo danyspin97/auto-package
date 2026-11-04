@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 #[derive(Args)]
 pub(super) struct ExplainArgs {
@@ -33,9 +33,19 @@ pub(super) struct ExplainArgs {
     )]
     notes_dir: PathBuf,
 
-    /// Print the same data as JSON.
-    #[arg(long)]
+    /// How the explanation is printed on stdout.
+    #[arg(long, value_enum, default_value = "text")]
+    format: OutputFormat,
+
+    /// The same as `--format json`.
+    #[arg(long, hide = true)]
     json: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
 }
 
 pub(super) fn run(args: &ExplainArgs) -> color_eyre::Result<()> {
@@ -46,7 +56,7 @@ pub(super) fn run(args: &ExplainArgs) -> color_eyre::Result<()> {
         &args.arch,
         args.run.as_deref(),
         &args.notes_dir,
-        args.json,
+        args.json || matches!(args.format, OutputFormat::Json),
     )
 }
 
@@ -96,7 +106,7 @@ fn explain_command(
 mod tests {
     use clap::Parser;
 
-    use super::ExplainArgs;
+    use super::{ExplainArgs, OutputFormat};
 
     #[derive(Parser)]
     struct Wrapper {
@@ -112,5 +122,15 @@ mod tests {
         assert_eq!(w.args.run.as_deref(), Some("r1"));
         assert_eq!(w.args.arch, "x86_64");
         assert_eq!(w.args.work_dir.to_str(), Some("ap-work"));
+    }
+
+    #[test]
+    fn the_format_is_text_unless_asked_and_json_is_an_alias() {
+        let text = Wrapper::try_parse_from(["x", "aws-c-http"]).unwrap();
+        assert!(matches!(text.args.format, OutputFormat::Text));
+        assert!(!text.args.json);
+        let json = Wrapper::try_parse_from(["x", "aws-c-http", "--format", "json"]).unwrap();
+        assert!(matches!(json.args.format, OutputFormat::Json));
+        assert!(Wrapper::try_parse_from(["x", "aws-c-http", "--format", "yaml"]).is_err());
     }
 }
