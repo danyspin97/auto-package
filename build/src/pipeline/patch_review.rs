@@ -418,7 +418,11 @@ pub(super) enum ReviewEnd {
 
 /// Whether `name` applies to the new sources, by the quilt check of the stage. A
 /// patch that applies with an offset or fuzz is refreshed in place first.
-fn stage_applies(ctx: &RunCtx, check: &mut PatchCheckFn<'_>, name: &str) -> Result<(), String> {
+pub(super) fn stage_applies(
+    ctx: &RunCtx,
+    check: &mut PatchCheckFn<'_>,
+    name: &str,
+) -> Result<(), String> {
     use crate::patch_check::{PatchStatus, Refresh};
     let report = check(ctx, Refresh::No);
     let Some(patch) = report.patches.iter().find(|p| p.name == name) else {

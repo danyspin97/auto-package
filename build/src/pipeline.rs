@@ -359,6 +359,12 @@ use agent::*;
 pub(crate) use turn_spend::{daily_cap_check, record_daily_spend};
 mod agent_response;
 use agent_response::*;
+mod bug_fix_check;
+#[cfg(test)]
+mod bug_fix_check_tests;
+mod bug_fix_stage;
+#[cfg(test)]
+mod bug_fix_stage_tests;
 mod ladder;
 mod ladder_memo;
 pub use ladder::*;
