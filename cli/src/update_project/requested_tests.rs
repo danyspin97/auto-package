@@ -267,6 +267,125 @@ fn a_kept_request_with_a_missing_field_still_reads() {
     assert_eq!(all[0].target_package, "");
 }
 
+fn no_keep(
+    _: &str,
+    _: Duration,
+    _: bool,
+    fetch: &dyn Fn() -> Result<String, String>,
+) -> Result<String, String> {
+    fetch()
+}
+
+fn source_at(rev: &str) -> osc::OpenRequest {
+    let mut r = parse(&[request("0", "new", BRANCH, "submit")]).remove(0);
+    r.source_rev = Some(rev.into());
+    r
+}
+
+#[test]
+fn a_numeric_revision_is_read_for_the_run_only() {
+    let open = OpenRequests::default();
+    let kept = RefCell::new(Vec::new());
+    let keep = |key: &str, ttl: Duration, _: bool, fetch: &dyn Fn() -> Result<String, String>| {
+        kept.borrow_mut().push((key.to_string(), ttl));
+        fetch()
+    };
+    let reads = Cell::new(0);
+    let read = |_: &osc::OpenRequest| -> Result<String, String> {
+        reads.set(reads.get() + 1);
+        Ok("1.1".into())
+    };
+    let r = source_at("12");
+    assert_eq!(
+        open.source_version(&r, false, &keep, &read, &read)
+            .as_deref(),
+        Ok("1.1")
+    );
+    assert_eq!(
+        open.source_version(&r, false, &keep, &read, &read)
+            .as_deref(),
+        Ok("1.1")
+    );
+    assert_eq!(reads.get(), 1);
+    assert!(kept.borrow().is_empty(), "a numeric revision is not kept");
+}
+
+#[test]
+fn a_srcmd5_revision_is_kept_for_thirty_days() {
+    let open = OpenRequests::default();
+    let kept = RefCell::new(Vec::new());
+    let keep = |key: &str, ttl: Duration, _: bool, fetch: &dyn Fn() -> Result<String, String>| {
+        kept.borrow_mut().push((key.to_string(), ttl));
+        fetch()
+    };
+    let read = |_: &osc::OpenRequest| -> Result<String, String> { Ok("1.1".into()) };
+    let md5 = "a".repeat(32);
+    let r = source_at(&md5);
+    assert_eq!(
+        open.source_version(&r, false, &keep, &read, &read)
+            .as_deref(),
+        Ok("1.1")
+    );
+    assert_eq!(
+        open.source_version(&r, false, &keep, &read, &read)
+            .as_deref(),
+        Ok("1.1")
+    );
+    let kept = kept.into_inner();
+    assert_eq!(
+        kept,
+        vec![(
+            format!("srcspec:{BRANCH}/foo@{md5}"),
+            Duration::from_secs(30 * 24 * 60 * 60)
+        )]
+    );
+}
+
+#[test]
+fn a_failed_pinned_read_falls_back_to_the_expanded_read_for_the_run() {
+    let open = OpenRequests::default();
+    let r = source_at(&"b".repeat(32));
+    let pinned = |_: &osc::OpenRequest| -> Result<String, String> { Err("a link".into()) };
+    let expanded = |_: &osc::OpenRequest| -> Result<String, String> { Ok("1.1".into()) };
+    assert_eq!(
+        open.source_version(&r, false, &no_keep, &pinned, &expanded)
+            .as_deref(),
+        Ok("1.1")
+    );
+}
+
+#[test]
+fn a_failed_read_is_not_memoised() {
+    let open = OpenRequests::default();
+    let r = source_at("12");
+    let failing = |_: &osc::OpenRequest| -> Result<String, String> { Err("503".into()) };
+    assert!(
+        open.source_version(&r, false, &no_keep, &failing, &failing)
+            .is_err()
+    );
+    let read = |_: &osc::OpenRequest| -> Result<String, String> { Ok("1.1".into()) };
+    assert_eq!(
+        open.source_version(&r, false, &no_keep, &read, &read)
+            .as_deref(),
+        Ok("1.1")
+    );
+}
+
+#[test]
+fn a_request_without_a_revision_is_read_each_time() {
+    let open = OpenRequests::default();
+    let reads = Cell::new(0);
+    let read = |_: &osc::OpenRequest| -> Result<String, String> {
+        reads.set(reads.get() + 1);
+        Ok("1.1".into())
+    };
+    let mut r = source_at("12");
+    r.source_rev = None;
+    let _ = open.source_version(&r, false, &no_keep, &read, &read);
+    let _ = open.source_version(&r, false, &no_keep, &read, &read);
+    assert_eq!(reads.get(), 2);
+}
+
 #[test]
 fn a_request_from_the_users_own_branch_project_counts() {
     let v = verdict(

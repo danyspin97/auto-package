@@ -213,18 +213,20 @@ from another project, `--in-place`, `lint`, or `--maintenance`.
 
 Before a package is branched, `update` looks at the open submit requests (state
 new or review) to its origin, from anyone and from your own branch project too.
-They are read once per run, for the whole project, and the list is kept for an
-hour. If one brings the planned
-version or a newer one (the `Version:` of its source at the request's revision),
-the package is not branched: it is listed under "already requested" with the
-request and its creator. The request is read again before the skip is made, and
-only a request still open then skips; a failed re-read does not skip. A request
-that brings an older version is only noted in the plan. Declined, revoked and
-superseded requests and requests that are not submits are ignored, and a failed
-read is warned about once and skips nothing. Pass `--include-requested` to turn
-the check off. It is made for an upgrade in a plain `update` only: not for
-`lint`, `--in-place` or `--maintenance`. The `Epoch:` of a request is not
-compared: the planner has none.
+They are read once per run, for the whole project. The list is kept for an hour,
+and the `Version:` of a request's source at a srcmd5 revision for thirty days (a
+numeric revision is read for the run only). If one brings the planned version or
+a newer one (the `Version:` of its source at the request's revision; a snapshot,
+a git or nightly version, brings no release), the package is not branched: it is
+listed under "already requested" with the request and its creator. The request
+is read again before the skip is made, and only a request still open then skips;
+a failed re-read does not skip. A request that brings an older version is only
+noted in the plan. Declined, revoked and superseded requests and requests that
+are not submits are ignored, and a failed read is warned about once and skips
+nothing. Pass `--include-requested` to turn the check off. It is made for an
+upgrade in a plain `update` only: not for `lint`, `--in-place` or
+`--maintenance`. The `Epoch:` of a request is not compared: the planner has
+none.
 
 An origin with a broken `_link` or no spec file is reported with its cause,
 listed under "needs the maintainer", and not branched; an origin whose spec

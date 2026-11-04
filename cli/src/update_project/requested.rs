@@ -11,6 +11,7 @@
 //! the spec of a request's source is read only for a request to the package
 //! at hand.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -23,6 +24,10 @@ use std::time::Duration;
 /// is confirmed by reading that one request again (see [`confirm_open`]), and
 /// `--refresh-requests` reads the list again.
 const REQUEST_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// How long the version a request's source spec has is kept, when the request
+/// names a srcmd5. A srcmd5 names one source for ever, so neither does the answer.
+const SPEC_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// What the open requests say about one item.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -130,6 +135,8 @@ pub(super) fn decide(
 #[derive(Default)]
 pub(super) struct OpenRequests {
     by_origin: HashMap<String, Option<HashMap<String, Vec<osc::OpenRequest>>>>,
+    /// The `Version:` of each request source read so far, by source and revision.
+    versions: RefCell<HashMap<String, String>>,
 }
 
 impl OpenRequests {
@@ -141,7 +148,7 @@ impl OpenRequests {
         pkg: &str,
         read: &dyn Fn(&str) -> Result<Vec<osc::OpenRequest>, String>,
         warn: &dyn Fn(String),
-    ) -> Option<&[osc::OpenRequest]> {
+    ) -> Option<Vec<osc::OpenRequest>> {
         self.by_origin
             .entry(origin.to_string())
             .or_insert_with(|| match read(origin) {
@@ -161,16 +168,52 @@ impl OpenRequests {
                 }
             })
             .as_ref()
-            .map(|g| g.get(pkg).map_or(&[][..], Vec::as_slice))
+            .map(|g| g.get(pkg).cloned().unwrap_or_default())
     }
+
+    /// The `Version:` the source of `r` has at its revision. Read once per run.
+    /// A srcmd5 is kept by `keep` for [`SPEC_TTL`], read unexpanded by `pinned`;
+    /// when that does not read (a link has no spec of its own) or the revision is
+    /// not a srcmd5, `expanded` reads it for this run only. A failure is not kept.
+    pub(super) fn source_version(
+        &self,
+        r: &osc::OpenRequest,
+        refresh: bool,
+        keep: &dyn Fn(
+            &str,
+            Duration,
+            bool,
+            &dyn Fn() -> Result<String, String>,
+        ) -> Result<String, String>,
+        pinned: &dyn Fn(&osc::OpenRequest) -> Result<String, String>,
+        expanded: &dyn Fn(&osc::OpenRequest) -> Result<String, String>,
+    ) -> Result<String, String> {
+        let Some(rev) = r.source_rev.as_deref() else {
+            return expanded(r);
+        };
+        let key = format!("srcspec:{}/{}@{rev}", r.source_project, r.source_package);
+        if let Some(known) = self.versions.borrow().get(&key) {
+            return Ok(known.clone());
+        }
+        let version = if is_srcmd5(rev) {
+            keep(&key, SPEC_TTL, refresh, &|| pinned(r)).or_else(|_| expanded(r))?
+        } else {
+            expanded(r)?
+        };
+        self.versions.borrow_mut().insert(key, version.clone());
+        Ok(version)
+    }
+}
+
+/// Whether `rev` is a srcmd5: 32 hex digits, the name of one source for ever.
+fn is_srcmd5(rev: &str) -> bool {
+    rev.len() == 32 && rev.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The most of a spec that its version is read from. A spec is a few kilobytes;
 /// a larger one is not taken for the spec. (The read itself is not capped.)
 const SPEC_CAP: usize = 2 * 1024 * 1024;
 
-/// The `Version:` the source of `r` has at the revision the request carries. The
-/// spec is the one the source's listing holds, as the convention picks it.
 /// The open requests to `project`, from the list kept for [`REQUEST_TTL`] or
 /// read from OBS. A failed read is not kept.
 fn read_requests(
@@ -213,15 +256,44 @@ fn decode_requests(text: &str) -> Result<Vec<osc::OpenRequest>, String> {
     serde_json::from_str(text).map_err(|e| format!("the kept list of requests is unreadable: {e}"))
 }
 
-fn source_version(r: &osc::OpenRequest, emit: Emit<'_>) -> Result<String, String> {
-    let rev = r.source_rev.as_deref();
-    let listing = osc::package_entries_at_revision(&r.source_project, &r.source_package, rev, emit)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "its source has no package at that revision".to_string())?;
+/// The spec file of a request's source at the revision it carries: the one the
+/// listing holds, as the convention picks it.
+fn source_spec_name(r: &osc::OpenRequest, emit: Emit<'_>) -> Result<String, String> {
+    let listing = osc::package_entries_at_revision(
+        &r.source_project,
+        &r.source_package,
+        r.source_rev.as_deref(),
+        emit,
+    )
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "its source has no package at that revision".to_string())?;
     let names: Vec<String> = listing.files.into_iter().map(|f| f.name).collect();
-    let file = osc::spec_file_name(&names, &r.source_package);
-    let text = osc::cat_file_expanded(&r.source_project, &r.source_package, &file, rev, emit)
-        .map_err(|e| e.to_string())?;
+    Ok(osc::spec_file_name(&names, &r.source_package))
+}
+
+/// The `Version:` of a request's source, its spec read expanded (through a link).
+fn read_expanded_version(r: &osc::OpenRequest, emit: Emit<'_>) -> Result<String, String> {
+    let file = source_spec_name(r, emit)?;
+    let text = osc::cat_file_expanded(
+        &r.source_project,
+        &r.source_package,
+        &file,
+        r.source_rev.as_deref(),
+        emit,
+    )
+    .map_err(|e| e.to_string())?;
+    spec_version(&text)
+}
+
+/// The `Version:` of a request's source at a srcmd5, its spec read as it is in
+/// that source (not expanded: a link without a spec of its own does not read).
+fn read_pinned_version(r: &osc::OpenRequest, emit: Emit<'_>) -> Result<String, String> {
+    let Some(rev) = r.source_rev.as_deref() else {
+        return Err("the request names no revision".to_string());
+    };
+    let file = source_spec_name(r, emit)?;
+    let text = osc::cat_file_at_revision(&r.source_project, &r.source_package, &file, rev, emit)
+        .ok_or_else(|| "the spec is not in the source at that revision".to_string())?;
     spec_version(&text)
 }
 
@@ -269,8 +341,19 @@ pub(super) fn settled_as_requested(
         &|origin| read_requests(origin, a.refresh_requests || a.refresh, emit),
         &|w| ctx.warn(w),
     );
-    let verdict = decide(item, a, requests.ok_or("not read"), &|r| {
-        source_version(r, emit)
+    let open = &*open;
+    let keep =
+        |key: &str, ttl: Duration, refresh: bool, fetch: &dyn Fn() -> Result<String, String>| {
+            ap_build::upstream_cache::lookup_with_ttl(key, ttl, refresh, fetch)
+        };
+    let verdict = decide(item, a, requests.as_deref().ok_or("not read"), &|r| {
+        open.source_version(
+            r,
+            a.refresh_requests,
+            &keep,
+            &|r| read_pinned_version(r, emit),
+            &|r| read_expanded_version(r, emit),
+        )
     });
     for note in &verdict.notes {
         ctx.say(format!("{}: {note}", item.pkg));
