@@ -305,6 +305,21 @@ and updated too, into the same branch project and ahead of the package that
 needs it. Its submit request goes to its own origin project. Without the flag,
 such a dependency is only referenced through a build path and never touched.
 
+#### Other architectures
+
+After a package builds, `update` checks it on the other architectures its origin
+builds it for. `--arches` names the ones to check, `--no-arch-check` skips the
+check, and `--ports` adds the Factory ports. A failure there shows as
+`built (fails on <repo/arch>)` in the run summary and `explain`, and as a short
+`built ⚠ <arch>` in the TUI status column.
+
+A failure blocks `--submit` when the origin builds that architecture, or
+excludes or disables it (the update may have enabled it), and the origin does
+not fail it too. A failure on an architecture the origin has no result row for
+at all is a note and does not block. A port is judged against Factory's port
+project the same way. A failure the origin reports as unresolvable or broken
+counts as a failure there, so the branch's failure is informational.
+
 #### Submit requests
 
 `--submit` creates one request per package that built, to the project the
