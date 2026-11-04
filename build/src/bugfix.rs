@@ -16,6 +16,9 @@ mod bullet_tests;
 mod cve;
 #[cfg(test)]
 mod cve_tests;
+mod end;
+#[cfg(test)]
+mod end_tests;
 mod input;
 #[cfg(test)]
 mod input_tests;
@@ -36,6 +39,7 @@ mod spec_edit_tests;
 pub use bugzilla::*;
 pub use bullet::*;
 pub use cve::*;
+pub use end::*;
 pub use input::*;
 pub use live::*;
 pub use lookup::*;
