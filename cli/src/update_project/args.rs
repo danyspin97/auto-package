@@ -209,6 +209,11 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false)]
     pub include_requested: bool,
 
+    /// `update`: read the open requests to each origin again, instead of the
+    /// list kept for an hour in the work directory (see `--include-requested`).
+    #[arg(long, default_value_t = false)]
+    pub refresh_requests: bool,
+
     /// Wait for this many GiB free on the work directory's disk before a
     /// package starts its heavy stages (0 = never wait).
     #[arg(long, default_value_t = 3)]

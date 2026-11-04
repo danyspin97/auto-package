@@ -16,6 +16,13 @@ use std::collections::HashMap;
 
 use super::*;
 use ap_build::version::{self, Scheme};
+use std::time::Duration;
+
+/// How long the open requests of an origin are kept. Short, and only a guide: a
+/// request opened or declined within the hour may be listed wrongly. So a skip
+/// is confirmed by reading that one request again (see [`confirm_open`]), and
+/// `--refresh-requests` reads the list again.
+const REQUEST_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// What the open requests say about one item.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -164,6 +171,48 @@ const SPEC_CAP: usize = 2 * 1024 * 1024;
 
 /// The `Version:` the source of `r` has at the revision the request carries. The
 /// spec is the one the source's listing holds, as the convention picks it.
+/// The open requests to `project`, from the list kept for [`REQUEST_TTL`] or
+/// read from OBS. A failed read is not kept.
+fn read_requests(
+    project: &str,
+    refresh: bool,
+    emit: Emit<'_>,
+) -> Result<Vec<osc::OpenRequest>, String> {
+    let key = format!("requests:{project}");
+    let fetch = || {
+        let all = osc::open_requests_to_project(project, emit).map_err(|e| e.to_string())?;
+        encode_requests(&all)
+    };
+    let cache = |refresh: bool, fetch: &dyn Fn() -> Result<String, String>| {
+        ap_build::upstream_cache::lookup_with_ttl(&key, REQUEST_TTL, refresh, fetch)
+    };
+    kept_requests(&cache, refresh, &fetch)
+}
+
+/// The list kept under a key, read through `cache` (which returns the kept text,
+/// reading `fetch` when it has none or `refresh` asks). A kept text that does not
+/// decode is a miss: it is read again once, and that answer is kept in its place.
+fn kept_requests(
+    cache: &dyn Fn(bool, &dyn Fn() -> Result<String, String>) -> Result<String, String>,
+    refresh: bool,
+    fetch: &dyn Fn() -> Result<String, String>,
+) -> Result<Vec<osc::OpenRequest>, String> {
+    match decode_requests(&cache(refresh, fetch)?) {
+        Ok(all) => Ok(all),
+        Err(_) => decode_requests(&cache(true, fetch)?),
+    }
+}
+
+/// The kept form of a list of requests.
+fn encode_requests(all: &[osc::OpenRequest]) -> Result<String, String> {
+    serde_json::to_string(all).map_err(|e| e.to_string())
+}
+
+/// The list of requests a kept entry holds; an unreadable one is an error.
+fn decode_requests(text: &str) -> Result<Vec<osc::OpenRequest>, String> {
+    serde_json::from_str(text).map_err(|e| format!("the kept list of requests is unreadable: {e}"))
+}
+
 fn source_version(r: &osc::OpenRequest, emit: Emit<'_>) -> Result<String, String> {
     let rev = r.source_rev.as_deref();
     let listing = osc::package_entries_at_revision(&r.source_project, &r.source_package, rev, emit)
@@ -217,7 +266,7 @@ pub(super) fn settled_as_requested(
     let requests = open.to_package(
         &item.origin,
         &item.pkg,
-        &|origin| osc::open_requests_to_project(origin, emit).map_err(|e| e.to_string()),
+        &|origin| read_requests(origin, a.refresh_requests || a.refresh, emit),
         &|w| ctx.warn(w),
     );
     let verdict = decide(item, a, requests.ok_or("not read"), &|r| {

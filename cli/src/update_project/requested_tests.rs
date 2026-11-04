@@ -230,6 +230,44 @@ fn a_spec_version_is_cleaned_and_a_huge_spec_is_refused() {
 }
 
 #[test]
+fn a_kept_list_of_requests_reads_back_as_it_was_written() {
+    let all = parse(&[request("0", "new", BRANCH, "submit")]);
+    let text = encode_requests(&all).unwrap();
+    assert_eq!(decode_requests(&text).unwrap(), all);
+    assert!(decode_requests("[{broken").is_err());
+}
+
+#[test]
+fn a_kept_list_that_does_not_decode_is_read_again_once() {
+    let all = parse(&[request("0", "new", BRANCH, "submit")]);
+    let fresh = encode_requests(&all).unwrap();
+    let reads = Cell::new(0);
+    let fetch = || {
+        reads.set(reads.get() + 1);
+        Ok(fresh.clone())
+    };
+    let corrupt = |refresh: bool, fetch: &dyn Fn() -> Result<String, String>| {
+        if refresh {
+            fetch()
+        } else {
+            Ok("[{broken".to_string())
+        }
+    };
+    assert_eq!(kept_requests(&corrupt, false, &fetch).unwrap(), all);
+    assert_eq!(reads.get(), 1);
+    let good = |_: bool, _: &dyn Fn() -> Result<String, String>| Ok(fresh.clone());
+    assert_eq!(kept_requests(&good, false, &fetch).unwrap(), all);
+    assert_eq!(reads.get(), 1, "a kept list that reads is not read again");
+}
+
+#[test]
+fn a_kept_request_with_a_missing_field_still_reads() {
+    let all = decode_requests(r#"[{"id":"7","state":"new"}]"#).unwrap();
+    assert_eq!(all[0].id, "7");
+    assert_eq!(all[0].target_package, "");
+}
+
+#[test]
 fn a_request_from_the_users_own_branch_project_counts() {
     let v = verdict(
         &item("1.0", "1.1"),

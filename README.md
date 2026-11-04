@@ -163,6 +163,8 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
   a devel project, where it turns the check off. Not for `--maintenance`.
 - `--include-requested`: also update a package that an open submit request
   already updates (see below). For a deliberate duplicate.
+- `--refresh-requests`: read the open submit requests again, not the list kept
+  for an hour in the work directory (see below).
 
 Packages are branched with the OBS branch API, without following a devel
 project, so the request goes back to the project named. A package that is
@@ -211,7 +213,8 @@ from another project, `--in-place`, `lint`, or `--maintenance`.
 
 Before a package is branched, `update` looks at the open submit requests (state
 new or review) to its origin, from anyone and from your own branch project too.
-They are read once per run, for the whole project. If one brings the planned
+They are read once per run, for the whole project, and the list is kept for an
+hour. If one brings the planned
 version or a newer one (the `Version:` of its source at the request's revision),
 the package is not branched: it is listed under "already requested" with the
 request and its creator. The request is read again before the skip is made, and

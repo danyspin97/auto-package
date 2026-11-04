@@ -5,6 +5,7 @@ use super::*;
 use crate::osc::error::*;
 use crate::osc::names::*;
 use crate::osc::query::*;
+use serde::{Deserialize, Serialize};
 
 /// A submit request to create.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,7 +116,8 @@ pub fn create_submit_request(sr: &SubmitRequest, emit: Emit<'_>) -> Result<Strin
 }
 
 /// A submit request found open on the server.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OpenRequest {
     pub id: String,
     pub source_project: String,
