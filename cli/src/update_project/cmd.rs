@@ -499,7 +499,7 @@ pub(super) fn cmd_update_project(
     build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
 
     if a.submit {
-        submit_requests(a, branch, &mut report.results, ctx).map_err(|e| eyre!("{e}"))?;
+        submit_requests(a, branch, &mut report.results, ctx)?;
     }
     Ok(())
 }

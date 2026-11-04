@@ -16,9 +16,9 @@ impl std::fmt::Display for AgentUnavailable {
 
 impl std::error::Error for AgentUnavailable {}
 
-/// A run refused before it started because it would submit with no terminal
-/// to confirm on, so nothing was submitted. `main` exits with
-/// `EXIT_NOT_SUBMITTED`.
+/// A run that submitted nothing on purpose: refused before it started because
+/// it would submit with no terminal to confirm on, or a `--yes` batch refused
+/// for a change that needs a review. `main` exits with `EXIT_NOT_SUBMITTED`.
 #[derive(Debug)]
 pub struct NotSubmitted(pub String);
 

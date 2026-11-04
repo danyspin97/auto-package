@@ -1,8 +1,23 @@
 use super::*;
 
+/// Why a maintenance run ended in an error: `Refused` when `--yes` refused
+/// every change that was due and none was sent (the run submitted nothing),
+/// `Failed` for any other error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunError {
+    Refused(String),
+    Failed(String),
+}
+
+impl From<String> for RunError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
 /// `update --maintenance` / `lint --maintenance` with the [`StreamCheck`] of
 /// the options (see [`run_with`]).
-pub fn run(opts: &Options, host: &mut Host<'_>) -> Result<(), String> {
+pub fn run(opts: &Options, host: &mut Host<'_>) -> Result<(), RunError> {
     let check = stream_check_for(opts);
     run_with(opts, host, check.as_ref())
 }
@@ -30,9 +45,13 @@ pub fn run_with(
     opts: &Options,
     host: &mut Host<'_>,
     check: &dyn StreamCheck,
-) -> Result<(), String> {
+) -> Result<(), RunError> {
     if opts.packages.is_empty() {
-        return Err("a maintenance request is per package: pass --only PKG[,PKG...]".to_string());
+        return Err(
+            "a maintenance request is per package: pass --only PKG[,PKG...]"
+                .to_string()
+                .into(),
+        );
     }
     validate_mode(
         opts.mode,
@@ -81,7 +100,7 @@ pub fn run_with(
     if opts.branch_project.is_some() && chosen.len() > 1 {
         return Err(
             "--branch-project names one project, but each code stream is built in its own: drop it, or pick one code stream"
-                .to_string(),
+                .to_string().into(),
         );
     }
 
@@ -140,7 +159,8 @@ pub fn run_with(
             (None, None) => {
                 return Err(
                     "could not read the OBS user to name the branch project; pass --branch-project"
-                        .to_string(),
+                        .to_string()
+                        .into(),
                 );
             }
         };
@@ -161,7 +181,8 @@ pub fn run_with(
                 None => {
                     return Err(format!(
                         "{project} does not have the package and links to no project that does"
-                    ));
+                    )
+                    .into());
                 }
             }
         };
@@ -266,6 +287,8 @@ pub fn run_with(
     }
 
     let mut failures: Vec<String> = Vec::new();
+    // How many of `failures` are `--yes` refusals.
+    let mut refused = 0usize;
     for (i, pkg) in opts.packages.iter().enumerate() {
         let mut ready: Vec<Ready> = Vec::new();
         for t in &targets {
@@ -357,6 +380,7 @@ pub fn run_with(
                     ),
                 });
             }
+            refused += ready.len();
             continue;
         }
         if !opts.yes && !(host.confirm)(&format!("Create the maintenance request for {pkg}?")) {
@@ -444,9 +468,26 @@ pub fn run_with(
             }
         }
     }
+    end_of_run(&reports, failures, refused)
+}
+
+/// The end of a run: `refused` of the `failures` are `--yes` refusals. When
+/// every failure is one and no stream is in a request, nothing was sent, so the
+/// run is `Refused`; any other failure is `Failed`.
+pub(super) fn end_of_run(
+    reports: &[Vec<StreamReport>],
+    failures: Vec<String>,
+    refused: usize,
+) -> Result<(), RunError> {
+    let sent = reports
+        .iter()
+        .flatten()
+        .any(|rep| matches!(rep.outcome, StreamOutcome::Ready(_)));
     if failures.is_empty() {
         Ok(())
+    } else if refused == failures.len() && !sent {
+        Err(RunError::Refused(failures.join("; ")))
     } else {
-        Err(failures.join("; "))
+        Err(RunError::Failed(failures.join("; ")))
     }
 }

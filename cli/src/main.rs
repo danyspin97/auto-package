@@ -40,7 +40,8 @@ Exit status:
   3    fix: no fix needed, or none found
   4    fix: a maintainer must decide
   5    not submitted: --submit or --maintenance with no terminal to confirm on
-       (pass --yes, or run it from a terminal)
+       (pass --yes, or run it from a terminal), or --yes refused a batch
+       with a change that needs a review (run without --yes to see it)
   75   agent unavailable: claude is not logged in (run `claude`, `/login`,
        then re-run)
   130  interrupted (Ctrl-C or SIGTERM)

@@ -171,7 +171,7 @@ pub(super) fn submit_requests(
     branch: &str,
     results: &mut [ItemResult],
     ctx: &Ctx<'_>,
-) -> Result<(), String> {
+) -> color_eyre::Result<()> {
     let emit = Emit::run(ctx.reporter.as_ref());
     let mut pending: Vec<(usize, osc::SubmitRequest)> = Vec::new();
     for (idx, r) in results.iter_mut().enumerate() {
@@ -219,7 +219,7 @@ pub(super) fn submit_requests(
         for line in &lines {
             ctx.warn(line.clone());
         }
-        return Err(lines[0].clone());
+        return Err(refused_by_yes(&lines));
     }
     if !a.yes && !confirm(&format!("Create {} submit request(s)?", pending.len()), ctx) {
         for (idx, _) in &pending {
@@ -307,4 +307,10 @@ pub(super) fn yes_refusal(yes: bool, gate: &ReviewGate) -> Option<Vec<String>> {
         lines.extend(gate.unreadable.iter().map(|u| format!("  {u}")));
     }
     Some(lines)
+}
+
+/// The error of a batch that `--yes` refused (`lines` from `yes_refusal`): a
+/// `NotSubmitted`, so `main` exits 5 and nothing was submitted.
+pub(super) fn refused_by_yes(lines: &[String]) -> color_eyre::Report {
+    crate::session::NotSubmitted(lines[0].clone()).into()
 }

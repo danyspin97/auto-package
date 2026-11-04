@@ -429,6 +429,30 @@ fn a_maintenance_run_without_a_terminal_is_refused_before_it_starts() {
 }
 
 #[test]
+fn a_batch_that_yes_refused_exits_as_not_submitted() {
+    // `submit_requests` returns `refused_by_yes` when `yes_refusal` says so;
+    // any other error stays ordinary.
+    let gate = ReviewGate {
+        needing: vec![("python-foo".to_string(), vec!["RISK: x".to_string()])],
+        ..Default::default()
+    };
+    let lines = yes_refusal(true, &gate).expect("refused");
+    let refused = refused_by_yes(&lines);
+    assert!(
+        refused
+            .downcast_ref::<crate::session::NotSubmitted>()
+            .is_some()
+    );
+    assert!(refused.to_string().contains("--yes refuses to submit"));
+    let failed = color_eyre::eyre::eyre!("osc timed out");
+    assert!(
+        failed
+            .downcast_ref::<crate::session::NotSubmitted>()
+            .is_none()
+    );
+}
+
+#[test]
 fn nvidia_redist_is_off_unless_asked() {
     assert!(!args(&[]).nvidia_redist && args(&[]).nvidia.is_none());
     assert!(args(&["--nvidia-redist"]).nvidia_redist);

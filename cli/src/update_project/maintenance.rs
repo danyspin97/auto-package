@@ -158,5 +158,8 @@ pub(super) fn run_maintenance(
     if !summaries.is_empty() {
         *summary = Some(summaries.join("\n"));
     }
-    result.map_err(|e| eyre!(e))
+    result.map_err(|e| match e {
+        maintenance::RunError::Refused(message) => crate::session::NotSubmitted(message).into(),
+        maintenance::RunError::Failed(message) => eyre!(message),
+    })
 }

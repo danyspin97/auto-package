@@ -521,3 +521,28 @@ pub(super) fn a_running_incident_is_named_as_one() {
     let w = devel_warning("L:Update", "curl", &("S:Update".into(), "curl".into()));
     assert!(w.contains("a fix normally goes to that code stream"), "{w}");
 }
+
+#[test]
+fn a_run_of_only_yes_refusals_sends_nothing_and_is_refused() {
+    let refusal = |stream: &str| StreamReport {
+        stream: stream.into(),
+        outcome: StreamOutcome::Failed(
+            "--yes refuses to submit a change that needs a review".into(),
+        ),
+    };
+    let failures = vec!["python-foo in SLE: --yes refuses".to_string()];
+    assert_eq!(
+        end_of_run(&[vec![refusal("SLE")]], failures.clone(), 1),
+        Err(RunError::Refused(failures[0].clone()))
+    );
+    // A stream that went into a request means something was sent: a failure.
+    let ready = StreamReport {
+        stream: "SLE-2".into(),
+        outcome: StreamOutcome::Ready("applied cleanly".into()),
+    };
+    assert_eq!(
+        end_of_run(&[vec![refusal("SLE"), ready]], failures.clone(), 1),
+        Err(RunError::Failed(failures[0].clone()))
+    );
+    assert_eq!(end_of_run(&[], Vec::new(), 0), Ok(()));
+}
