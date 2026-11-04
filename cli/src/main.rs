@@ -294,6 +294,7 @@ enum Commands {
     /// Replace the one occurrence of a byte sequence in a file under the new
     /// sources, byte for byte: the refresh turn's helper for a file its Edit
     /// tool refuses as not UTF-8. Run from the workspace.
+    #[command(hide = true)]
     EditBytes(edit_bytes::EditBytesArgs),
 
     /// Manage the signing keys of a package's keyring (see `keyring accept`).

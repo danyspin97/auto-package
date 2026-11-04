@@ -573,6 +573,14 @@ fn the_help_lists_the_exit_codes_the_run_returns() {
 }
 
 #[test]
+fn the_edit_bytes_helper_is_hidden_from_the_help() {
+    use clap::CommandFactory;
+    let cmd = crate::Cli::command();
+    assert!(cmd.find_subcommand("edit-bytes").unwrap().is_hide_set());
+    assert!(!cmd.find_subcommand("explain").unwrap().is_hide_set());
+}
+
+#[test]
 fn the_command_definitions_are_consistent() {
     use clap::CommandFactory;
     crate::Cli::command().debug_assert();
