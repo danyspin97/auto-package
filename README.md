@@ -161,6 +161,8 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
 - `--deprecated`: include the packages of SOURCE whose openSUSE:Factory package
   names another devel project (see below). Also use it for a SOURCE that is not
   a devel project, where it turns the check off. Not for `--maintenance`.
+- `--include-requested`: also update a package that an open submit request
+  already updates (see below). For a deliberate duplicate.
 
 Packages are branched with the OBS branch API, without following a devel
 project, so the request goes back to the project named. A package that is
@@ -206,6 +208,20 @@ does not have, a Factory package whose meta names no devel project, and a failed
 read are not skipped, so a package Factory has dropped is not detected. Only
 `update` of a source other than openSUSE:Factory checks this: not a dependency
 from another project, `--in-place`, `lint`, or `--maintenance`.
+
+Before a package is branched, `update` looks at the open submit requests (state
+new or review) to its origin, from anyone and from your own branch project too.
+They are read once per run, for the whole project. If one brings the planned
+version or a newer one (the `Version:` of its source at the request's revision),
+the package is not branched: it is listed under "already requested" with the
+request and its creator. The request is read again before the skip is made, and
+only a request still open then skips; a failed re-read does not skip. A request
+that brings an older version is only noted in the plan. Declined, revoked and
+superseded requests and requests that are not submits are ignored, and a failed
+read is warned about once and skips nothing. Pass `--include-requested` to turn
+the check off. It is made for an upgrade in a plain `update` only: not for
+`lint`, `--in-place` or `--maintenance`. The `Epoch:` of a request is not
+compared: the planner has none.
 
 An origin with a broken `_link` or no spec file is reported with its cause,
 listed under "needs the maintainer", and not branched; an origin whose spec
