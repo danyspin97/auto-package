@@ -225,7 +225,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     });
     if !a.dry_run {
         *summary = Some(format!(
-            "{}{}{}",
+            "{}{}{}{}",
             print_run_summary(
                 &memory,
                 &branch_project,
@@ -241,6 +241,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
                 &report.maintainer,
                 a.submit
             ),
+            up::requested_section(&report.requested),
             up::arch_section(&report.arch),
         ));
     }

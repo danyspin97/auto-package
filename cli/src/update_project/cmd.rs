@@ -480,6 +480,9 @@ pub(super) fn cmd_update_project(
         }) {
             ctx.say(line);
         }
+        for line in up::requested_lines(&report.requested) {
+            ctx.say(line);
+        }
         report.paths.clear();
         return Ok(());
     }

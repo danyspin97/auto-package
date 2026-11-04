@@ -202,6 +202,13 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false)]
     pub deprecated: bool,
 
+    /// `update`: also update a package that an open submit request to its
+    /// origin already updates (new or in review, from anyone, the branch
+    /// project included). Without this flag such a package is listed as
+    /// already requested and not branched. For a deliberate duplicate.
+    #[arg(long, default_value_t = false)]
+    pub include_requested: bool,
+
     /// Wait for this many GiB free on the work directory's disk before a
     /// package starts its heavy stages (0 = never wait).
     #[arg(long, default_value_t = 3)]

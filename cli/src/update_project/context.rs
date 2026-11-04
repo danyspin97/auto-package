@@ -12,6 +12,8 @@ pub(super) struct Report {
     pub(super) arch: Vec<ap_build::arch_check::ArchRow>,
     /// Packages stopped for the maintainer, with the reason (not a failure).
     pub(super) maintainer: Vec<String>,
+    /// Packages an open submit request already updates, with the reason.
+    pub(super) requested: Vec<String>,
 }
 
 /// What the build needs from `run`'s setup.

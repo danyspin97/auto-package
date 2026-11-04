@@ -247,6 +247,26 @@ pub fn arch_section(rows: &[ArchRow]) -> String {
     out
 }
 
+/// The packages left out because an open submit request already updates them:
+/// information, not a failure and not a maintainer's decision. Empty when there
+/// are none.
+pub fn requested_lines(requested: &[String]) -> Vec<String> {
+    if requested.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![format!("already requested ({}):", requested.len())];
+    out.extend(requested.iter().map(|r| format!("  {r}")));
+    out
+}
+
+/// [`requested_lines`] as a section of the end-of-run summary.
+pub fn requested_section(requested: &[String]) -> String {
+    requested_lines(requested)
+        .into_iter()
+        .map(|l| l + "\n")
+        .collect()
+}
+
 /// The end-of-run summary.
 pub fn summary_text(
     branch_project: &str,

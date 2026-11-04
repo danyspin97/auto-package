@@ -497,3 +497,14 @@ fn a_broken_link_is_listed_under_needs_the_maintainer_and_is_no_failure() {
     );
     assert!(text.contains("failed (0):"), "{text}");
 }
+
+#[test]
+fn the_already_requested_section_is_listed_only_when_there_is_one() {
+    assert!(requested_lines(&[]).is_empty());
+    assert_eq!(requested_section(&[]), "");
+    let one = ["foo: submit request 7 (new, by u) already brings 2.0 to foo".to_string()];
+    assert_eq!(
+        requested_section(&one),
+        "already requested (1):\n  foo: submit request 7 (new, by u) already brings 2.0 to foo\n"
+    );
+}
