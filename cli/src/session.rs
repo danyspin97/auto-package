@@ -40,8 +40,7 @@ pub(super) fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     // printing anything, or it lands in that state. Done before the wait, so
     // a second Ctrl-C is a signal again and not a keypress nobody reads.
     if tui_active {
-        let _ = crossterm::terminal::disable_raw_mode();
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+        tui::restore_terminal();
     }
     let writing = ap_build::proc::obs_writes_in_flight();
     if writing > 0 {

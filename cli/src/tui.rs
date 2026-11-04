@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{self, Event as TermEvent, KeyCode},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{EnterAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     Frame, Terminal,

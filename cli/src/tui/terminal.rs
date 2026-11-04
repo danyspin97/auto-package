@@ -38,9 +38,31 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        restore_if_taken(&TERMINAL_TAKEN, || {
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen);
-        });
+        restore_terminal();
     }
+}
+
+/// The bytes that leave the alternate screen and show the cursor, in the order
+/// they are written.
+pub(crate) fn restore_sequence() -> Vec<u8> {
+    let mut out = Vec::new();
+    let _ = crossterm::queue!(
+        out,
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
+    out
+}
+
+/// Puts the terminal back as the shell had it: raw mode off, then the
+/// alternate screen left and the cursor shown, flushed before anything else is
+/// printed. Does nothing when the TUI never took the terminal.
+pub fn restore_terminal() {
+    restore_if_taken(&TERMINAL_TAKEN, || {
+        let _ = disable_raw_mode();
+        use std::io::Write as _;
+        let mut out = io::stdout();
+        let _ = out.write_all(&restore_sequence());
+        let _ = out.flush();
+    });
 }
