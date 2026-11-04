@@ -1,4 +1,6 @@
-use super::changes_normalise::{normalise_file, normalise_unpublished_entries};
+use super::changes_normalise::{
+    normalise_file, normalise_unpublished_entries, normalise_with_notes,
+};
 
 const SEP: &str = "-------------------------------------------------------------------\n";
 
@@ -212,19 +214,98 @@ fn a_version_with_a_suffix_is_the_same_release() {
 }
 
 #[test]
-fn an_older_unpublished_entry_for_the_same_version_is_a_duplicate() {
+fn older_unpublished_entries_for_one_version_are_merged() {
+    // The newest entry's header stays; the bullets of both follow, the older
+    // one's first; the bullet they share is kept once.
     let branch = format!(
         "{}{}",
         entry(
             "Wed Nov  4 13:08:52 UTC 2026 - A <a@b.c>",
-            "- Update to 5.4\n- Refresh a.patch"
+            "- Update to 5.4\n- Refresh a.patch\n- Fix the build"
         ),
-        entry(HEADER, "- Update to 5.4\n- Refresh b.patch"),
+        entry(
+            HEADER,
+            "- Update to 5.4\n- Refresh b.patch\n- Fix the build"
+        ),
     );
     let out = normalise_unpublished_entries("", &branch, "5.4", "pkg").unwrap();
-    assert!(out.contains("a.patch"), "{out}");
-    assert!(!out.contains("b.patch"), "{out}");
-    assert_eq!(out.matches("Update to 5.4").count(), 1);
+    assert_eq!(out.matches("Update to 5.4").count(), 1, "{out}");
+    assert_eq!(out.matches("Fix the build").count(), 1, "{out}");
+    assert!(out.contains("Wed Nov  4 13:08:52"), "{out}");
+    assert!(!out.contains("Mon Nov  2"), "{out}");
+    assert!(
+        out.contains(
+            "- Update to 5.4\n- Refresh patches:\n  * b.patch\n  * a.patch\n- Fix the build\n"
+        ),
+        "{out}"
+    );
+    assert_eq!(normalise_unpublished_entries("", &out, "5.4", "pkg"), None);
+}
+
+/// The branch of debugedit after a rerun of update: the empty 5.4 entry of the
+/// rerun on top, the 5.3 entry that lint rebased onto, then the first 5.4 one.
+const DEBUGEDIT_RERUN: &str = "\
+-------------------------------------------------------------------
+Wed Nov  4 13:39:02 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+
+- Update to 5.4
+
+-------------------------------------------------------------------
+Wed Nov  4 13:08:52 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+
+- Update to 5.3
+
+-------------------------------------------------------------------
+Mon Nov  2 16:38:10 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+
+- Update to 5.4
+  * No upstream changelog found or provided
+- Refresh debuginfo-mono.patch
+- Refresh debuglink.patch
+- Refresh debugsubpkg.patch
+- Refresh finddebuginfo-absolute-links.patch
+- Refresh workaround-missing-linked-file.patch
+- Require libxxhash 0.8.0 or newer, as configure.ac now demands
+- Add gdb and dwz BuildRequires, which configure needs for
+  find-debuginfo
+
+-------------------------------------------------------------------
+Mon Sep 28 12:52:34 UTC 2026 - Andrea Manzini <andrea.manzini@suse.com>
+
+- Update to 5.3:
+  * Support files with more than 65280 ELF sections.
+- Rebase finddebuginfo.patch.
+- Add BuildRequires on gcc, gcc-c++, and make.
+";
+
+#[test]
+fn the_rerun_entries_of_one_version_become_one_entry() {
+    let out = normalise_unpublished_entries(ORIGIN, DEBUGEDIT_RERUN, "5.4", "debugedit").unwrap();
+    let want = "\
+-------------------------------------------------------------------
+Wed Nov  4 13:39:02 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+
+- Update to 5.4
+- Refresh patches:
+  * debuginfo-mono.patch
+  * debuglink.patch
+  * debugsubpkg.patch
+  * finddebuginfo-absolute-links.patch
+  * workaround-missing-linked-file.patch
+
+";
+    assert!(out.starts_with(want), "{out}");
+    assert!(out.ends_with(ORIGIN), "{out}");
+    assert_eq!(out.matches("Update to 5.4").count(), 1, "{out}");
+    assert!(!out.contains("Nov  4 13:08"), "{out}");
+    assert!(!out.contains("libxxhash"), "{out}");
+    assert!(!out.contains("dwz"), "{out}");
+    assert!(!out.contains("No upstream"), "{out}");
+    // Normalising the result again changes nothing.
+    assert_eq!(
+        normalise_unpublished_entries(ORIGIN, &out, "5.4", "debugedit"),
+        None
+    );
 }
 
 #[test]
@@ -249,14 +330,9 @@ fn a_macro_version_changes_nothing_in_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("debugedit.changes");
     std::fs::write(&file, DEBUGEDIT_BRANCH).unwrap();
-    assert!(!normalise_file(
-        &file,
-        ORIGIN,
-        Some("%{upstream}"),
-        "debugedit"
-    ));
+    assert!(normalise_file(&file, ORIGIN, Some("%{upstream}"), "debugedit").is_empty());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), DEBUGEDIT_BRANCH);
-    assert!(!normalise_file(&file, ORIGIN, None, "debugedit"));
+    assert!(normalise_file(&file, ORIGIN, None, "debugedit").is_empty());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), DEBUGEDIT_BRANCH);
 }
 
@@ -265,7 +341,131 @@ fn a_changed_file_is_written_back() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("debugedit.changes");
     std::fs::write(&file, DEBUGEDIT_BRANCH).unwrap();
-    assert!(normalise_file(&file, ORIGIN, Some("5.3"), "debugedit"));
+    assert!(!normalise_file(&file, ORIGIN, Some("5.3"), "debugedit").is_empty());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), ORIGIN);
-    assert!(!normalise_file(&file, ORIGIN, Some("5.3"), "debugedit"));
+    assert!(normalise_file(&file, ORIGIN, Some("5.3"), "debugedit").is_empty());
+}
+
+#[test]
+fn the_run_reports_what_it_did() {
+    let (text, notes) = normalise_with_notes(ORIGIN, DEBUGEDIT_RERUN, "5.4", "debugedit");
+    assert!(text.is_some());
+    assert!(notes.merged && notes.placeholder, "{notes:?}");
+    assert_eq!(notes.stale_newest, None);
+}
+
+#[test]
+fn a_repeated_update_bullet_keeps_its_recap_lines_once() {
+    let branch = entry(
+        HEADER,
+        "- Update to 5.4\n  * a\n- Refresh x.patch\n- Update to 5.4:\n  * b\n  * a",
+    );
+    let out = normalise_unpublished_entries("", &branch, "5.4", "pkg").unwrap();
+    assert!(
+        out.contains("- Update to 5.4\n  * a\n  * b\n- Refresh x.patch\n"),
+        "{out}"
+    );
+    assert_eq!(out.matches("Update to 5.4").count(), 1, "{out}");
+}
+
+#[test]
+fn the_flags_and_recap_of_an_older_entry_do_not_come_back() {
+    let newer = entry(
+        "Wed Nov  4 13:08:52 UTC 2026 - A <a@b.c>",
+        "- Update to 5.4\n  * recap new\n  FLAG: tests skipped: y",
+    );
+    let older = entry(
+        HEADER,
+        "- Update to 5.4\n  * recap old\n  FLAG: tests skipped: x\n- Fix the build",
+    );
+    let out = normalise_unpublished_entries("", &format!("{newer}{older}"), "5.4", "pkg").unwrap();
+    assert!(
+        out.contains("- Update to 5.4\n  * recap new\n  FLAG: tests skipped: y\n- Fix the build\n"),
+        "{out}"
+    );
+    assert!(!out.contains("recap old"), "{out}");
+    assert!(!out.contains("tests skipped: x"), "{out}");
+    // The newest entry has no flag now (the tests pass): an older one's does
+    // not come back either.
+    let newer = entry(
+        "Wed Nov  4 13:08:52 UTC 2026 - A <a@b.c>",
+        "- Update to 5.4",
+    );
+    let out = normalise_unpublished_entries("", &format!("{newer}{older}"), "5.4", "pkg").unwrap();
+    assert!(!out.contains("FLAG"), "{out}");
+    assert!(out.contains("- Fix the build"), "{out}");
+}
+
+#[test]
+fn a_newer_entry_that_names_another_version_too_is_still_merged() {
+    // The newest entry names 5.3 as well: its 5.3 bullet goes, the entry stays
+    // a 5.4 one, and the older 5.4 entry is not dropped with it.
+    let newer = entry(
+        "Wed Nov  4 13:08:52 UTC 2026 - A <a@b.c>",
+        "- Update to 5.4\n- Update to 5.3\n  * old recap\n- Fix the build",
+    );
+    let older = entry(HEADER, "- Update to 5.4\n- Refresh b.patch");
+    let out = normalise_unpublished_entries("", &format!("{newer}{older}"), "5.4", "pkg").unwrap();
+    assert!(!out.contains("5.3"), "{out}");
+    assert!(!out.contains("old recap"), "{out}");
+    assert!(
+        out.contains("- Update to 5.4\n- Refresh b.patch\n- Fix the build\n"),
+        "{out}"
+    );
+    assert_eq!(out.matches("Update to 5.4").count(), 1, "{out}");
+}
+
+#[test]
+fn the_newest_entry_is_kept_with_a_warning_when_it_is_another_release() {
+    let newer = entry(
+        "Wed Nov  4 13:08:52 UTC 2026 - A <a@b.c>",
+        "- Update to 5.4\n- Refresh n.patch",
+    );
+    let older = entry(HEADER, "- Update to 5.2\n- Refresh o.patch");
+    let (text, notes) = normalise_with_notes("", &newer, "5.3", "pkg");
+    assert_eq!(text, None);
+    assert_eq!(notes.stale_newest.as_deref(), Some("5.4"));
+    // An older entry for another release is dropped, the newest one stays.
+    let (text, _) = normalise_with_notes("", &format!("{newer}{older}"), "5.3", "pkg");
+    let text = text.unwrap();
+    assert!(text.contains("Refresh n.patch"), "{text}");
+    assert!(!text.contains("5.2"), "{text}");
+}
+
+#[test]
+fn an_rc_spelling_of_the_spec_version_is_not_stale() {
+    let newer = entry(
+        "Wed Nov  4 13:08:52 UTC 2026 - A <a@b.c>",
+        "- Update to 3.1\n- Refresh n.patch",
+    );
+    let older = entry(HEADER, "- Update to 3.0rc1\n- Fix the build");
+    // Nothing changes: the older entry is the spec's release, spelt differently,
+    // so it is kept as it is (and the newest one is kept with a warning).
+    let (text, notes) = normalise_with_notes("", &format!("{newer}{older}"), "3.0~rc1", "pkg");
+    assert_eq!(text, None);
+    assert_eq!(notes.stale_newest.as_deref(), Some("3.1"));
+}
+
+#[test]
+fn a_grouped_refresh_keeps_its_other_continuation_lines() {
+    let branch = entry(
+        HEADER,
+        "- Update to 5.4\n- Refresh patches:\n  * a.patch\n  (rebased on 5.4)\n- Refresh b.patch",
+    );
+    let out = normalise_unpublished_entries("", &branch, "5.4", "pkg").unwrap();
+    assert!(
+        out.contains("- Refresh patches:\n  * a.patch\n  * b.patch\n  (rebased on 5.4)\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_crlf_merge_stays_crlf() {
+    let branch = DEBUGEDIT_RERUN.replace('\n', "\r\n");
+    let out = normalise_unpublished_entries(ORIGIN, &branch, "5.4", "debugedit").unwrap();
+    assert!(
+        out.contains("- Update to 5.4\r\n- Refresh patches:\r\n"),
+        "{out:?}"
+    );
+    assert!(!out.replace("\r\n", "").contains('\n'), "{out:?}");
 }

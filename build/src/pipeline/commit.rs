@@ -189,7 +189,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     osc::rewrite_unpublished_entry(&ctx.checkout_dir, &baseline);
     // A package may hold unpublished entries of an earlier run (an update or
     // a lint): they are normalised against its origin's.
-    if osc::normalise_unpublished_changes(
+    for message in osc::normalise_unpublished_changes(
         &ctx.checkout_dir,
         &ctx.config.project,
         &ctx.obs_name,
@@ -197,10 +197,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     ) {
         ctx.reporter.report(&Event::Warning {
             step: Some(commit_step.id),
-            message: format!(
-                "{}: normalised the unpublished entries of its .changes",
-                ctx.rpm_name
-            ),
+            message: format!("{}: {message}", ctx.rpm_name),
         });
     }
     osc::wrap_unpublished_changes(&ctx.checkout_dir);
