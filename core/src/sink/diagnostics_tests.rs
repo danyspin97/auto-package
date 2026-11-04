@@ -85,3 +85,20 @@ fn lines_are_appended_to_the_diagnostics_file() {
     assert_eq!(text, "warning: kept\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn lines_recorded_before_the_file_is_attached_are_written_to_it() {
+    let dir = std::env::temp_dir().join(format!("ap-diag-early-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("diagnostics.log");
+    let _ = std::fs::remove_file(&file);
+    let mut d = Diagnostics::default();
+    d.offer("warning: early", false);
+    d.offer("note: early too", false);
+    assert!(!file.exists());
+    d.attach_file(&file);
+    d.offer("warning: later", true);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(text, "warning: early\nnote: early too\nwarning: later\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}

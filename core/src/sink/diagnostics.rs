@@ -35,8 +35,10 @@ pub(crate) struct Diagnostics {
     pub(crate) keys: HashSet<String>,
     /// Lines held while the TUI owned the terminal, in the order first seen.
     pub(crate) held: Vec<String>,
-    /// The run's diagnostics file, when the run has one.
+    /// The run's diagnostics file, once the run has one.
     pub(crate) file: Option<PathBuf>,
+    /// Lines recorded before the file was attached; written to it on attach.
+    pub(crate) early: Vec<String>,
     /// Whether debug lines print (`--log debug` or finer).
     pub(crate) debug: bool,
 }
@@ -71,13 +73,26 @@ impl Diagnostics {
         }
     }
 
-    fn record(&self, line: &str) {
-        let Some(path) = &self.file else {
-            return;
-        };
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{line}");
+    /// Appends a line to the diagnostics file, or keeps it until one is attached.
+    fn record(&mut self, line: &str) {
+        match &self.file {
+            Some(path) => append_line(path, line),
+            None => self.early.push(line.to_string()),
         }
+    }
+
+    /// Points the diagnostics at `path` and writes the lines recorded before it.
+    pub(crate) fn attach_file(&mut self, path: &Path) {
+        for line in std::mem::take(&mut self.early) {
+            append_line(path, &line);
+        }
+        self.file = Some(path.to_path_buf());
+    }
+}
+
+fn append_line(path: &Path, line: &str) {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
     }
 }
 
@@ -108,7 +123,7 @@ fn with<T>(f: impl FnOnce(&mut Diagnostics) -> T) -> T {
 
 /// Points the diagnostics at the run's file; lines are appended to it.
 pub fn set_diagnostics_file(path: &Path) {
-    with(|d| d.file = Some(path.to_path_buf()));
+    with(|d| d.attach_file(path));
 }
 
 /// Sets whether debug lines print (`--log debug` and finer).
