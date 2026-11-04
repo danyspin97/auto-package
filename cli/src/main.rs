@@ -345,6 +345,9 @@ fn main() -> color_eyre::Result<()> {
     // Printed after `run` returns so the TUI has restored the terminal, and
     // whether or not the run failed: a failed run is the one where the list of
     // what was built and what is still queued matters most.
+    for line in after_tui_lines(None, ap_core::sink::held_summary()) {
+        eprintln!("{line}");
+    }
     if let Some(text) = summary {
         print!("{text}");
     }
@@ -403,10 +406,10 @@ pub(crate) fn init_disk_guard(
 ) {
     ap_build::workspace::set_min_free_gb(min_free_gb);
     if let Some(warning) = ap_build::workspace::low_space_warning(work_dir) {
-        eprintln!("warning: {warning}");
+        ap_core::diag!("warning: {warning}");
     }
     for (name, outcome) in ap_build::pipeline::reconcile_state(&work_dir.join("state")) {
-        eprintln!("note: {name} was left unfinished; now {outcome}");
+        ap_core::diag!("note: {name} was left unfinished; now {outcome}");
     }
     // What OBS shows for the project, asked once for the reconcile and the self-check.
     let statuses = ap_build::osc::get_project_build_statuses(project, distro, arch).ok();
@@ -436,14 +439,14 @@ pub(crate) fn init_disk_guard(
                 )
             },
         ) {
-            eprintln!("note: {name}: {what}");
+            ap_core::diag!("note: {name}: {what}");
         }
     }
     // The self-check: what the checkouts, state.json and OBS disagree about.
     for finding in ap_build::doctor::run(&work_dir.join("state"), &work_dir.join(project), || {
         statuses
     }) {
-        eprintln!("warning: {finding}");
+        ap_core::diag!("warning: {finding}");
     }
 }
 mod run;
