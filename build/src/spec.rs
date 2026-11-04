@@ -76,6 +76,8 @@ mod cutlass_split_wheels_tests;
 
 #[cfg(test)]
 mod adopt_sources_tests;
+#[cfg(test)]
+mod declared_sources_tests;
 mod license;
 pub use license::*;
 

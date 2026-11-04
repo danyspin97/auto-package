@@ -71,6 +71,73 @@ pub fn parse_source_line(
     })
 }
 
+/// The macros a `SourceN:` value is expanded with: the spec's simple defines,
+/// `%{name}`, `%{version}` and `%{url}`. `None` when the header cannot be read.
+fn source_macros(spec: &str) -> Option<std::collections::HashMap<String, String>> {
+    let header = parse_header(spec)?;
+    let mut macros = collect_simple_defines(spec);
+    macros.insert("name".to_string(), header.name.clone());
+    macros.insert("version".to_string(), header.version.clone());
+    if let Some(url) = &header.url {
+        macros.insert("url".to_string(), url.clone());
+    }
+    Some(macros)
+}
+
+/// Twice: a define may be spelled with another.
+fn expand_twice(value: &str, macros: &std::collections::HashMap<String, String>) -> String {
+    let once = expand_simple_defines(value, macros);
+    expand_simple_defines(&once, macros)
+}
+
+/// The file name of every `SourceN:` of the spec, a web address or a plain
+/// file, after the expansion of [`expanded_source_lines`], in order; and
+/// apart, the values that still hold a `%` after it, whose file is not known.
+pub fn declared_source_files(spec: &str) -> (Vec<String>, Vec<String>) {
+    let Some(macros) = source_macros(spec) else {
+        return (Vec::new(), Vec::new());
+    };
+    let (mut files, mut unexpanded) = (Vec::new(), Vec::new());
+    for line in spec.lines() {
+        let Some(source) = parse_source_line(line, &["source"], |v| expand_twice(v, &macros))
+        else {
+            continue;
+        };
+        if source.url.contains('%') || source.file().contains('%') {
+            unexpanded.push(source.url);
+        } else if !source.file().is_empty() {
+            files.push(source.file().to_string());
+        }
+    }
+    (files, unexpanded)
+}
+
+/// The file names of the `SourceN:` lines that stand inside a `%if`, `%ifarch`
+/// or `%ifnarch`: they are only sources of some builds. Named like
+/// [`declared_source_files`].
+pub fn conditional_source_files(spec: &str) -> Vec<String> {
+    let Some(macros) = source_macros(spec) else {
+        return Vec::new();
+    };
+    let mut depth = 0usize;
+    let mut out = Vec::new();
+    for line in spec.lines() {
+        let t = line.trim_start();
+        if t.starts_with("%if") {
+            depth += 1;
+        } else if t.starts_with("%endif") {
+            depth = depth.saturating_sub(1);
+        } else if depth > 0
+            && let Some(source) = parse_source_line(line, &["source"], |v| expand_twice(v, &macros))
+            && !source.url.contains('%')
+            && !source.file().is_empty()
+        {
+            out.push(source.file().to_string());
+        }
+    }
+    out
+}
+
 /// Every `SourceN:` of the spec that is a web address, with `%{name}`,
 /// `%{version}`, `%{url}` and the spec's simple defines expanded.
 pub fn expanded_sources(spec: &str) -> Vec<SourceEntry> {
@@ -83,20 +150,10 @@ pub fn expanded_sources(spec: &str) -> Vec<SourceEntry> {
 /// [`expanded_sources`], each with the index (in `spec.lines()`) of the line
 /// that declares it.
 pub fn expanded_source_lines(spec: &str) -> Vec<(usize, SourceEntry)> {
-    let Some(header) = parse_header(spec) else {
+    let Some(macros) = source_macros(spec) else {
         return Vec::new();
     };
-    let mut macros = collect_simple_defines(spec);
-    macros.insert("name".to_string(), header.name.clone());
-    macros.insert("version".to_string(), header.version.clone());
-    if let Some(url) = &header.url {
-        macros.insert("url".to_string(), url.clone());
-    }
-    // Twice: a define may be spelled with another.
-    let expand = |value: &str| {
-        let once = expand_simple_defines(value, &macros);
-        expand_simple_defines(&once, &macros)
-    };
+    let expand = |value: &str| expand_twice(value, &macros);
     let mut out = Vec::new();
     for (at, line) in spec.lines().enumerate() {
         let Some(source) = parse_source_line(line, &["source"], expand) else {
