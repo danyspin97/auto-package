@@ -7,6 +7,7 @@ mod edit_bytes;
 mod explain_cmd;
 mod keyring;
 mod local_opts;
+mod notes_cmd;
 mod review_cmd;
 mod run_limits;
 mod tui;

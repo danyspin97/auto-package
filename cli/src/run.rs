@@ -557,20 +557,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             args.improve = true;
             update_project::run(args, summary)?
         }
-        Commands::Notes { name, notes_dir } => {
-            ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);
-            if ap_build::package_notes::path_for(&name).is_none() {
-                return Err(color_eyre::eyre::eyre!(
-                    "{name:?} is not a valid package name"
-                ));
-            }
-            let text = ap_build::package_notes::read(&name);
-            if text.is_empty() {
-                println!("no notes for {name} yet in {}", notes_dir.display());
-            } else {
-                print!("{text}");
-            }
-        }
+        Commands::Notes { name, notes_dir } => crate::notes_cmd::notes_command(&name, &notes_dir)?,
         Commands::Explain(args) => explain_cmd::run(&args)?,
         Commands::Review(_) => unreachable!("handled in main"),
         Commands::Baseline { command } => baseline_command(command)?,
