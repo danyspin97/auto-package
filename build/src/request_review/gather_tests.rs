@@ -20,7 +20,7 @@ const SP: &str = "home:dspinella:auto-package:branches:Base:System";
 const TP: &str = "Base:System";
 
 /// The fake OBS holding request 1394662.
-fn obs() -> FakeRequestObs {
+pub(super) fn obs() -> FakeRequestObs {
     let mut o = FakeRequestObs::default();
     o.request.insert("1394662".into(), REQUEST.into());
     let key =

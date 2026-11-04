@@ -62,6 +62,13 @@ ids! {
     SOURCE_SIGNATURE = "source.signature",
     SOURCE_SIGNATURE_NOT_CHECKED = "source.signature-not-checked",
     SOURCE_KEYRING_CHANGED = "source.keyring-changed",
+    BUILD_FAILED = "build.failed",
+    BUILD_FAILS_IN_TARGET_TOO = "build.fails-in-target-too",
+    BUILD_PENDING = "build.pending",
+    BUILD_NO_RESULTS = "build.no-results",
+    BUILD_STALE = "build.stale",
+    BUILD_DISABLED_ARCH = "build.disabled-arch",
+    BUILD_NOT_TESTABLE = "build.not-testable",
 }
 
 #[cfg(test)]
@@ -125,6 +132,13 @@ mod tests {
                 "source.signature",
                 "source.signature-not-checked",
                 "source.keyring-changed",
+                "build.failed",
+                "build.fails-in-target-too",
+                "build.pending",
+                "build.no-results",
+                "build.stale",
+                "build.disabled-arch",
+                "build.not-testable",
             ]
         );
         let mut sorted = ALL.to_vec();

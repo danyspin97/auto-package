@@ -5,6 +5,9 @@
 
 use serde::Serialize;
 
+pub mod build_check;
+#[cfg(test)]
+mod build_check_tests;
 pub mod changes_checks;
 #[cfg(test)]
 mod changes_checks_tests;
