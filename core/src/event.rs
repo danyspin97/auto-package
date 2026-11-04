@@ -316,6 +316,10 @@ pub struct ArchCheckResult {
     /// The same result fails in the origin project too.
     #[serde(default)]
     pub origin_fails: bool,
+    /// The origin project (Factory, for a port) has no result of the package
+    /// there, so the failure is a note and does not block a submit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub origin_missing: bool,
     /// The saved build log of a failure, when it was fetched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,

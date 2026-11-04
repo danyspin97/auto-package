@@ -34,6 +34,7 @@ fn arch_check_has_its_wire_form_and_old_logs_still_parse() {
             state: "failed".into(),
             detail: None,
             origin_fails: false,
+            origin_missing: false,
             log: None,
         }],
     };

@@ -265,6 +265,14 @@ fn arch_check_lines(v: &Value) -> Vec<String> {
                 };
                 line.push_str(&format!(" [also fails in {who}]"));
             }
+            if r["origin_missing"].as_bool() == Some(true) {
+                let who = if crate::arch_check::is_port_repo(r["repo"].as_str().unwrap_or("")) {
+                    "Factory"
+                } else {
+                    "the origin"
+                };
+                line.push_str(&format!(" [no result in {who}: not blocking]"));
+            }
             line
         })
         .collect()

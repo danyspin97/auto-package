@@ -417,7 +417,13 @@ fn the_arches_flag_is_validated_and_the_rows_become_events() {
     let ev = arch::event_result(&row);
     assert_eq!(ev.state, "failed");
     assert_eq!(ev.detail.as_deref(), Some("boom"));
-    assert!(ev.origin_fails);
+    assert!(ev.origin_fails && !ev.origin_missing);
+    let missing = ArchRow {
+        baseline: BaselineState::NoResult,
+        ..row
+    };
+    let ev = arch::event_result(&missing);
+    assert!(ev.origin_missing && !ev.origin_fails);
 }
 
 #[test]

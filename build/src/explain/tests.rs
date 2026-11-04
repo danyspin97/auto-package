@@ -370,6 +370,18 @@ fn a_port_result_that_fails_in_factory_too_says_so() {
 }
 
 #[test]
+fn a_failure_the_origin_has_no_result_for_says_it_is_not_blocking() {
+    let t = fixture(&[
+        r#"{"event":"arch_check","package":"foo","results":[{"repo":"openSUSE_Factory","arch":"riscv64","state":"failed","origin_fails":false,"origin_missing":true}]}"#,
+    ]);
+    let ex = explain(&query(t.path())).unwrap();
+    assert_eq!(
+        ex.run_info.arch_checks,
+        ["openSUSE_Factory/riscv64: failed [no result in the origin: not blocking]"]
+    );
+}
+
+#[test]
 fn the_zig_vendor_archive_a_run_refreshed_lists_its_dependencies() {
     let t = fixture(&[
         r#"{"event":"zig_vendor","step":2,"pkg":"foo","file":"vendor.tar.zst","changed":true,"deps":[{"name":"pixman","url":"https://codeberg.org/ifreund/zig-pixman/archive/v0.3.0.tar.gz","hash":"pixman-0.3.0-LClMnz2VAAAs7QSCGwLimV5VUYx0JFnX5xWU6HwtMuDX"}]}"#,
