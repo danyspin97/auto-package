@@ -78,19 +78,28 @@ pub(crate) fn print_exit_lines(
     interrupted: Option<&ap_core::event::Usage>,
 ) {
     let held = ap_core::sink::held_summary();
-    for line in exit_lines(writes, timed_out, interrupted, (held.0, held.1.as_deref())) {
+    let waited = tui::builds_at_close();
+    for line in exit_lines(
+        writes,
+        timed_out,
+        interrupted,
+        (held.0, held.1.as_deref()),
+        waited,
+    ) {
         eprintln!("{line}");
     }
 }
 
 /// The lines that end a run, in order: the OBS warning when a write was in
-/// flight and did not finish, the interruption, then the held count. Each is
-/// one line. The wait line is printed before the wait (see `obs_wait_line`).
+/// flight and did not finish, the interruption, the held count, and last the
+/// builds the run waited for after the TUI closed (`waited`, 0 for none). Each
+/// is one line. The OBS wait line is printed before the wait (see `obs_wait_line`).
 pub(crate) fn exit_lines(
     writes: usize,
     timed_out: bool,
     interrupted: Option<&ap_core::event::Usage>,
     held: (usize, Option<&std::path::Path>),
+    waited: usize,
 ) -> Vec<String> {
     let mut out = Vec::new();
     if writes > 0 && timed_out {
@@ -107,6 +116,12 @@ pub(crate) fn exit_lines(
     }
     if let Some(line) = ap_core::sink::held_line(held.0, held.1) {
         out.push(line);
+    }
+    if waited > 0 {
+        let noun = if waited == 1 { "build" } else { "builds" };
+        out.push(format!(
+            "waited for {waited} {noun} still running when the TUI closed; they finished before exit"
+        ));
     }
     out
 }
@@ -137,7 +152,7 @@ mod tests {
             ..Default::default()
         };
         let path = std::path::Path::new("/w/run/diagnostics.log");
-        let lines = exit_lines(1, true, Some(&usage), (2, Some(path)));
+        let lines = exit_lines(1, true, Some(&usage), (2, Some(path)), 0);
         assert_eq!(
             lines,
             vec![
@@ -148,10 +163,18 @@ mod tests {
         );
         assert!(lines.iter().all(|l| !l.contains('\n')));
         // A write that finished in time adds no warning; nothing held, no line.
-        let lines = exit_lines(1, false, Some(&usage), (0, None));
+        let lines = exit_lines(1, false, Some(&usage), (0, None), 0);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].starts_with("Interrupted"));
-        assert!(exit_lines(0, false, None, (0, None)).is_empty());
+        assert!(exit_lines(0, false, None, (0, None), 0).is_empty());
+        let lines = exit_lines(0, false, None, (0, None), 2);
+        assert_eq!(
+            lines,
+            vec![
+                "waited for 2 builds still running when the TUI closed; they finished before exit"
+                    .to_string()
+            ]
+        );
     }
 }
 

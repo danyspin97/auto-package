@@ -22,6 +22,20 @@ pub struct TerminalGuard {
 /// stdout may be a file, and an escape sequence there would be garbage.
 pub(super) static TERMINAL_TAKEN: AtomicBool = AtomicBool::new(false);
 
+/// The builds still running when the TUI closed. A run waits for them before it
+/// returns (see `run::run`), so the exit line can say how many it waited for.
+static BUILDS_AT_CLOSE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Records how many builds were still running when the TUI closed.
+pub(super) fn set_builds_at_close(builds: usize) {
+    BUILDS_AT_CLOSE.store(builds, Ordering::SeqCst);
+}
+
+/// How many builds were still running when the TUI closed (0 when none were).
+pub fn builds_at_close() -> usize {
+    BUILDS_AT_CLOSE.load(Ordering::SeqCst)
+}
+
 /// Runs `restore` only when `taken` is set, that is when the terminal was
 /// actually taken over.
 pub(super) fn restore_if_taken(taken: &AtomicBool, restore: impl FnOnce()) {

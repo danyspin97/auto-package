@@ -29,6 +29,7 @@ pub(super) fn run(
     );
     let _ = screen.terminal.show_cursor();
     drop(screen);
+    set_builds_at_close(work.load(Ordering::SeqCst));
     // The TUI can be left with builds still running: the user quit once the
     // run was over but added a package afterwards (see `run_over`). Those builds
     // run on with the terminal given back, and quiet stays on for them: nothing
