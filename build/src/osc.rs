@@ -65,6 +65,8 @@ mod changes;
 #[cfg(test)]
 mod spec_file_name_tests;
 pub use changes::*;
+mod changes_normalise;
+pub use changes_normalise::*;
 mod changes_merge;
 pub use changes_merge::*;
 mod changes_refresh;
@@ -73,6 +75,8 @@ pub use changes_refresh::*;
 mod changes_file_tests;
 #[cfg(test)]
 mod changes_merge_tests;
+#[cfg(test)]
+mod changes_normalise_tests;
 mod update_notes;
 pub use update_notes::*;
 mod checkout;

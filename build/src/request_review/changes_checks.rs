@@ -163,7 +163,7 @@ pub(crate) fn update_target(bullet: &str) -> Option<String> {
 }
 
 /// Whether `word` is a version: a digit first, after an optional `v`.
-fn looks_like_version(word: &str) -> bool {
+pub(crate) fn looks_like_version(word: &str) -> bool {
     word.strip_prefix('v')
         .unwrap_or(word)
         .starts_with(|c: char| c.is_ascii_digit())
@@ -182,7 +182,7 @@ fn normalised(version: &str) -> String {
 /// How a bullet's version differs from the Version: `None` when they are the
 /// same release, `Some(false)` when the bullet is a prefix of it (`2.10` for
 /// `2.10.4`) or the other way round, `Some(true)` when they are different.
-fn mismatch(target: &str, version: &str) -> Option<bool> {
+pub(crate) fn mismatch(target: &str, version: &str) -> Option<bool> {
     let (t, v) = (normalised(target), normalised(version));
     if t == v {
         return None;
