@@ -154,7 +154,7 @@ fn iso_time(text: &str) -> Option<i64> {
 }
 
 /// The version an `Update to X` bullet names.
-fn update_target(bullet: &str) -> Option<String> {
+pub(crate) fn update_target(bullet: &str) -> Option<String> {
     let rest = bullet.strip_prefix("Update to ")?.trim_start();
     let rest = rest.strip_prefix("version ").unwrap_or(rest);
     let word = rest.split_whitespace().next()?;
@@ -201,6 +201,24 @@ const DEPENDENCY_WORDS: [&str; 7] = [
     "or newer",
     "upper bound",
 ];
+
+/// Whether a bullet is a dependency change, which convention 40 gives no
+/// bullet: it starts with a dependency verb and speaks of a requirement.
+pub(crate) fn is_dependency_bullet(text: &str) -> bool {
+    let verb = text.split_whitespace().next().unwrap_or("").to_lowercase();
+    DEPENDENCY_VERBS.contains(&verb.as_str())
+        && DEPENDENCY_WORDS
+            .iter()
+            .any(|w| text.to_lowercase().contains(w))
+}
+
+/// Whether a bullet holds `TODO`, a macro or the package name (convention 40).
+pub(crate) fn has_forbidden_text(text: &str, package: &str) -> bool {
+    let by_name = text
+        .split(|ch: char| !(ch.is_alphanumeric() || "-_+.".contains(ch)))
+        .any(|w| w.eq_ignore_ascii_case(package));
+    text.contains("TODO") || text.contains("%{") || by_name
+}
 
 /// The findings for the `.changes` entries the request adds.
 pub fn changes_findings(c: &ChangesCtx<'_>) -> Vec<Finding> {
@@ -339,17 +357,7 @@ pub fn changes_findings(c: &ChangesCtx<'_>) -> Vec<Finding> {
         }
     }
     for b in bullets.iter().filter(|b| update_target(&b.text).is_none()) {
-        let verb = b
-            .text
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
-        if DEPENDENCY_VERBS.contains(&verb.as_str())
-            && DEPENDENCY_WORDS
-                .iter()
-                .any(|w| b.text.to_lowercase().contains(w))
-        {
+        if is_dependency_bullet(&b.text) {
             out.push(mk(
                 ids::CHANGES_DEPENDENCY_BULLET,
                 Severity::Warning,
@@ -360,11 +368,7 @@ pub fn changes_findings(c: &ChangesCtx<'_>) -> Vec<Finding> {
                 Some(b.line),
             ));
         }
-        let by_name = b
-            .text
-            .split(|ch: char| !(ch.is_alphanumeric() || "-_+.".contains(ch)))
-            .any(|w| w.eq_ignore_ascii_case(c.package));
-        if b.text.contains("TODO") || b.text.contains("%{") || by_name {
+        if has_forbidden_text(&b.text, c.package) {
             out.push(mk(
                 ids::CHANGES_FORBIDDEN_TEXT,
                 Severity::Note,
