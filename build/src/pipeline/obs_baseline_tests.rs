@@ -24,7 +24,7 @@ fn a_failed_run_that_committed_is_restored_and_its_baseline_cleared() {
     let mut restored = false;
     let out = restore_obs_baseline(&dir, &NullReporter, failed("build failed"), |_| {
         restored = true;
-        Ok(())
+        Ok(crate::osc::Restored::Undone)
     });
     assert!(restored);
     match out {

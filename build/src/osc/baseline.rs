@@ -6,6 +6,28 @@ use super::*;
 /// Commit message of the commit that puts a baseline back.
 pub const RESTORE_MESSAGE: &str = "auto-package: restore baseline after failed run";
 
+/// The file a baseline keeps of OBS's listing (each file's name and md5) as
+/// `.osc/_files` had it when the baseline was taken, one `name<TAB>md5` a line.
+const OBS_LISTING: &str = "obs-md5";
+
+/// The file names and md5s of an OBS listing (`.osc/_files`, or the `/source`
+/// API), sorted by name.
+pub fn listing_md5s(xml: &str) -> Vec<(String, String)> {
+    let mut listing: Vec<(String, String)> = xml
+        .split("<entry ")
+        .skip(1)
+        .filter_map(|chunk| {
+            let tag = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
+            Some((
+                crate::obs_xml::attr(tag, "name")?,
+                crate::obs_xml::attr(tag, "md5")?,
+            ))
+        })
+        .collect();
+    listing.sort();
+    listing
+}
+
 /// Keep in `dir` what OBS holds for `checkout_dir`, before the run first writes
 /// to it: the names it tracks, and a copy of each one's pristine file (osc's
 /// copy in `.osc/sources`, the revision the checkout was made or last
@@ -29,6 +51,12 @@ pub fn save_baseline(checkout_dir: &Path, dir: &Path) -> std::io::Result<()> {
         }
     }
     fs::write(dir.join("tracked"), tracked.join("\n"))?;
+    let listing = fs::read_to_string(checkout_dir.join(".osc/_files")).unwrap_or_default();
+    let recorded: String = listing_md5s(&listing)
+        .iter()
+        .map(|(name, md5)| format!("{name}\t{md5}\n"))
+        .collect();
+    fs::write(dir.join(OBS_LISTING), recorded)?;
     fs::write(
         dir.join("checkout"),
         checkout_dir.to_string_lossy().as_bytes(),
@@ -215,18 +243,24 @@ pub fn restore_baseline_with(
     commit(&checkout, RESTORE_MESSAGE, &sent).map_err(|e| e.to_string())
 }
 
+/// The `project`/`package` a checkout belongs to (its `.osc/_project` and
+/// `.osc/_package`).
+fn checkout_project_package(checkout: &Path) -> Result<(String, String), String> {
+    let read = |name: &str| {
+        fs::read_to_string(checkout.join(".osc").join(name))
+            .map(|s| s.trim().to_string())
+            .map_err(|e| format!("cannot read .osc/{name} of {}: {e}", checkout.display()))
+    };
+    Ok((read("_project")?, read("_package")?))
+}
+
 /// The revision OBS holds for the checkout's package must be the one the
 /// checkout holds (`.osc/_files`, which osc updates when a commit lands). When
 /// it is not, someone committed after the attempt, or the attempt landed but
 /// osc did not record it: either way the restore would overwrite a revision
 /// nobody here has looked at, so it is refused.
 pub fn obs_still_at_checkout(checkout: &Path) -> Result<(), String> {
-    let read = |name: &str| {
-        fs::read_to_string(checkout.join(".osc").join(name))
-            .map(|s| s.trim().to_string())
-            .map_err(|e| format!("cannot read .osc/{name} of {}: {e}", checkout.display()))
-    };
-    let (project, package) = (read("_project")?, read("_package")?);
+    let (project, package) = checkout_project_package(checkout)?;
     let local = fs::read_to_string(checkout.join(".osc/_files"))
         .ok()
         .and_then(|xml| parse_directory_srcmd5(&xml))
@@ -242,27 +276,102 @@ pub fn obs_still_at_checkout(checkout: &Path) -> Result<(), String> {
     ))
 }
 
-/// [`restore_baseline_with`] committing through [`commit`], and removing `dir`
-/// once it is restored. A failure leaves `dir` in place, marked as unrestored
-/// (see [`begin_baseline`]). The commit may run after a shutdown: see
-/// [`proc::restoring_after_shutdown`]. Refuses when OBS has moved on (see
-/// [`obs_still_at_checkout`]), or when the baseline was saved from a checkout
-/// other than `expected`.
-pub fn restore_baseline(dir: &Path, expected: &Path, emit: Emit<'_>) -> Result<(), String> {
+/// What [`restore_baseline_outcome`] found on OBS.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Restored {
+    /// The attempts were put back on OBS.
+    Undone,
+    /// OBS holds what the baseline holds: no attempt landed, so there was
+    /// nothing to put back and nothing was written.
+    NothingWritten,
+}
+
+/// Whether OBS (`obs_xml`, its `/source` listing) holds the listing the baseline
+/// in `dir` recorded, for the checkout `expected` it was saved from.
+fn obs_listing_matches(dir: &Path, expected: &Path, obs_xml: &str) -> bool {
+    let Ok(saved_from) = fs::read_to_string(dir.join("checkout")) else {
+        return false;
+    };
+    if Path::new(&saved_from) != expected {
+        return false;
+    }
+    let Ok(text) = fs::read_to_string(dir.join(OBS_LISTING)) else {
+        return false;
+    };
+    let mut recorded: Vec<(String, String)> = text
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(name, md5)| (name.to_string(), md5.to_string()))
+        .collect();
+    recorded.sort();
+    // An empty record says nothing about OBS: it is not a match.
+    !recorded.is_empty() && recorded == listing_md5s(obs_xml)
+}
+
+/// [`restore_baseline_with`], preceded by the check that OBS still holds the
+/// recorded listing: when it does, no attempt landed and nothing is restored
+/// or committed. `obs_xml` reads OBS's listing of the checkout's package;
+/// when that fails, the restore goes on to `obs_check`, which refuses as before.
+pub fn restore_baseline_listing(
+    dir: &Path,
+    expected: &Path,
+    obs_xml: impl FnOnce(&Path) -> Result<String, String>,
+    obs_check: impl FnOnce(&Path) -> Result<(), String>,
+    commit: impl FnOnce(&Path, &str, &[String]) -> Result<(), Error>,
+) -> Result<Restored, String> {
+    if let Ok(xml) = obs_xml(expected)
+        && obs_listing_matches(dir, expected, &xml)
+    {
+        // Nothing landed on OBS, but the failed attempt's edits are still in the
+        // checkout: put the saved copies back there (nothing is committed), so a
+        // later publish does not carry them. The caller drops `dir` only after this.
+        restore_baseline_with(dir, expected, |_| Ok(()), |_, _, _| Ok(()))?;
+        return Ok(Restored::NothingWritten);
+    }
+    restore_baseline_with(dir, expected, obs_check, commit).map(|()| Restored::Undone)
+}
+
+/// [`restore_baseline_listing`] against OBS, committing through [`commit`], and
+/// removing `dir` once it is settled. A failure leaves `dir` in place, marked
+/// as unrestored (see [`begin_baseline`]). The commit may run after a
+/// shutdown: see [`proc::restoring_after_shutdown`].
+pub fn restore_baseline_outcome(
+    dir: &Path,
+    expected: &Path,
+    emit: Emit<'_>,
+) -> Result<Restored, String> {
     let _restoring = proc::restoring_after_shutdown();
-    match restore_baseline_with(
+    let outcome = restore_baseline_listing(
         dir,
         expected,
+        |checkout| {
+            let (project, package) = checkout_project_package(checkout)?;
+            source_listing_xml(&project, &package, Emit::quiet()).map_err(|e| e.to_string())
+        },
         obs_still_at_checkout,
         |checkout, message, files| commit(checkout, message, files, None, emit),
-    ) {
-        Ok(()) => {
+    );
+    match outcome {
+        Ok(restored) => {
             let _ = fs::remove_dir_all(dir);
-            Ok(())
+            Ok(restored)
         }
         Err(why) => {
             let _ = fs::write(dir.join(UNRESTORED), &why);
             Err(why)
         }
     }
+}
+
+/// [`restore_baseline_outcome`] for callers that only need to know it worked.
+/// Says on stderr when nothing was written to OBS (the run-start path reports
+/// the same through its reporter).
+pub fn restore_baseline(dir: &Path, expected: &Path, emit: Emit<'_>) -> Result<(), String> {
+    match restore_baseline_outcome(dir, expected, emit)? {
+        Restored::Undone => {}
+        Restored::NothingWritten => ap_core::diag!(
+            "nothing was written to OBS since the failed attempt: the saved baseline is dropped and the work continues"
+        ),
+    }
+    Ok(())
 }

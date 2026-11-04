@@ -99,6 +99,29 @@ fn mark_run_started(config: &PipelineConfig, reporter: &dyn Reporter) {
     }
 }
 
+/// Puts back the OBS baseline of an earlier attempt. When OBS still holds what
+/// the baseline holds, no attempt landed: the baseline is dropped, the run
+/// goes on, and the warning says so.
+fn put_back_or_confirm(
+    baseline: &Path,
+    config: &PipelineConfig,
+    reporter: &dyn Reporter,
+) -> Result<(), String> {
+    match osc::restore_baseline_outcome(baseline, &expected_checkout(config), Emit::run(reporter))?
+    {
+        osc::Restored::Undone => {}
+        osc::Restored::NothingWritten => reporter.report(&Event::Warning {
+            step: None,
+            message: format!(
+                "{}: nothing was written to OBS since the failed attempt (OBS holds the \
+                 saved baseline): the baseline is dropped and the run continues",
+                config.rpm_name
+            ),
+        }),
+    }
+    Ok(())
+}
+
 /// Puts back a baseline that a failed attempt could not restore, before this
 /// run writes anything. Returns the baseline directory; if the restore fails
 /// the package does not start.
@@ -117,8 +140,7 @@ fn restore_stale_baseline(
         }
     };
     if baseline.exists()
-        && let Err(why) =
-            osc::restore_baseline(&baseline, &expected_checkout(config), Emit::run(reporter))
+        && let Err(why) = put_back_or_confirm(&baseline, config, reporter)
     {
         return Err(PipelineResult::Failed {
             rpm_name: config.rpm_name.clone(),
@@ -186,7 +208,7 @@ fn finish_package(
     };
     let expected = expected_checkout(config);
     let result = restore_obs_baseline(baseline, reporter, result, |dir| {
-        osc::restore_baseline(dir, &expected, Emit::run(reporter))
+        osc::restore_baseline_outcome(dir, &expected, Emit::run(reporter))
     });
     // Persist last-attempt status in the durable workspace so a resumed run
     // (and the TUI showing per-package state across runs) can see WHY the

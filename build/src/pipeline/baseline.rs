@@ -32,7 +32,7 @@ pub(super) fn restore_obs_baseline(
     dir: &Path,
     reporter: &dyn Reporter,
     result: PipelineResult,
-    restore: impl FnOnce(&Path) -> Result<(), String>,
+    restore: impl FnOnce(&Path) -> Result<osc::Restored, String>,
 ) -> PipelineResult {
     let built = matches!(
         result,
@@ -43,11 +43,19 @@ pub(super) fn restore_obs_baseline(
         return result;
     }
     match restore(dir) {
-        Ok(()) => {
+        Ok(restored) => {
             let _ = std::fs::remove_dir_all(dir);
+            let message = match restored {
+                osc::Restored::Undone => {
+                    "restored the OBS baseline: the failed attempt is undone on OBS"
+                }
+                osc::Restored::NothingWritten => {
+                    "nothing was written to OBS by the failed attempt: nothing to restore"
+                }
+            };
             reporter.report(&Event::Warning {
                 step: None,
-                message: "restored the OBS baseline: the failed attempt is undone on OBS".into(),
+                message: message.into(),
             });
             result
         }

@@ -215,3 +215,175 @@ fn a_baseline_saved_from_another_checkout_is_refused_and_nothing_is_written() {
     assert!(err.contains("not from"), "{err}");
     assert_eq!(fs::read_to_string(co.path().join("foo.spec")).unwrap(), "a");
 }
+
+/// An OBS `/source` listing with the given files and md5s.
+fn obs_listing(files: &[(&str, &str)]) -> String {
+    let entries: String = files
+        .iter()
+        .map(|(name, md5)| format!(r#"<entry name="{name}" md5="{md5}"/>"#))
+        .collect();
+    format!("<directory>{entries}</directory>")
+}
+
+/// A checkout with `foo.spec` (md5 `x`), its baseline, and a failed attempt
+/// that changed the spec and was noted before the commit failed.
+fn failed_attempt() -> (tempfile::TempDir, tempfile::TempDir) {
+    let co = checkout(&[("foo.spec", "Name: foo\n")]);
+    let base = tempfile::tempdir().unwrap();
+    save_baseline(co.path(), base.path()).unwrap();
+    fs::write(co.path().join("foo.spec"), "Name: foo\nVersion: 2\n").unwrap();
+    note_attempt(base.path(), &["foo.spec".to_string()]).unwrap();
+    (co, base)
+}
+
+/// The listing OBS holds is the one the baseline recorded and the commit
+/// failed: nothing was written, so the attempt is dropped without a commit.
+#[test]
+fn a_rerun_continues_when_obs_still_holds_the_baseline() {
+    let (co, base) = failed_attempt();
+    let res = restore_baseline_listing(
+        base.path(),
+        co.path(),
+        |_| Ok(obs_listing(&[("foo.spec", "x")])),
+        |_| unreachable!("OBS matches the baseline: the revision check is not needed"),
+        |_, _, _| unreachable!("nothing landed: nothing is committed"),
+    );
+    assert_eq!(res, Ok(Restored::NothingWritten));
+    // The failed attempt's edit is taken out of the checkout, and the saved
+    // copies stay until the caller has settled the baseline.
+    assert_eq!(
+        fs::read_to_string(co.path().join("foo.spec")).unwrap(),
+        "Name: foo\n"
+    );
+    assert!(base.path().join("files/foo.spec").exists());
+}
+
+/// A tracked file the attempt removed locally comes back too, when OBS matches.
+#[test]
+fn a_rerun_that_continues_also_restores_a_removed_tracked_file() {
+    let (co, base) = failed_attempt();
+    fs::remove_file(co.path().join("foo.spec")).unwrap();
+    note_attempt(base.path(), &["foo.spec".to_string()]).unwrap();
+    let res = restore_baseline_listing(
+        base.path(),
+        co.path(),
+        |_| Ok(obs_listing(&[("foo.spec", "x")])),
+        |_| unreachable!("OBS matches the baseline"),
+        |_, _, _| unreachable!("nothing landed: nothing is committed"),
+    );
+    assert_eq!(res, Ok(Restored::NothingWritten));
+    assert_eq!(
+        fs::read_to_string(co.path().join("foo.spec")).unwrap(),
+        "Name: foo\n"
+    );
+}
+
+/// Someone else changed the spec on OBS: the record does not match, and the
+/// revision check refuses as before.
+#[test]
+fn a_file_changed_on_obs_is_still_refused() {
+    let (co, base) = failed_attempt();
+    let res = restore_baseline_listing(
+        base.path(),
+        co.path(),
+        |_| Ok(obs_listing(&[("foo.spec", "other")])),
+        |_| Err("OBS moved on".to_string()),
+        |_, _, _| unreachable!("refused before any write"),
+    );
+    assert_eq!(res, Err("OBS moved on".to_string()));
+}
+
+/// A new file on OBS that the baseline does not list is someone else's write.
+#[test]
+fn a_file_added_on_obs_is_still_refused() {
+    let (co, base) = failed_attempt();
+    let res = restore_baseline_listing(
+        base.path(),
+        co.path(),
+        |_| Ok(obs_listing(&[("foo.spec", "x"), ("bar.tar.gz", "y")])),
+        |_| Err("OBS moved on".to_string()),
+        |_, _, _| unreachable!("refused before any write"),
+    );
+    assert_eq!(res, Err("OBS moved on".to_string()));
+}
+
+/// A baseline kept before the listing was recorded says nothing about OBS now.
+#[test]
+fn a_baseline_without_a_recorded_listing_is_refused() {
+    let (co, base) = failed_attempt();
+    fs::remove_file(base.path().join("obs-md5")).unwrap();
+    let res = restore_baseline_listing(
+        base.path(),
+        co.path(),
+        |_| Ok(obs_listing(&[("foo.spec", "x")])),
+        |_| Err("OBS moved on".to_string()),
+        |_, _, _| unreachable!("refused before any write"),
+    );
+    assert_eq!(res, Err("OBS moved on".to_string()));
+}
+
+/// The record matches OBS, but the baseline was saved from another checkout.
+#[test]
+fn a_listing_match_for_another_checkout_is_refused() {
+    let (_co, base) = failed_attempt();
+    let other = tempfile::tempdir().unwrap();
+    let res = restore_baseline_listing(
+        base.path(),
+        other.path(),
+        |_| Ok(obs_listing(&[("foo.spec", "x")])),
+        |_| Err("not this checkout".to_string()),
+        |_, _, _| unreachable!("refused before any write"),
+    );
+    let why = res.expect_err("another checkout must be refused");
+    assert!(why.contains("saved from"), "{why}");
+}
+
+/// OBS unreadable: the revision check decides, as before.
+#[test]
+fn an_unreadable_obs_listing_falls_back_to_the_revision_check() {
+    let (co, base) = failed_attempt();
+    let res = restore_baseline_listing(
+        base.path(),
+        co.path(),
+        |_| Err("network".to_string()),
+        |_| Err("OBS moved on".to_string()),
+        |_, _, _| unreachable!("refused before any write"),
+    );
+    assert_eq!(res, Err("OBS moved on".to_string()));
+}
+
+/// The attempt did land and OBS shows it: the saved copy goes back and is
+/// committed, as before.
+#[test]
+fn an_attempt_that_landed_is_still_undone() {
+    let (co, base) = failed_attempt();
+    let mut committed = Vec::new();
+    let res = restore_baseline_listing(
+        base.path(),
+        co.path(),
+        |_| Ok(obs_listing(&[("foo.spec", "landed")])),
+        |_| Ok(()),
+        |_, _, files| {
+            committed = files.to_vec();
+            Ok(())
+        },
+    );
+    assert_eq!(res, Ok(Restored::Undone));
+    assert_eq!(committed, ["foo.spec"]);
+    assert_eq!(
+        fs::read_to_string(co.path().join("foo.spec")).unwrap(),
+        "Name: foo\n"
+    );
+}
+
+#[test]
+fn listing_md5s_reads_names_and_md5s_sorted() {
+    let xml = obs_listing(&[("b.spec", "2"), ("a.patch", "1")]);
+    assert_eq!(
+        listing_md5s(&xml),
+        [
+            ("a.patch".to_string(), "1".to_string()),
+            ("b.spec".to_string(), "2".to_string())
+        ]
+    );
+}

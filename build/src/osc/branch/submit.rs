@@ -65,6 +65,14 @@ pub fn source_srcmd5(project: &str, package: &str, emit: Emit<'_>) -> Result<Str
     })
 }
 
+/// The `/source` listing of `project/package` as OBS returns it: each file with
+/// its md5 (see `baseline::listing_md5s`).
+pub fn source_listing_xml(project: &str, package: &str, emit: Emit<'_>) -> Result<String, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", package)?;
+    api_get(&format!("/source/{project}/{}", enc(package)), emit)
+}
+
 /// Refuse a request whose source package is no longer at the revision it was
 /// prepared for. `current` reads the revision now.
 pub fn verify_source_rev(
