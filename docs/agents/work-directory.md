@@ -52,6 +52,29 @@ cache of upstream versions). Inside one (call it `$P`):
   is checked against it. `--cleanup` never deletes it, `runs/`, `state/` or an
   osc checkout; it only removes `rpms/` and `state/<pkg>/sdist`.
 
+## Reviews of submit requests
+
+`auto-package review <request-id>` saves its report under
+`<work-dir>/reviews/<request-id>/<run-id>/`, at the root of the work directory,
+beside the project directories. It is not a package run: there is no
+`run.jsonl`, no `state/` and no notes (a review's opinions are never build
+input), and `explain` does not read it.
+
+- `review.json` the report (`schema` 1): `request`, `actions[]` with `source`,
+  `target`, the two versions, `changed`/`added`/`removed`, `findings[]` (`id`,
+  `severity`, `origin`, `file`, `line`, `message`) and `skipped[]` (what was not
+  checked, and why), `agent` (`null` without `--agent`; its findings are the
+  model's opinion, with `origin: agent`), `fail_on` and `exit`. `review.txt` is
+  the same as text.
+- `request.xml`, `source.diff` what was read.
+- `agent/` with `--agent`: the turn's workspace (`request.xml`, `source.diff`,
+  `old/`, `new/`, `findings.json`), `prompt.md`, `response.json`, `output.md`.
+  Its text is the model's own summary, not ground truth (see below).
+
+    jq -r '.actions[].findings[] | [.severity, .id, .message] | @tsv' review.json
+
+`--cleanup` never deletes it.
+
 ## run.jsonl
 
 Every line has `event`; most have `pkg` (compact JSON, so `"pkg":"foo"` greps

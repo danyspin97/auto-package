@@ -300,6 +300,94 @@ deliberately conservative:
 - the description gives the old and new version and the newest `.changes`
   entry. Created request ids are printed and listed in the summary.
 
+### Reviewing a submit request
+
+`auto-package review <request-id>` reviews one OBS submit request, read only:
+
+```sh
+# The report on stdout, saved under ap-work/reviews/1394662/<run-id>/.
+auto-package review 1394662
+
+# The same as JSON, for jq; no source archives downloaded.
+auto-package review 1394662 --format json --no-download | jq '.actions[].findings[].id'
+
+# Only a blocker fails the review (exit status 1).
+auto-package review 1394662 --fail-on blocker
+```
+
+It reads the request document (a revision number or a srcmd5 in the action are
+both accepted), the source package at that revision and the target package as it
+is now, the source diff, the build results of the source and of the target, the
+other open requests to the same package, and the upstream version. Then it
+runs checks on what the request *changes*, not on what was already there:
+
+- the spec: the lint of `lint` for what the request adds, an unfinished
+  skeleton, a lost `%check`, dropped tests;
+- the newest `.changes` entry: header, date, `Update to <version>` against the
+  `Version:`, notes, patches named, dependency bullets;
+- patches and `rpmlintrc` files, with the rules the pipeline applies to its own
+  edits;
+- the risk flags of the submit summary (new scriptlets, hosts, services, large
+  patches, a patch outside the archive);
+- that every `Source` and `Patch` file is in the package, and what is left
+  over;
+- signatures and the keyring of the new archives (with `gpg`, in a fresh home);
+- the build results against the target's, and the packaged version against
+  upstream and Repology.
+
+Each finding has a stable id (`spec.no-check`, `build.failed`, ...), a severity
+(`blocker`, `warning`, `note`) and its origin. The ids are part of the JSON
+(`schema` 1). The exit status is `0` when no finding is at or above `--fail-on`
+(default `warning`), `1` when one is, and `2` when the review could not be
+completed (see Exit codes). Two kinds of read can fail. A read the checks need
+(the request, the listings, the spec, `.changes`, patch, `rpmlintrc` and
+`_service` texts, the build results of the source and of the target, the
+download of a signed archive) ends the review with status 2 and no report,
+whatever `--fail-on` says: a review that could not see the build result must
+not read as one with nothing found. An optional read (the diff, the other
+open requests, the upstream and Repology lookups, the main archive) that
+fails is a `review.incomplete` or `version.not-checked` note, and a check that
+was skipped on purpose (`--no-download`, a file over the size cap) is listed
+under "Not checked": it is never reported as passed. A request that holds an
+action other than `submit` is not reviewed beyond a finding for that action,
+and a role, bugowner, devel-project, delete or maintenance action is a
+blocker. The upstream lookups only contact hosts the allowed-hosts list allows
+(and the standard registries); a spec that names another host gets a note, not
+a request to it.
+
+**It never writes to OBS.** It accepts, declines, comments on and reviews
+nothing, commits nothing and creates no request; the one call that is not a GET
+is the source diff, which `osc rdiff` makes too. A test reads the source of the
+read modules and fails on a write verb. Posting the report as a comment on the
+request (a `--post-comment` flag) is wanted later, and would be the command's
+only write, behind that explicit flag. It is not part of this command, and the
+report formats leave room for it.
+
+With `--agent`, one more turn of the model reads the request's files (the
+request, the diff and both sides' spec, `.changes` and patches) for what the
+checks cannot say: whether the bullets describe the diff, a refreshed patch
+whose hunks changed meaning, a change the bump does not need. It runs on Sonnet
+or better, with a budget of `--budget-usd` (default 2.00), and needs the
+`claude` CLI logged in. The turn has no Edit, Write, Bash or search tool. It may
+read the upstream forge host of the source, and only when the allowed-hosts list
+(`hosts allow`, the file, `AUTO_PACKAGE_SOURCE_HOSTS` or the built-ins) already
+allows that host: the agent can never allow a host. Its findings are the model's
+opinion: they are printed apart, each line starts with `AGENT:`, the JSON keeps
+them under `agent` and never in an action's `findings`, and a model's text is its
+own summary, not ground truth. They do not change the exit status, unless
+`--fail-on-agent` is given; the deterministic findings are never removed or
+lowered by them. A turn that fails leaves the report and its exit status as
+they were, except with `--fail-on-agent`, where a turn that did not run is
+exit status 2. The turn may fetch only a host the list names exactly, not a
+subdomain a spec picks.
+
+The saved report is plain files under `<work-dir>/reviews/<request-id>/<run-id>/`
+(`review.txt`, `review.json`, `request.xml`, `source.diff` and, with `--agent`,
+`agent/` with the prompt, the answer and the files the turn read). `--cleanup`
+keeps it. Two things are left out on purpose: the command does not read or
+write a list of tracked requests, and `explain` does not show a review; use
+`jq` on `review.json`.
+
 ### Maintenance requests (SLE and Leap code streams)
 
 A package in a released code stream (`SUSE:SLE-15-SP7:Update`,
@@ -378,6 +466,15 @@ Limits:
   every package. Run `claude` and `/login`, then re-run. `build` and
   `update` check `claude auth status` (free) before starting.
 - `130`: interrupted (Ctrl-C or SIGTERM).
+
+`review` has its own meaning for the first three: `0` no finding at or above
+`--fail-on`, `1` at least one, `2` the review could not be completed: the request does
+not exist or cannot be read, it has no submit action, a read the checks need
+failed (the request, the listings, the spec, `.changes` or patch texts, the
+build results, a signed archive's download), or `--agent` is given and
+`claude` is logged out or the day's spend cap is reached, or `--fail-on-agent`
+is given and the agent turn did not run. No report is written
+for `2`.
 
 ### Licence guards
 
