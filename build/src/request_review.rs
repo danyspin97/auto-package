@@ -5,6 +5,9 @@
 
 use serde::Serialize;
 
+pub mod agent_turn;
+#[cfg(test)]
+mod agent_turn_tests;
 pub mod archive;
 pub mod build_check;
 #[cfg(test)]
@@ -25,6 +28,8 @@ pub mod ids;
 pub mod patch_checks;
 #[cfg(test)]
 mod patch_checks_tests;
+#[cfg(test)]
+mod read_only_tests;
 pub mod render;
 pub mod report;
 #[cfg(test)]

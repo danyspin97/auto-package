@@ -345,6 +345,7 @@ use begin_or_fail;
 mod agent;
 mod turn_spend;
 use agent::*;
+pub(crate) use turn_spend::{daily_cap_check, record_daily_spend};
 mod agent_response;
 use agent_response::*;
 mod ladder;
@@ -390,6 +391,7 @@ mod patch_rules_spec;
 #[cfg(test)]
 mod patch_rules_tests;
 mod spend_guard;
+pub(crate) use spend_guard::spend_allows_turn;
 use spend_guard::*;
 mod changelog_required;
 #[cfg(test)]

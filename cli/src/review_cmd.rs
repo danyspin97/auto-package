@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 use ap_build::proc::Emit;
 use ap_build::request_review::Severity;
+use ap_build::request_review::agent_turn::{
+    AgentOptions, agent_review, forge_hosts, live_preflight,
+};
 use ap_build::request_review::fetch::LiveRequestObs;
 use ap_build::request_review::render::{render_json, render_text};
 use ap_build::request_review::run::{Deps, Options, review};
@@ -39,6 +42,23 @@ pub(super) struct ReviewArgs {
     /// Where the report is saved, under `reviews/<request-id>/<run-id>/`.
     #[arg(long, default_value = "ap-work")]
     work_dir: PathBuf,
+
+    /// Add one read-only model turn that reads the request's files for what the
+    /// checks cannot say. Its findings are labelled as opinion and are printed
+    /// apart; they never change the exit status unless `--fail-on-agent` is
+    /// given. It may read the upstream forge host of the source, only when the
+    /// allowed-hosts list (`hosts allow`) already allows that host.
+    #[arg(long)]
+    agent: bool,
+
+    /// The most the agent turn may spend, in USD (needs `--agent`).
+    #[arg(long, default_value_t = 2.0, requires = "agent", value_parser = parse_budget)]
+    budget_usd: f64,
+
+    /// Let the agent's findings at or above `--fail-on` make the exit status 1
+    /// (needs `--agent`). Without it they never do.
+    #[arg(long, requires = "agent")]
+    fail_on_agent: bool,
 
     /// Do not download source archives: the checks that need their bytes
     /// (signatures, patch paths, a packed `target/`) are reported as not run.
@@ -82,6 +102,14 @@ fn parse_request_id(id: &str) -> Result<String, String> {
     }
 }
 
+/// A budget in USD: a number above zero.
+fn parse_budget(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(usd) if usd.is_finite() && usd > 0.0 => Ok(usd),
+        _ => Err(format!("{text:?} is not a budget in USD above zero")),
+    }
+}
+
 /// Run the review and give the exit status: 0 or 1 by the findings, 2 when it
 /// could not run.
 pub(super) fn main(args: &ReviewArgs) -> i32 {
@@ -102,6 +130,10 @@ fn ldconfig_macro(target_project: &str) -> bool {
 
 fn run(args: &ReviewArgs) -> Result<i32, String> {
     let level: LogLevel = args.log.parse()?;
+    // Before any read, so a review that cannot run its turn writes no report.
+    if args.agent {
+        live_preflight(&std::path::absolute(&args.work_dir).map_err(|e| e.to_string())?)?;
+    }
     super::install_interrupt_handler(false, Arc::new(MemorySink::new()))
         .map_err(|e| e.to_string())?;
     let sink = HumanSink::new(level);
@@ -128,19 +160,34 @@ fn run(args: &ReviewArgs) -> Result<i32, String> {
         download: !args.no_download,
         scratch: &scratch,
         fail_on: args.fail_on.severity(),
-        fail_on_agent: false,
+        fail_on_agent: args.fail_on_agent,
         build: env!("AP_BUILD_REVISION"),
     };
     let result = review(&obs, &options, &deps);
     // The downloads are the review's scratch, not run data.
     let _ = std::fs::remove_dir_all(&scratch);
-    let reviewed = match result {
+    let mut reviewed = match result {
         Ok(r) => r,
         Err(e) => {
             discard(&dir);
             return Err(e.to_string());
         }
     };
+    if args.agent {
+        let hosts = ap_build::allowed_hosts::load_default();
+        let web_hosts = forge_hosts(&reviewed, &hosts);
+        let section = agent_review(
+            &reviewed,
+            &AgentOptions {
+                budget_usd: args.budget_usd,
+                work_dir: &work_dir,
+                dir: &dir,
+                web_hosts: &web_hosts,
+            },
+            &|req, hosts| ap_build::agent::turn_with_hosts(req, hosts),
+        );
+        reviewed.report.set_agent(section);
+    }
     let text = render_text(&reviewed.report);
     let json = render_json(&reviewed.report);
     save(&dir, &reviewed, &text, &json).map_err(|e| format!("cannot save the review: {e}"))?;
@@ -212,6 +259,27 @@ mod tests {
         assert!(a.no_download);
         assert!(parse(&["1", "--fail-on", "error"]).is_err());
         assert!(parse(&["1", "--format", "xml"]).is_err());
+    }
+
+    #[test]
+    fn the_agent_flags_need_agent_and_a_budget_above_zero() {
+        assert!(parse(&["1", "--budget-usd", "1"]).is_err());
+        assert!(parse(&["1", "--fail-on-agent"]).is_err());
+        let a = parse(&["1", "--agent"]).unwrap().args;
+        assert!(a.agent && !a.fail_on_agent);
+        assert_eq!(a.budget_usd, 2.0);
+        let a = parse(&["1", "--agent", "--budget-usd", "0.5", "--fail-on-agent"])
+            .unwrap()
+            .args;
+        assert_eq!(a.budget_usd, 0.5);
+        assert!(a.fail_on_agent);
+        for bad in ["0", "-1", "x", "nan"] {
+            assert!(
+                parse(&["1", "--agent", "--budget-usd", bad]).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(!parse(&["1"]).unwrap().args.agent);
     }
 
     #[test]

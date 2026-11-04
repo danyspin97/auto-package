@@ -283,8 +283,9 @@ enum Commands {
     ///
     /// Exit status: 0 when no finding is at or above `--fail-on`, 1 when one
     /// is, 2 when the review could not be completed (the request cannot be read, has
-    /// no submit action, or a read the checks need failed: the spec, a patch,
-    /// the build results, a signed file's download).
+    /// no submit action, a read the checks need failed (the spec, a patch, the
+    /// build results, a signed file's download), or `--agent` is given and claude
+    /// is not logged in or the day's spend cap is reached).
     Review(review_cmd::ReviewArgs),
 }
 mod allow_host;

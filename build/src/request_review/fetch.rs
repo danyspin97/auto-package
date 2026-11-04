@@ -143,36 +143,3 @@ impl RequestObs for LiveRequestObs<'_> {
             .ok_or_else(|| ReadFailure::new(format!("{project}/{pkg} has no revision")))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    /// The wrappers and the trait never name a write: no PUT or DELETE, no
-    /// request creation, no commit or removal.
-    #[test]
-    fn the_read_modules_name_no_write() {
-        let sources = [
-            ("fetch.rs", include_str!("fetch.rs")),
-            (
-                "request_read.rs",
-                include_str!("../osc/branch/request_read.rs"),
-            ),
-        ];
-        let forbidden = [
-            "\"PUT\"",
-            "\"DELETE\"",
-            "create_submit_request",
-            "\"ci\"",
-            "\"commit\"",
-            "\"rm\"",
-            "\"request\"",
-            "\"branch\"",
-        ];
-        for (name, text) in sources {
-            // This test names the words, so it is left out of what it reads.
-            let text = text.split("#[cfg(test)]").next().unwrap();
-            for word in forbidden {
-                assert!(!text.contains(word), "{name} contains {word}");
-            }
-        }
-    }
-}

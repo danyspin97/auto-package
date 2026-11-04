@@ -63,6 +63,13 @@ pub struct AgentSection {
 }
 
 impl Report {
+    /// Add the agent's section and settle the exit code again: the agent's
+    /// findings count only with `fail_on_agent`.
+    pub fn set_agent(&mut self, section: AgentSection) {
+        self.agent = Some(section);
+        self.exit = exit_code(self);
+    }
+
     /// Every finding of a check, the request's and the actions'.
     pub fn check_findings(&self) -> impl Iterator<Item = &Finding> {
         self.request

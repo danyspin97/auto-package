@@ -72,6 +72,9 @@ ids! {
     VERSION_BEHIND_UPSTREAM = "version.behind-upstream",
     VERSION_NOT_CHECKED = "version.not-checked",
     VERSION_REPOLOGY_NEWER = "version.repology-newer",
+    AGENT_FINDING = "agent.finding",
+    AGENT_DISPUTE = "agent.dispute",
+    AGENT_BAD_ANSWER = "agent.bad-answer",
 }
 
 #[cfg(test)]
@@ -145,6 +148,9 @@ mod tests {
                 "version.behind-upstream",
                 "version.not-checked",
                 "version.repology-newer",
+                "agent.finding",
+                "agent.dispute",
+                "agent.bad-answer",
             ]
         );
         let mut sorted = ALL.to_vec();
