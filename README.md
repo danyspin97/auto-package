@@ -456,6 +456,101 @@ Limits:
   have a source auto-package can rebuild (as for `update`);
 - the bug references are checked for their form only, not looked up.
 
+### Fixing a bug
+
+`fix` takes one reported bug in one package of an ordinary project and builds
+the fix in a branch project, at the version the package has. It is not for
+maintenance projects (`:Update`, `SUSE:SLE-*`, `openSUSE:Leap:*`): those are
+refused, with the `update --maintenance --backport` command that does it.
+
+```bash
+# What would be read, found and added? Reads the bug and the patch, changes nothing.
+auto-package fix --project openSUSE:Factory --only tor --bug bsc#1234567 \
+  --bug CVE-2025-1234 --dry-run
+
+# Give the upstream fix, build it in home:<you>:branches:openSUSE:Factory,
+# then ask whether to send a request.
+auto-package fix --project openSUSE:Factory --only tor --bug bsc#1234567 \
+  --commit-url https://gitlab.torproject.org/tpo/core/tor/-/commit/0123abc --submit
+```
+
+- The bug: `--bug REF` (`bsc#`/`boo#`/`bnc#`, `jsc#`, `CVE-`; repeatable or comma
+  separated), `--cve CVE-YYYY-N`, `--description TEXT` (at most 4 KiB) or
+  `--bug-file FILE` (a pasted report, at most 64 KiB, read instead of fetched).
+  At least one is needed. Only the references you give are cited in the patch
+  header, the spec comment and the `.changes` bullet.
+- What is read, and which hosts you must allow first. Nothing is read from a
+  host until you allow it, with `auto-package hosts allow HOST` (kept), `--allow-host
+  HOST` (this run, logged as a `host_allowed` event) or the TUI; nothing the
+  agent or a bug says can allow one. A bsc#, boo# or bnc# bug is read from
+  `bugzilla.suse.com` (public bugs only, no API key: a private bug is reported
+  as not read, and `--description` or `--bug-file` stands in). A CVE is read
+  from `api.osv.dev` (it has the fixing commits) and `cveawg.mitre.org`, each
+  only once allowed; `www.suse.com` is never read. A host that is not allowed
+  is named in the run summary and the dry run, and the run goes on without it.
+- The upstream fix. `--commit-url URL` (repeatable; a commit, pull request or
+  `.patch`/`.diff` URL, a patch file, or a commit id with `--commit-repo`) is
+  used as given. Without it the tool takes the one fix of the package's own
+  repository (the `Url:` or `Source:` of the spec) that the bug text names, else
+  the one GitHub's commit search finds for the references. Several candidates
+  stop the run before anything is branched, listed, with exit 4: pass the ones
+  to use with `--commit-url`. If an upstream release newer than the package
+  has the fix, the dry run and the summary print the `update --to-version`
+  command that would take it instead; the fix is made anyway.
+- The patch. `<package>-CVE-2025-1234.patch` (the package's own prefix when its
+  patches share another), with `References:` and `Upstream:` lines added after
+  the subject of the upstream mail (or a header block for a plain diff), a
+  `# PATCH-FIX-UPSTREAM <file> <refs> -- <reason>` comment above its `PatchN:`
+  line and a `- Add <file>: <reason> (bsc#1234567, CVE-2025-1234)` bullet,
+  written before the first commit so the fix is one commit and one build. A
+  patch that applies cleanly or with an offset is added without a model; one
+  with fuzz is refreshed with quilt first. Unless `--no-agent` is given, every
+  fix patch goes through the patch review turn, and every edit through the same
+  gates as any agent edit (rpmspec, patches apply, patch rules, removal proof).
+- The agent. When the upstream patch does not apply, the spec has `%patch`
+  lines, or no fix was found, up to three fix turns (Sonnet or better) rebase
+  it with quilt, look for the fix in the upstream repository, or write the
+  smallest fix themselves. Every site a turn may fetch from passes the allowed-hosts check, and the
+  turn cannot add a host. With an empty allowed-hosts file it reaches `pypi.org`,
+  `github.com` (with `raw.githubusercontent.com` and `api.github.com`),
+  `salsa.debian.org` and `lore.kernel.org` (built-in trusted hosts), and a fixed
+  forge (GitLab, Codeberg, Bitbucket, sourcehut) that is the package's upstream
+  or a `--commit-url` host. It needs an entry (`auto-package hosts allow`,
+  `--allow-host`) for `src.fedoraproject.org`, `gitweb.gentoo.org`, a
+  self-hosted forge and any other `--commit-url` host. It has no web search.
+  A fix with no upstream commit gets `Upstream: not yet reported` and
+  `# PATCH-FIX-OPENSUSE`. Every patch the agent wrote is flagged, whatever its
+  header says (the tool does not verify a URL the agent cites); so is an upstream
+  patch changed to apply, and one that is a pull or merge request, or a commit
+  that the user did not give and no release contains (a bug text can name a
+  request of anyone). Any risk flag makes `--yes` refuse the request: a person
+  reads the patch.
+- `--submit` (with a confirmation, or `--yes`) sends a submit request to the
+  origin (the devel project with `--follow-devel`) when the build succeeded and
+  the branch holds and applies the patch. Without it nothing is submitted. There
+  is no in-place fix. `--no-agent` only adds a given patch that applies.
+
+`fix` exits `0` when the fix built (and the request, if asked, was made or
+refused by the usual gate), `3` when the bug needs no fix (quilt proves the
+patch is applied already, or the agent quotes the code that shows it is fixed or
+not affected) or none was found, and `4` when a maintainer must decide: an ABI
+or behaviour change, a fix that does not apply, several upstream candidates, or
+`--no-agent` with the agent needed. Edits made stay in the branch; nothing is
+submitted. `1` is any other failure, `2` the agent is unavailable, `130`
+interrupted.
+
+Limits:
+
+- a maintenance backport (`update --maintenance --backport`) does not get the
+  `References:`/`Upstream:` header or the package-prefixed name `fix` gives, and
+  a staged backport that the agent leaves unchanged is not judged by the patch
+  rules;
+- the commit search and the fixed-release check use GitHub only; GitLab and
+  Gitea repositories need `--commit-url` or the agent;
+- a private or embargoed bug is not read (no API key); `jsc#` is not fetched;
+- the lookup finds one commit: a fix in several commits is given by repeating
+  `--commit-url`, each of which becomes its own patch;
+
 ### Exit codes
 
 - `0`: success.
@@ -466,6 +561,9 @@ Limits:
   every package. Run `claude` and `/login`, then re-run. `build` and
   `update` check `claude auth status` (free) before starting.
 - `130`: interrupted (Ctrl-C or SIGTERM).
+
+`fix` also exits `3` (the bug needs no fix here, or none was found) and `4`
+(a maintainer must decide); see "Fixing a bug". No other command uses them.
 
 `review` has its own meaning for the first three: `0` no finding at or above
 `--fail-on`, `1` at least one, `2` the review could not be completed: the request does
@@ -562,6 +660,18 @@ cargo run -- build <package> --project <project> --log debug
 Upstream content is untrusted: PyPI sdists and wheels, source repositories,
 build logs, and anything the agent or a spec macro produces from them. The
 tool assumes these may be hostile and limits what they can reach:
+
+- **Bug reports and fixes (`fix`)**: the text of a bug, a CVE record, a commit
+  message and a fetched patch are written by anyone who can file a bug or
+  open a pull request. The report reaches the agent only as fenced untrusted
+  data, cut to a size, and a URL in it is fetched by the tool only when it is a
+  patch of the package's own upstream repository on an allowed host. The
+  bugzilla and CVE hosts are off until the user allows them, and the agent
+  cannot edit the allowed-hosts file. The fix turn reads the upstream forge and
+  the distributions' patch hosts the user allowed, read only, with no web
+  search; its edits pass the gates of every turn's edit, its patch is reviewed,
+  and a fix that no upstream commit stands behind, or an upstream fix that was
+  changed, is flagged so `--yes` never submits it.
 
 - **Archives**: links are refused if they can reach outside the unpacked tree
   (including through a chain of earlier links), zip symlinks are never
