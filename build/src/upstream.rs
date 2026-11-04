@@ -118,7 +118,7 @@ fn parent_dir(url: &str) -> &str {
 
 /// The highest version among the archives in `links` named `name`; the
 /// pre-releases only when there is nothing else.
-fn newest_for(links: &[String], name: &str) -> Option<String> {
+pub(crate) fn newest_for(links: &[String], name: &str) -> Option<String> {
     let norm = |s: &str| s.replace('_', "-").to_ascii_lowercase();
     let mut versions: Vec<String> = links
         .iter()

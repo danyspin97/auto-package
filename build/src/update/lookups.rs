@@ -529,3 +529,38 @@ pub(super) fn a_python_package_is_guessed_on_pypi_by_its_tarball_name() {
         }
     );
 }
+
+#[test]
+pub(super) fn a_release_counter_in_a_listing_is_not_read_as_the_version() {
+    // dmraid's directory: `dmraid-1.0.0.rc16-3` is version 1.0.0.rc16-3 with
+    // counter 3, not version 3. The plan must refuse it, not target `3`.
+    let listing = r#"<html><body>
+        <a href="../">Parent Directory</a>
+        <a href="dmraid-1.0.0.rc15.tar.bz2">dmraid-1.0.0.rc15.tar.bz2</a>
+        <a href="dmraid-1.0.0.rc16-2.tar.bz2">dmraid-1.0.0.rc16-2.tar.bz2</a>
+        <a href="dmraid-1.0.0.rc16-3.tar.bz2">dmraid-1.0.0.rc16-3.tar.bz2</a>
+        <a href="dmraid-1.0.0.rc16-3.tar.bz2.sig">dmraid-1.0.0.rc16-3.tar.bz2.sig</a>
+        </body></html>"#;
+    let links = crate::sources::parse_index_links(listing);
+    assert_eq!(
+        crate::upstream::newest_for(&links, "dmraid").as_deref(),
+        Some("1.0.0.rc16-3")
+    );
+    let spec = "Name: dmraid\nVersion: 1.0.0.rc16.3\n\
+                Source0: https://people.redhat.com/~heinzm/sw/dmraid/src/dmraid-1.0.0.rc16-3.tar.bz2\n";
+    let fetch = |_: &str| Ok(spec.to_string());
+    let index = |_: &str| -> Result<String, String> {
+        crate::upstream::newest_for(&links, "dmraid").ok_or_else(|| "no release listed".to_string())
+    };
+    let lookups = Lookups {
+        fetch_index_latest: &index,
+        ..unused_lookups()
+    };
+    let c = classify("dmraid", &fetch, &lookups);
+    assert_eq!(
+        c.decision,
+        Decision::Skipped(SkipReason::NotAnRpmVersion {
+            latest: "1.0.0.rc16-3".into()
+        })
+    );
+}
