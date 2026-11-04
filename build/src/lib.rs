@@ -6,6 +6,7 @@ pub mod allowed_hosts;
 pub mod arch_check;
 pub mod backport;
 pub mod branch_revision;
+pub mod bugfix;
 pub mod byte_edit;
 mod conventions_table;
 pub mod depclass;
