@@ -326,3 +326,12 @@ pub struct BranchBuild {
     /// `fix`: the bug to fix in this package, at the version it has.
     pub bug_fix: Option<Arc<ap_build::bugfix::FixTask>>,
 }
+
+impl BranchBuild {
+    /// The package already has a recipe, and the build keeps it: an update,
+    /// a `lint` improvement or a bug fix. Such a build does not need the
+    /// archive to hold a build system auto-package can generate a spec for.
+    pub fn keeps_recipe(&self) -> bool {
+        self.update || self.improve.is_some() || self.bug_fix.is_some()
+    }
+}

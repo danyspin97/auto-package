@@ -467,3 +467,29 @@ fn a_404_stops_the_package_only_when_its_origin_is_confirmed_missing() {
     };
     assert!(missing_in_origin("dtc", &server, Some("Base:System")).is_none());
 }
+
+fn branch_build(update: bool, improve: Option<&str>) -> BranchBuild {
+    BranchBuild {
+        rpm_name: Some("fortune".into()),
+        resolver: None,
+        improve: improve.map(str::to_string),
+        from_version: None,
+        upstream_tag: None,
+        update,
+        bug_fix: None,
+    }
+}
+
+#[test]
+fn a_lint_improvement_keeps_the_recipe_of_the_package() {
+    // `lint` is not an update, but its package has a spec: an archive whose
+    // build system is not known must not fail the run.
+    let lint = branch_build(false, Some("fortune builds, but ..."));
+    assert!(lint.keeps_recipe());
+    assert_eq!(
+        ap_build::sources::recipe_refusal(lint.keeps_recipe(), false),
+        None
+    );
+    assert!(branch_build(true, None).keeps_recipe());
+    assert!(!branch_build(false, None).keeps_recipe());
+}

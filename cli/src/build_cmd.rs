@@ -99,7 +99,8 @@ pub(crate) fn cmd_build(
     // OBS has as `python-APScheduler` is checked out under that spelling).
     ap_build::osc::try_list_project_packages(project, ap_build::proc::Emit::run(reporter.as_ref()))
         .map_err(|e| color_eyre::eyre::eyre!(e))?;
-    let refusal = ap_build::sources::recipe_refusal(branch.is_some_and(|b| b.update), regen);
+    let refusal =
+        ap_build::sources::recipe_refusal(branch.is_some_and(|b| b.keeps_recipe()), regen);
     let (name, rpm_name, subprojects, unknown_build_system) =
         resolve_names(name, &version, &source_repo, refusal, &reporter)?;
     // The run's key is the lowercase guess; the pipeline resolves the spelling
