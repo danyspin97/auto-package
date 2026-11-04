@@ -109,6 +109,7 @@ pub(super) fn update_in_place(
         Some(t) => t.tap(base_reporter.clone(), None),
         None => base_reporter.clone(),
     };
+    ap_core::sink::set_reporter(reporter.clone());
     if let Some(t) = &tui_ctrl {
         t.set_recorder(base_reporter.clone());
     }

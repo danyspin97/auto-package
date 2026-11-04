@@ -102,3 +102,14 @@ fn lines_recorded_before_the_file_is_attached_are_written_to_it() {
     assert_eq!(text, "warning: early\nnote: early too\nwarning: later\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_warning_and_its_held_line_are_one_line() {
+    assert_eq!(canonical("warning: x"), "x");
+    assert_eq!(canonical("note: x"), "note: x");
+    let mut d = Diagnostics::default();
+    assert_eq!(d.offer("warning: x", true), Offer::Held);
+    // The reporter's copy of the same warning is not held twice.
+    assert_eq!(d.offer(canonical("warning: x"), true), Offer::Repeat);
+    assert_eq!(d.held.len(), 1);
+}

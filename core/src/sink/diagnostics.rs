@@ -8,11 +8,21 @@ use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use super::{LogLevel, is_quiet, printable};
+use super::{Event, LogLevel, Reporter, is_quiet, printable};
 
 static DIAG: Mutex<Option<Diagnostics>> = Mutex::new(None);
+
+/// The run's reporter, which a held line is reported through (to the run log
+/// and to the TUI's log pane).
+static REPORTER: Mutex<Option<Arc<dyn Reporter + Send + Sync>>> = Mutex::new(None);
+
+/// The key a line is held and deduplicated under: a `warning: ` prefix is
+/// dropped, since a warning event carries its message without it.
+pub(crate) fn canonical(line: &str) -> &str {
+    line.strip_prefix("warning: ").unwrap_or(line)
+}
 
 /// What became of a line offered to [`Diagnostics`].
 #[derive(Debug, PartialEq, Eq)]
@@ -47,7 +57,7 @@ impl Diagnostics {
     /// Offers an ordinary line: printed now, or held while `quiet` (the TUI
     /// owns the terminal). An identical line is dropped.
     pub(crate) fn offer(&mut self, line: &str, quiet: bool) -> Offer {
-        if !self.seen.insert(line.to_string()) {
+        if !self.seen.insert(canonical(line).to_string()) {
             return Offer::Repeat;
         }
         self.record(line);
@@ -131,14 +141,38 @@ pub fn set_log_level(level: LogLevel) {
     with(|d| d.debug = level >= LogLevel::Debug);
 }
 
-/// Prints an ordinary diagnostic line, or holds it while the TUI is up. The
-/// line is printed at most once per process.
+/// Prints an ordinary diagnostic line, or holds it while the TUI is up (and
+/// then reports it as a warning through the run's reporter, once). The line is
+/// printed at most once per process.
 pub fn emit(line: &str) {
-    let line = printable(line);
+    let line = printable(line).into_owned();
     let quiet = is_quiet();
-    if let Offer::Print(line) = with(|d| d.offer(&line, quiet)) {
-        eprintln!("{line}");
+    match with(|d| d.offer(&line, quiet)) {
+        Offer::Print(line) => eprintln!("{line}"),
+        Offer::Held => {
+            let reporter = REPORTER.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            if let Some(reporter) = reporter {
+                reporter.report(&Event::Warning {
+                    step: None,
+                    message: canonical(&line).to_string(),
+                });
+            }
+        }
+        Offer::Recorded | Offer::Repeat => {}
     }
+}
+
+/// Holds a warning that a reporter is printing (while the TUI is up), so the
+/// count and the file have it. It is not reported again: the caller has it.
+pub fn hold_warning(message: &str) {
+    let message = printable(message);
+    with(|d| d.offer(&format!("warning: {message}"), true));
+}
+
+/// Sets the reporter that held lines are reported through. Set it once the
+/// run's reporter exists, so the lines reach its log and the TUI.
+pub fn set_reporter(reporter: Arc<dyn Reporter + Send + Sync>) {
+    *REPORTER.lock().unwrap_or_else(|p| p.into_inner()) = Some(reporter);
 }
 
 /// Offers a debug line for `key`: recorded once in the diagnostics file, and

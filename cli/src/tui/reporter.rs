@@ -63,7 +63,7 @@ impl Reporter for PlainOutput {
         if ap_core::sink::is_quiet() {
             // A warning is held for the summary after the TUI; the run log has every event.
             if let Event::Warning { message, .. } = event {
-                ap_core::sink::emit(&format!("warning: {message}"));
+                ap_core::sink::hold_warning(message);
             }
             return;
         }

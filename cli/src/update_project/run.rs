@@ -154,6 +154,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         Some(t) => t.tap(base_reporter.clone(), None),
         None => base_reporter.clone(),
     };
+    ap_core::sink::set_reporter(reporter.clone());
     if let Some(t) = &tui_ctrl {
         t.set_recorder(base_reporter.clone());
     }
