@@ -510,6 +510,7 @@ mod port_lines {
         assert_eq!(
             section_lines(&[not_testable, not_final, no_base, also]),
             vec![
+                "p: built (fails on openSUSE_Factory_PowerPC/ppc64le, openSUSE_Factory_zSystems/ppc64le)",
                 "p not testable on s390x: nothing provides libwlroots-0_20",
                 "p openSUSE_Factory_RISCV/riscv64: not final (building) (results on riscv64 can take hours: re-run `auto-package update` later to refresh)",
                 "p openSUSE_Factory_PowerPC/ppc64le: failed (no Factory baseline)",

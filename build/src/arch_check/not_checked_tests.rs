@@ -52,3 +52,31 @@ fn a_built_result_beside_disabled_ones_is_not_a_not_checked_line() {
     ];
     assert!(section_lines(&rows).is_empty());
 }
+
+#[test]
+fn a_package_that_fails_on_an_arch_gets_a_badge_line_and_a_clean_one_does_not() {
+    let for_pkg = |state: ArchState, arch: &str, pkg: &str| ArchRow {
+        pkg: pkg.into(),
+        baseline: BaselineState::NoResult,
+        ..row("openSUSE_Factory", arch, state)
+    };
+    let rows = [
+        for_pkg(ArchState::Succeeded, "aarch64", "libdfp"),
+        for_pkg(ArchState::Failed { detail: None }, "riscv64", "libdfp"),
+        row("openSUSE_Factory", "x86_64", ArchState::Succeeded),
+    ];
+    let badges = badge_lines(&rows);
+    assert_eq!(
+        badges,
+        ["libdfp: built (fails on openSUSE_Factory/riscv64)"]
+    );
+    let lines = section_lines(&rows);
+    assert_eq!(lines[0], badges[0]);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("no result in the origin: not blocking")),
+        "{lines:?}"
+    );
+    assert!(section_lines(&[for_pkg(ArchState::Succeeded, "aarch64", "libdfp")]).is_empty());
+}

@@ -65,14 +65,52 @@ impl ArchRow {
     }
 }
 
-/// The lines of the "Other architectures" section: first one for each package
-/// none of whose other results was built (see [`not_checked_lines`]), then one
-/// per result that is not succeeded or skipped, one line each for a
+/// The `repo/arch` names of the failing results in `rows`, first seen wins.
+pub fn failing_arches(rows: &[ArchRow]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for row in rows.iter().filter(|r| r.state.is_failure()) {
+        let name = format!("{}/{}", row.repo, row.arch);
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// The badge of a package that built but fails on other arches: `built (fails
+/// on repo/arch, ...)`. `None` when `failing` is empty, so the package reads
+/// as plainly built.
+pub fn badge_text(failing: &[String]) -> Option<String> {
+    (!failing.is_empty()).then(|| format!("built (fails on {})", failing.join(", ")))
+}
+
+/// One badge line for each package with a failing result, in the order the
+/// packages first appear in `rows`.
+pub fn badge_lines(rows: &[ArchRow]) -> Vec<String> {
+    let mut pkgs: Vec<&str> = Vec::new();
+    for row in rows {
+        if !pkgs.contains(&row.pkg.as_str()) {
+            pkgs.push(&row.pkg);
+        }
+    }
+    pkgs.into_iter()
+        .filter_map(|pkg| {
+            let own: Vec<ArchRow> = rows.iter().filter(|r| r.pkg == pkg).cloned().collect();
+            badge_text(&failing_arches(&own)).map(|b| format!("{pkg}: {b}"))
+        })
+        .collect()
+}
+
+/// The lines of the "Other architectures" section: first one badge line for
+/// each package that fails on an arch (see [`badge_lines`]), then one for each
+/// package none of whose other results was built (see [`not_checked_lines`]),
+/// then one per result that is not succeeded or skipped, one line each for a
 /// `(pkg, repo, arch)`, first seen wins. A port result that is not testable
 /// gets a line saying so. Empty when every checked result succeeded.
 pub fn section_lines(rows: &[ArchRow]) -> Vec<String> {
     let mut seen: Vec<(&str, &str, &str)> = Vec::new();
-    let mut out = not_checked_lines(rows);
+    let mut out = badge_lines(rows);
+    out.extend(not_checked_lines(rows));
     for row in rows {
         if matches!(row.state, ArchState::Succeeded) || row.state.is_skipped() {
             continue;

@@ -131,6 +131,13 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
         pkg,
         run_pkg_dir.as_deref(),
     );
+    // A built package that fails on another arch says so where its result is.
+    let failing = failing_arch_checks(&p.arch_checks);
+    if ex.outcome.result == "built"
+        && let Some(badge) = crate::arch_check::badge_text(&failing)
+    {
+        ex.outcome.result = badge;
+    }
     ex.flaky = flaky_lines(&p, &q.package_notes, dir, pkg, chosen.as_deref());
     ex.ladder = Ladder {
         max_round: p.attempts.iter().filter_map(|a| a.round).max(),
@@ -236,6 +243,29 @@ pub(super) fn label(v: &Value) -> String {
         Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+/// The `repo/arch` names that the `arch_check` events say fail, by their state
+/// label (see `ArchState::label`).
+fn failing_arch_checks(events: &[Value]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in events
+        .iter()
+        .flat_map(|v| v["results"].as_array().into_iter().flatten())
+    {
+        let state = r["state"].as_str().unwrap_or("");
+        let fails =
+            matches!(state, "failed" | "unresolvable" | "broken") || state.starts_with("failed (");
+        let name = format!(
+            "{}/{}",
+            r["repo"].as_str().unwrap_or("?"),
+            r["arch"].as_str().unwrap_or("?")
+        );
+        if fails && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// The results of an `arch_check` event that are not succeeded, one line each:

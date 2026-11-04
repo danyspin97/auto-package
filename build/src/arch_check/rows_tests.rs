@@ -71,6 +71,7 @@ fn the_section_lists_each_failing_result_once() {
     assert_eq!(
         section_lines(&rows),
         vec![
+            "p: built (fails on ports/s390x, ports/aarch64)",
             "p ports/s390x: failed: ld: cannot find -lfoo [log: /w/logs/p-s390x.log]",
             "q ports/armv7l: still building",
             "p ports/aarch64: unresolvable: missing foo-devel (also fails in the origin)",

@@ -370,6 +370,25 @@ fn a_port_result_that_fails_in_factory_too_says_so() {
 }
 
 #[test]
+fn a_built_package_that_fails_on_another_arch_says_so_in_its_result() {
+    let t = fixture(&[
+        r#"{"pkg":"foo","event":"package_finished","version":"2.0","outcome":"Built"}"#,
+        r#"{"event":"arch_check","package":"foo","results":[{"repo":"openSUSE_Factory","arch":"riscv64","state":"failed","origin_fails":false,"origin_missing":true},{"repo":"openSUSE_Factory","arch":"aarch64","state":"succeeded","origin_fails":false}]}"#,
+    ]);
+    let ex = explain(&query(t.path())).unwrap();
+    assert_eq!(
+        ex.outcome.result,
+        "built (fails on openSUSE_Factory/riscv64)"
+    );
+    let ok = fixture(&[
+        r#"{"pkg":"foo","event":"package_finished","version":"2.0","outcome":"Built"}"#,
+        r#"{"event":"arch_check","package":"foo","results":[{"repo":"openSUSE_Factory","arch":"aarch64","state":"succeeded","origin_fails":false}]}"#,
+    ]);
+    let ex = explain(&query(ok.path())).unwrap();
+    assert_eq!(ex.outcome.result, "built");
+}
+
+#[test]
 fn a_failure_the_origin_has_no_result_for_says_it_is_not_blocking() {
     let t = fixture(&[
         r#"{"event":"arch_check","package":"foo","results":[{"repo":"openSUSE_Factory","arch":"riscv64","state":"failed","origin_fails":false,"origin_missing":true}]}"#,
