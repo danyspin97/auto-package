@@ -49,6 +49,9 @@ pub(super) struct RemovalJudgement {
     pub(super) proven: Vec<(String, DropProof)>,
     /// Removed without one: refused.
     pub(super) refused: Vec<Refusal>,
+    /// The names in `proven` that the edit disabled and did not remove: the
+    /// patch is still declared and its file is still there.
+    pub(super) disabled: Vec<String>,
 }
 
 /// Whether a declared patch name is a file the gate judges: a relative path
@@ -200,7 +203,12 @@ pub(super) fn judge_removals(
             );
         }
         match proof {
-            Ok(proof) => judged.proven.push((name, proof)),
+            Ok(proof) => {
+                if matches!(kind, RemovalKind::Disabled(_)) {
+                    judged.disabled.push(name.clone());
+                }
+                judged.proven.push((name, proof));
+            }
             Err(reason) => {
                 let security = is_security_patch(&name, diff.unwrap_or_default());
                 let renamed_to = diff
@@ -225,6 +233,96 @@ pub(super) fn judge_removals(
         }
     }
     judged
+}
+
+/// Finish the patches an edit disabled with a proof (`judged.disabled`) as
+/// removals: the `PatchN:` line, the `%patch` lines, the file and the `series`
+/// line go. Done before the edit is accepted, so the acceptance checks see the
+/// patch removed; a rejected edit restores them with the rest of the turn.
+///
+/// Only with a `snapshot`: the later checks read the removed file from it, and
+/// without one they would find it gone and refuse. The spec is written first and
+/// the files go only once it is written. `Ok(true)` when the patches were
+/// finished, `Ok(false)` when there was nothing to do or no snapshot.
+pub(super) fn finish_proven_disables(
+    checkout_dir: &Path,
+    spec_path: &Path,
+    before: &str,
+    judged: &RemovalJudgement,
+    snapshot: Option<&CheckoutSnapshot>,
+) -> Result<bool, String> {
+    let names = &judged.disabled;
+    if names.is_empty() || snapshot.is_none() {
+        return Ok(false);
+    }
+    let nums: Vec<String> = crate::patch_check::declared_patches(before)
+        .into_iter()
+        .filter(|(_, n)| names.contains(n))
+        .map(|(num, _)| num)
+        .collect();
+    let spec = std::fs::read_to_string(spec_path).map_err(|e| e.to_string())?;
+    let fixed = crate::pipeline::patch_stage::without_patch_applications(
+        &without_patches(&spec, names),
+        &nums,
+    );
+    if fixed != spec {
+        std::fs::write(spec_path, &fixed)
+            .map_err(|e| format!("cannot write {}: {e}", spec_path.display()))?;
+    }
+    for name in names {
+        let _ = std::fs::remove_file(checkout_dir.join(name));
+    }
+    crate::pipeline::patch_stage::drop_series_lines(checkout_dir, names);
+    Ok(true)
+}
+
+/// Whether the newest `.changes` entry already has a `Drop <name>` bullet.
+fn drop_bullet_exists(checkout_dir: &Path, name: &str) -> bool {
+    let Some(text) =
+        osc::newest_changes_file(checkout_dir).and_then(|f| std::fs::read_to_string(f).ok())
+    else {
+        return false;
+    };
+    let head = format!("Drop {name}");
+    text.lines()
+        .skip(1)
+        .take_while(|l| !(l.trim().len() >= 20 && l.trim().bytes().all(|b| b == b'-')))
+        .any(|l| {
+            l.trim()
+                .trim_start_matches(['-', '*', ' '])
+                .starts_with(&head)
+        })
+}
+
+/// The `.changes` bullets of the patches [`finish_proven_disables`] removed:
+/// `Drop <name>: already applied upstream (<proof>)`, once the edit is kept.
+pub(super) fn note_proven_disables(
+    config: &PipelineConfig,
+    checkout_dir: &Path,
+    judged: &RemovalJudgement,
+    reporter: &dyn Reporter,
+    step: &StepDir,
+) {
+    for (name, proof) in judged
+        .proven
+        .iter()
+        .filter(|(n, _)| judged.disabled.contains(n))
+    {
+        // The agent's own bullet may already say it was dropped.
+        if drop_bullet_exists(checkout_dir, name) {
+            continue;
+        }
+        warn_if_err(
+            reporter,
+            "adding the .changes entry for a disabled patch",
+            osc::add_release_changes_entry(
+                checkout_dir,
+                &config.version,
+                &crate::patch_check::proven_drop_bullet(name, *proof),
+                Emit::new(reporter, step.id),
+            ),
+        );
+    }
 }
 
 /// The patches whose removal is refused (see [`judge_removals`]).

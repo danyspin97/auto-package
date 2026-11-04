@@ -189,7 +189,25 @@ fn apply_turn_outcome_with(
             // A patch is removed only with quilt's proof that its change is
             // already in the new sources; never because it does not apply.
             let judged = judge_removals(&config.version, checkout_dir, spec_path, before, snapshot);
-            let unproven = judged.refused;
+            let unproven = judged.refused.clone();
+            // A patch the edit disabled with a proof is finished as a removal
+            // before the checks, which see it removed.
+            let finished = if unproven.is_empty() {
+                match finish_proven_disables(checkout_dir, spec_path, before, &judged, snapshot) {
+                    Ok(done) => done,
+                    Err(e) => {
+                        restore_spec(spec_path, before, Some(step), reporter);
+                        if let Some(snap) = snapshot {
+                            snap.restore_keeping(reporter, Some(step), &keep);
+                        }
+                        return Err(
+                            format!("{label}: could not finish the disabled patch: {e}").into()
+                        );
+                    }
+                }
+            } else {
+                false
+            };
             // A new patch must be named by the bullet; a build system switch
             // needs evidence and gets its own bullet (`build_switch`).
             let switch = switch_of_edit(spec_path, before);
@@ -280,6 +298,9 @@ fn apply_turn_outcome_with(
                     });
                 }
                 add_edit_changes_entry(config, checkout_dir, reporter, step, &bullet_source);
+                if finished {
+                    note_proven_disables(config, checkout_dir, &judged, reporter, step);
+                }
             }
             Ok(if changed {
                 TurnEffect::Edited
