@@ -37,6 +37,14 @@ pub(super) fn applies(item: &Item, a: &UpdateProjectArgs) -> bool {
         && item.old_version != item.new_version
 }
 
+/// The version scheme the item's versions are compared in.
+pub(super) fn scheme_of(item: &Item) -> Scheme {
+    match item.ecosystem {
+        Ecosystem::Pypi { .. } => Scheme::Pep440,
+        _ => Scheme::Generic,
+    }
+}
+
 /// Decide from the branch's copy. `held` reads the `Version:` the branch holds
 /// (`Ok(None)` when it holds no package) and `built` the build status of the
 /// branch's package; `built` is read only for a branch that holds upstream's
@@ -54,15 +62,11 @@ pub(super) fn settle(
         Ok(held) => held,
         Err(why) => return Settlement::Unreadable(format!("its copy could not be read: {why}")),
     };
-    let scheme = match item.ecosystem {
-        Ecosystem::Pypi { .. } => Scheme::Pep440,
-        _ => Scheme::Generic,
-    };
     match branch_state(
         &item.old_version,
         held.as_deref(),
         &item.new_version,
-        scheme,
+        scheme_of(item),
     ) {
         // The Version alone does not say the update worked: an attempt that
         // failed, or was cut short, may leave it in the branch. Only a build

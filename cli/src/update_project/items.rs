@@ -36,6 +36,7 @@ pub(super) fn branch_item(
     item: &mut Item,
     follow_devel: bool,
     revision: Option<&str>,
+    rebase: bool,
     ctx: &Ctx<'_>,
 ) -> Result<(), String> {
     let emit = Emit::run(ctx.reporter.as_ref());
@@ -126,8 +127,10 @@ pub(super) fn branch_item(
         }
         BranchResult::AlreadyThere => {
             ctx.say(format!("{branch} already has {}; reusing it", item.pkg));
-            // A branch left by an earlier run may be behind its origin.
-            match osc::rebase_package(branch, &item.pkg, emit) {
+            // A branch left by an earlier run may be behind its origin; one
+            // that is continued from is ahead of it, and stays as it is.
+            match rebase_unless_continuing(rebase, || osc::rebase_package(branch, &item.pkg, emit))
+            {
                 Ok(osc::Rebased::NotALink) => {}
                 Ok(osc::Rebased::Clean) => {
                     ctx.say(format!("rebased {branch}/{} onto its origin", item.pkg))
@@ -170,6 +173,19 @@ pub(super) fn branch_item(
         }
     }
     Ok(())
+}
+
+/// The result of `rebase` when the branch is to be rebased onto its origin;
+/// otherwise `rebase` is not called, and there was nothing to rebase.
+pub(super) fn rebase_unless_continuing(
+    rebase: bool,
+    run: impl FnOnce() -> Result<osc::Rebased, osc::Error>,
+) -> Result<osc::Rebased, osc::Error> {
+    if rebase {
+        run()
+    } else {
+        Ok(osc::Rebased::NotALink)
+    }
 }
 
 /// Check `item`'s BuildRequires against the branch project's paths and add

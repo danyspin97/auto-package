@@ -183,6 +183,13 @@ pub(super) fn cmd_update_project(
         if existing::settled_in_branch(&item, branch, a, ctx, report) {
             continue;
         }
+        // A lint of a branch an earlier update left ahead of its origin
+        // continues from it: the branch call must not rebase it.
+        let Some(continuing) =
+            existing_lint::continue_from_branch(&mut item, branch, a, ctx, report)
+        else {
+            continue;
+        };
         if a.in_place {
             // The package is already where it will be changed, and its
             // BuildRequires resolve: it builds there today.
@@ -227,6 +234,7 @@ pub(super) fn cmd_update_project(
                 &mut item,
                 a.follow_devel,
                 a.revision.as_deref(),
+                !continuing,
                 ctx,
             ) {
                 Ok(()) => {
