@@ -170,13 +170,28 @@ pub(crate) fn looks_like_version(word: &str) -> bool {
 }
 
 /// A version as rpm compares it: lower case, no `v`, no `+git...`-style
-/// suffix, and `-`, `_` and `~` all the separator `.` (`1.0-rc1` and `1.0~rc1`
-/// are one release).
+/// suffix, and `-`, `_` and `~` all the separator `.`. A run of letters and a
+/// run of digits are parts of their own, so `1.0-rc1`, `1.0~rc1`, `1.0rc1` and
+/// `1.0.rc.1` are one release.
 fn normalised(version: &str) -> String {
     let v = version.to_ascii_lowercase();
     let v = v.strip_prefix('v').unwrap_or(&v);
     let v = v.split('+').next().unwrap_or(v);
-    v.replace(['-', '_', '~'], ".")
+    let mut out = String::new();
+    let mut prev: Option<char> = None;
+    for c in v.chars() {
+        let c = if matches!(c, '-' | '_' | '~') { '.' } else { c };
+        if let Some(p) = prev
+            && p != '.'
+            && c != '.'
+            && p.is_ascii_digit() != c.is_ascii_digit()
+        {
+            out.push('.');
+        }
+        out.push(c);
+        prev = Some(c);
+    }
+    out
 }
 
 /// How a bullet's version differs from the Version: `None` when they are the

@@ -113,6 +113,25 @@ fn a_version_change_needs_a_matching_update_bullet() {
 }
 
 #[test]
+fn the_rc_spellings_of_one_version_are_one_release() {
+    for (a, b) in [
+        ("3.0rc1", "3.0~rc1"),
+        ("3.0rc1", "3.0.rc.1"),
+        ("3.0-rc1", "3.0.rc1"),
+        ("1.0a", "1.0.a"),
+    ] {
+        assert_eq!(
+            crate::request_review::changes_checks::mismatch(a, b),
+            None,
+            "{a} vs {b}"
+        );
+    }
+    use crate::request_review::changes_checks::mismatch;
+    assert_eq!(mismatch("3.0rc1", "3.0"), Some(false));
+    assert_eq!(mismatch("3.0rc1", "3.1"), Some(true));
+}
+
+#[test]
 fn an_update_bullet_that_is_no_version_or_that_rpm_spells_differently_is_no_blocker() {
     let run = |bullet: &str, new_version: &'static str| {
         let new = with_entry(&format!("- {bullet}\n  * notes"));
