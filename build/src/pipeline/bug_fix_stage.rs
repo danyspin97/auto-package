@@ -160,7 +160,9 @@ fn fix_inner(
     task: &FixTask,
     mut seams: FixSeams<'_>,
 ) -> Result<(), PipelineResult> {
-    let FixTask::Bug(job) = task;
+    let Some(job) = task.bug() else {
+        unreachable!("review_stage sends only a bug fix here")
+    };
     let RunCtx {
         pkg_run,
         reporter,

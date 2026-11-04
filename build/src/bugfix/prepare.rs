@@ -45,6 +45,18 @@ pub struct FixJob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FixTask {
     Bug(FixJob),
+    /// The findings of a review of a submit request, fixed in its branch.
+    Findings(FindingsJob),
+}
+
+impl FixTask {
+    /// The job of a bug fix; `None` for the findings of a request.
+    pub fn bug(&self) -> Option<&FixJob> {
+        match self {
+            FixTask::Bug(job) => Some(job),
+            FixTask::Findings(_) => None,
+        }
+    }
 }
 
 /// How the upstream fix of a job was found.
@@ -73,7 +85,7 @@ pub enum FixedIn {
 pub fn fetch_hosts_of(task: Option<&FixTask>) -> &[String] {
     match task {
         Some(FixTask::Bug(job)) => &job.fetch_hosts,
-        None => &[],
+        Some(FixTask::Findings(_)) | None => &[],
     }
 }
 
@@ -84,7 +96,10 @@ pub fn fix_risk_flags(
     before: &crate::risk_flags::Files,
     after: &crate::risk_flags::Files,
 ) -> Vec<crate::risk_flags::RiskFlag> {
-    let FixTask::Bug(job) = task;
+    // The findings of a request add no upstream patch: the generic flags cover them.
+    let Some(job) = task.bug() else {
+        return Vec::new();
+    };
     let staged: Vec<(String, String)> = job
         .patches
         .iter()

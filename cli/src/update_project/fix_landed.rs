@@ -15,7 +15,10 @@ pub(super) fn landed(
     spec: &str,
     committed: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(), String> {
-    let FixTask::Bug(job) = task;
+    // The findings of a request are judged by the review that follows the run.
+    let Some(job) = task.bug() else {
+        return Ok(());
+    };
     // Nothing is submitted for a package the fix stage did not settle in this run.
     let Some(end) = end.filter(|e| e.verdict == "fixed") else {
         return Err(
@@ -51,7 +54,9 @@ pub(super) fn check(
     task: &FixTask,
     ctx: &Ctx<'_>,
 ) -> Result<(), String> {
-    let FixTask::Bug(job) = task;
+    let Some(job) = task.bug() else {
+        return Ok(());
+    };
     let emit = Emit::run(ctx.reporter.as_ref());
     let ws = ap_build::workspace::Workspace::find_by_obs_name(&ctx.state_root, &item.pkg);
     let end = ws
