@@ -244,3 +244,36 @@ pub fn build_requires(spec: &str) -> Vec<BuildRequire> {
     }
     out
 }
+
+/// The spec sections; a line that opens one of them ends `%prep`.
+pub(crate) const SPEC_SECTIONS: &[&str] = &[
+    "prep",
+    "conf",
+    "generate_buildrequires",
+    "build",
+    "install",
+    "check",
+    "files",
+    "changelog",
+    "description",
+    "package",
+    "pre",
+    "post",
+    "preun",
+    "postun",
+    "pretrans",
+    "posttrans",
+    "verifyscript",
+    "clean",
+    "trigger",
+    "triggerin",
+    "triggerun",
+    "filetriggerin",
+];
+
+/// The section a spec line opens (`prep` for `%prep -q`), when it is one of
+/// [`SPEC_SECTIONS`].
+pub(crate) fn section_word(line: &str) -> Option<&str> {
+    let word = line.strip_prefix('%')?.split_whitespace().next()?;
+    SPEC_SECTIONS.contains(&word).then_some(word)
+}

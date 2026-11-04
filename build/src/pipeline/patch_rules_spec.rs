@@ -7,32 +7,6 @@
 use crate::pipeline::patch_check::*;
 use crate::pipeline::patch_rules::*;
 
-/// The spec sections; a line that opens one of them ends `%prep`.
-const SPEC_SECTIONS: &[&str] = &[
-    "prep",
-    "conf",
-    "generate_buildrequires",
-    "build",
-    "install",
-    "check",
-    "files",
-    "changelog",
-    "description",
-    "package",
-    "pre",
-    "post",
-    "preun",
-    "postun",
-    "pretrans",
-    "posttrans",
-    "verifyscript",
-    "clean",
-    "trigger",
-    "triggerin",
-    "triggerun",
-    "filetriggerin",
-];
-
 /// Path prefixes and the `#!` of a script: a `sed -i` that substitutes one fixes the
 /// build (a `/usr/bin/python` the script calls), it does not edit the sources.
 const SED_PATH_MARKERS: &[&str] = &["/usr/", "/bin/", "/sbin/", "/etc/", "/opt/", "/lib", "#!"];
@@ -62,13 +36,8 @@ pub(super) fn spec_route_problems(before: &str, after: &str) -> Vec<String> {
     let mut in_prep = false;
     for line in after.lines() {
         let t = line.trim();
-        if let Some(section) = line.strip_prefix('%') {
-            let word = section.split_whitespace().next().unwrap_or("");
-            if word == "prep" {
-                in_prep = true;
-            } else if SPEC_SECTIONS.contains(&word) {
-                in_prep = false;
-            }
+        if let Some(section) = crate::spec::section_word(line) {
+            in_prep = section == "prep";
         }
         if let Some(n) = old.get_mut(t)
             && *n > 0
