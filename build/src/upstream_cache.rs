@@ -30,7 +30,7 @@ pub const TTL: Duration = Duration::from_secs(60 * 60);
 /// Bumped whenever the lookups change what they answer for the same key (a
 /// directory listing read another way, a tag filtered differently), so the
 /// answers an older lookup stored are asked again instead of served.
-pub const LOGIC_VERSION: u32 = 2;
+pub const LOGIC_VERSION: u32 = 3;
 
 /// New entries kept in memory before the file is written.
 pub const SAVE_EVERY: usize = 50;
@@ -354,7 +354,8 @@ mod tests {
     #[test]
     fn an_entry_without_a_ttl_keeps_the_default_ttl() {
         // Written before the field existed: fresh for the default TTL.
-        let legacy: Entry = serde_json::from_str(r#"{"version":"1","at":100,"logic":2}"#).unwrap();
+        let json = format!(r#"{{"version":"1","at":100,"logic":{LOGIC_VERSION}}}"#);
+        let legacy: Entry = serde_json::from_str(&json).unwrap();
         assert!(legacy.fresh(100 + TTL.as_secs() - 1));
         assert!(!legacy.fresh(100 + TTL.as_secs()));
     }
