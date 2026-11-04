@@ -11,7 +11,7 @@ use super::build_check::build_report;
 use super::changes_checks::{ChangesCtx, changes_findings};
 use super::downloads::{Downloads, download_disabled, download_sources};
 use super::fetch::RequestObs;
-use super::gather::{ActionInputs, ReviewError, Skipped, gather};
+use super::gather::{ActionInputs, Inputs, ReviewError, Skipped, gather};
 use super::patch_checks::patch_findings;
 use super::report::{ActionReport, Report, RequestSummary, SCHEMA, exit_code};
 use super::risk::risk_findings;
@@ -183,13 +183,19 @@ fn check_action(
     })
 }
 
+/// A finished review: the report and what was read to make it.
+pub struct Reviewed {
+    pub report: Report,
+    pub inputs: Inputs,
+}
+
 /// Review request `o.id`: read it, run every check, build the report. An error
 /// is a required read that failed.
 pub fn review(
     obs: &dyn RequestObs,
     o: &Options<'_>,
     deps: &Deps<'_>,
-) -> Result<Report, ReviewError> {
+) -> Result<Reviewed, ReviewError> {
     let inputs = gather(obs, o.id)?;
     let actions = inputs
         .actions
@@ -198,7 +204,7 @@ pub fn review(
         .map(|(i, a)| check_action(obs, a, o, deps, &inputs.doc.state.created, i))
         .collect::<Result<Vec<ActionReport>, ReviewError>>()?;
     let doc = &inputs.doc;
-    let mut request_findings: Vec<Finding> = inputs.findings;
+    let mut request_findings: Vec<Finding> = inputs.findings.clone();
     request_findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
     let mut report = Report {
         schema: SCHEMA,
@@ -218,5 +224,5 @@ pub fn review(
         exit: 0,
     };
     report.exit = exit_code(&report);
-    Ok(report)
+    Ok(Reviewed { report, inputs })
 }

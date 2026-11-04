@@ -138,6 +138,8 @@ pub struct ActionInputs {
 
 #[derive(Debug, Clone)]
 pub struct Inputs {
+    /// The request document as OBS sent it.
+    pub request_xml: String,
     pub doc: RequestDoc,
     /// The findings of the request as a whole.
     pub findings: Vec<Finding>,
@@ -242,6 +244,7 @@ pub fn gather(obs: &dyn RequestObs, id: &str) -> Result<Inputs, ReviewError> {
         actions.push(gather_action(obs, &doc, source, target)?);
     }
     Ok(Inputs {
+        request_xml: xml,
         doc,
         findings,
         actions,

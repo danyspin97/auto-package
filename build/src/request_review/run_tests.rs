@@ -39,7 +39,9 @@ fn options<'a>(scratch: &'a std::path::Path, download: bool) -> Options<'a> {
 #[test]
 fn the_real_request_has_only_the_findings_the_fake_obs_explains() {
     let dir = tempfile::tempdir().unwrap();
-    let report = review(&obs(), &options(dir.path(), true), &deps()).unwrap();
+    let report = review(&obs(), &options(dir.path(), true), &deps())
+        .unwrap()
+        .report;
     let found: Vec<_> = report.check_findings().map(|f| f.id).collect();
     // The fake holds no build result for the source package.
     assert_eq!(
@@ -60,7 +62,9 @@ fn the_real_request_has_only_the_findings_the_fake_obs_explains() {
 fn no_download_never_downloads_and_says_what_was_not_checked() {
     let dir = tempfile::tempdir().unwrap();
     let o = obs();
-    let report = review(&o, &options(dir.path(), false), &deps()).unwrap();
+    let report = review(&o, &options(dir.path(), false), &deps())
+        .unwrap()
+        .report;
     assert_eq!(o.called("download"), 0);
     assert!(
         report.actions[0]
@@ -94,7 +98,7 @@ fn a_missing_request_is_an_error_and_a_threshold_of_blocker_passes() {
     assert!(review(&obs(), &opts, &deps()).is_err());
     let mut opts = options(dir.path(), false);
     opts.fail_on = Severity::Blocker;
-    assert_eq!(review(&obs(), &opts, &deps()).unwrap().exit, 0);
+    assert_eq!(review(&obs(), &opts, &deps()).unwrap().report.exit, 0);
 }
 
 #[test]
@@ -113,7 +117,9 @@ fn a_read_the_checks_need_ends_the_review_with_an_error() {
     let mut o = obs();
     o.failing
         .insert("open_requests_to", super::fetch::ReadFailure::new("503"));
-    let report = review(&o, &options(dir.path(), false), &deps()).unwrap();
+    let report = review(&o, &options(dir.path(), false), &deps())
+        .unwrap()
+        .report;
     assert!(
         report
             .check_findings()
