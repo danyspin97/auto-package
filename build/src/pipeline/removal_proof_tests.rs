@@ -93,6 +93,7 @@ fn an_unchecked_security_patch_is_refused_and_named() {
 fn the_refusal_text_states_why_no_proof_was_made() {
     let text = unproven_removal_problem(&[Refusal {
         name: "p.patch".into(),
+        kind: RemovalKind::Removed,
         security: false,
         renamed_to: None,
         reason: "quilt checked it, it does not `can be reverse-applied`".into(),
@@ -101,6 +102,7 @@ fn the_refusal_text_states_why_no_proof_was_made() {
     assert!(!text.contains("fails and is not upstream"), "{text}");
     let unchecked = unproven_removal_problem(&[Refusal {
         name: "p.patch".into(),
+        kind: RemovalKind::Removed,
         security: true,
         renamed_to: None,
         reason: "quilt did not check it (no source archive)".into(),

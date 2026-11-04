@@ -293,6 +293,41 @@ pub fn applied_paths(spec: &str) -> BTreeMap<String, BTreeSet<GuardPath>> {
     out
 }
 
+/// The lines of `%prep` that narrow what the spec applies: `%autosetup` with
+/// `-N`, and `%autopatch` with a list or a range. Whitespace is collapsed.
+fn narrowing_lines(spec: &str) -> BTreeSet<String> {
+    let mut in_prep = false;
+    let mut out = BTreeSet::new();
+    for line in spec.lines() {
+        if let Some(section) = section_word(line) {
+            in_prep = section == "prep";
+        }
+        let trimmed = line.trim();
+        if !in_prep || trimmed.starts_with('#') {
+            continue;
+        }
+        let words: Vec<&str> = trimmed.split_whitespace().collect();
+        let narrows = match words.first().copied() {
+            Some("%autosetup" | "%forgeautosetup") => words[1..]
+                .iter()
+                .any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('N')),
+            Some("%autopatch") => !matches!(autopatch_applies(&words[1..]), Some(Applies::All)),
+            _ => false,
+        };
+        if narrows {
+            out.insert(collapse(trimmed));
+        }
+    }
+    out
+}
+
+/// Whether `after` has a narrowing line (`%autosetup -N`, an `%autopatch` list
+/// or range) that `before` did not have. Such a line stops every patch added
+/// later from being applied, so it is no way to disable one patch.
+pub fn narrows_applications(before: &str, after: &str) -> bool {
+    !narrowing_lines(after).is_subset(&narrowing_lines(before))
+}
+
 /// Patches `before` applies and `after` still declares (by
 /// [`declared_patches`](super::declared_patches), which ignores `%if`), but no
 /// longer applies everywhere it did. The patches `after` no longer declares

@@ -434,7 +434,7 @@ pub(super) fn reject_patch_rules(
     append_notes(
         notes_path,
         &format!(
-            "\n## Edit rejected — a patch rule or a patch removal\n{problem}\n\
+            "\n## Edit rejected — a patch rule or a patch removal or disable\n{problem}\n\
              A patch the edit adds needs a header with Subject:, Description: and \
              Upstream: (a URL, a status word, or `not yet reported`); a `Patch:` line with a \
              `# PATCH-FIX-...` comment above it; and changes to source code only (no removed \

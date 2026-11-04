@@ -385,3 +385,38 @@ fn a_guard_on_a_bcond_the_spec_does_not_declare_is_a_condition() {
         conditional(&["b.patch"], "%if %{with x} [then]")
     );
 }
+
+#[test]
+fn only_a_new_narrowing_line_narrows() {
+    assert!(narrows_applications(
+        &a(),
+        &edit(&a(), "%autosetup -p1", "%autosetup -p1 -N")
+    ));
+    let auto = spec("%autosetup -N\n%autopatch -p1\n");
+    assert!(narrows_applications(
+        &auto,
+        &edit(&auto, "%autopatch -p1", "%autopatch -p1 -M 0")
+    ));
+    assert!(narrows_applications(
+        &auto,
+        &edit(&auto, "%autopatch -p1", "%autopatch -p1 1")
+    ));
+    // Unchanged narrowing, a comment, and widening do not.
+    assert!(!narrows_applications(&auto, &auto));
+    assert!(!narrows_applications(
+        &auto,
+        &edit(&auto, "%autopatch -p1", "%autopatch  -p1")
+    ));
+    assert!(!narrows_applications(
+        &edit(&a(), "%autosetup -p1", "%autosetup -p1 -N"),
+        &a()
+    ));
+    assert!(!narrows_applications(
+        &a(),
+        &edit(&a(), "%autosetup -p1", "%autosetup -p1\n# %autosetup -N")
+    ));
+    assert!(!narrows_applications(
+        &s(),
+        &edit(&s(), "%patch -P 1 -p1\n", "")
+    ));
+}

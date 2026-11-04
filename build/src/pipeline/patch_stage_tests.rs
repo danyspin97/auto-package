@@ -16,7 +16,7 @@ fn outcome(action: crate::agent::Action, changelog: &str) -> crate::agent::TurnO
     out
 }
 
-fn quilt_missing() -> bool {
+pub(super) fn quilt_missing() -> bool {
     let missing = std::process::Command::new("quilt")
         .arg("--version")
         .env("QUILTRC", "/dev/null")
@@ -112,7 +112,7 @@ struct Case {
 
 /// The new sources of the real-quilt cases: `f.txt` has `B` on its second
 /// line already.
-fn source_tarball(checkout: &Path) {
+pub(super) fn source_tarball(checkout: &Path) {
     let file = std::fs::File::create(checkout.join("foo-1.0.tar.gz")).unwrap();
     let enc = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
     let mut ar = tar::Builder::new(enc);
@@ -126,9 +126,11 @@ fn source_tarball(checkout: &Path) {
 }
 
 /// A patch whose change `source_tarball` already has.
-const UPSTREAM_DIFF: &str = "--- a/f.txt\n+++ b/f.txt\n@@ -1,4 +1,4 @@\n a\n-b\n+B\n c\n d\n";
+pub(super) const UPSTREAM_DIFF: &str =
+    "--- a/f.txt\n+++ b/f.txt\n@@ -1,4 +1,4 @@\n a\n-b\n+B\n c\n d\n";
 /// A patch that neither applies nor reverse-applies to `source_tarball`.
-const FOREIGN_DIFF: &str = "--- a/f.txt\n+++ b/f.txt\n@@ -1,4 +1,4 @@\n a\n-x\n+X\n c\n d\n";
+pub(super) const FOREIGN_DIFF: &str =
+    "--- a/f.txt\n+++ b/f.txt\n@@ -1,4 +1,4 @@\n a\n-x\n+X\n c\n d\n";
 
 /// Run `patch_stage_with` on a package whose spec declares `patches` (name,
 /// content), with `scripts` as the agent's turns.
