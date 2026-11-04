@@ -78,6 +78,8 @@ use state::*;
 use text::*;
 
 #[cfg(test)]
+mod arch_badge_tests;
+#[cfg(test)]
 mod browse_tests;
 #[cfg(test)]
 mod expand_tests;

@@ -1,4 +1,5 @@
 use super::*;
+use ap_core::event::ArchCheckResult;
 
 /// Compact duration for the Step column: `42s`, `1m23s`.
 pub(super) fn fmt_dur(d: Duration) -> String {
@@ -188,6 +189,9 @@ impl TuiState {
                 let state = self.pkg_mut(pkg);
                 state.version = version.clone();
                 state.from_version = from_version.clone();
+                // A new attempt: the arches the last build failed on are not
+                // known until its check runs again.
+                state.arch_fails.clear();
                 state.status = PkgStatus::Queued;
                 state.started = Instant::now();
                 state.step = None;
@@ -279,6 +283,16 @@ impl TuiState {
                     PackageOutcome::Skipped { reason } => format!("skipped: {reason}"),
                 };
                 state.add_log(outcome_level(outcome), msg);
+            }
+            // The other-architecture check names its package in the event, and
+            // the package's row shows the failing arches as a badge.
+            Event::ArchCheck { package, results } => {
+                let fails = arch_failures(results);
+                let state = self.pkg_mut(package);
+                if let Some(badge) = ap_build::arch_check::badge_text(&fails) {
+                    state.add_log(LogLevel::Warn, badge);
+                }
+                state.arch_fails = fails;
             }
             // Run-level progress, from before any package has a row.
             Event::Progress { message, .. } if msg.pkg.is_none() => {
@@ -505,6 +519,18 @@ impl TuiState {
             _ => {}
         }
     }
+}
+
+/// The `repo/arch` names of the results an arch check found failing, once each.
+fn arch_failures(results: &[ArchCheckResult]) -> Vec<String> {
+    let mut fails: Vec<String> = Vec::new();
+    for r in results {
+        let name = format!("{}/{}", r.repo, r.arch);
+        if ap_build::arch_check::is_failure_label(&r.state) && !fails.contains(&name) {
+            fails.push(name);
+        }
+    }
+    fails
 }
 
 /// The level a package's final outcome is logged at.

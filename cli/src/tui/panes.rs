@@ -59,7 +59,7 @@ pub(super) fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
 
 /// Package table columns as (header, fixed width), in display order. A `None`
 /// width is a flexible column that takes whatever the others leave.
-const TABLE_COLUMNS: [(&str, Option<u16>); 7] = [
+pub(super) const TABLE_COLUMNS: [(&str, Option<u16>); 7] = [
     ("Status", Some(11)),
     ("Package", None),
     ("Version", Some(15)),
@@ -126,7 +126,7 @@ pub(super) fn render_table(
                 "-".to_string()
             };
             let cells = [
-                Cell::from(format!("{} {}", pkg.status.glyph(spin), pkg.status.label()))
+                Cell::from(format!("{} {}", pkg.status.glyph(spin), pkg.status_cell()))
                     .style(Style::default().fg(pkg.status.color())),
                 Cell::from(name.as_str()).style(
                     if matches!(pkg.status, PkgStatus::Queued | PkgStatus::AlreadyBuilt) {

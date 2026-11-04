@@ -131,6 +131,12 @@ pub fn missing_from_details(details: &str) -> Vec<String> {
     out
 }
 
+/// Whether a result's label (see [`ArchState::label`]), as an `arch_check`
+/// event carries it, names a failure.
+pub fn is_failure_label(label: &str) -> bool {
+    matches!(label, "failed" | "unresolvable" | "broken") || label.starts_with("failed (")
+}
+
 /// The first line of a build log that names the failure: the first line that
 /// reads like an error, else the last non-empty line. `None` for an empty log.
 pub fn first_error_line(log: &str) -> Option<String> {

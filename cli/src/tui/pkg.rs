@@ -205,6 +205,9 @@ pub(super) struct PkgState {
     pub(super) sr: Option<SrMark>,
     /// The spec diffs the run recorded (`SpecChanged`), oldest first.
     pub(super) spec_diffs: Vec<String>,
+    /// The `repo/arch` results the other-architecture check found failing
+    /// (see `Event::ArchCheck`): a built package with any reads as a badge.
+    pub(super) arch_fails: Vec<String>,
 }
 
 /// Spec diffs kept per package for the diff view's fallback.
@@ -218,6 +221,19 @@ impl PkgState {
                 format!("{from} → {}", self.version)
             }
             _ => self.version.clone(),
+        }
+    }
+
+    /// The status cell's text: the status, or for a built package that fails
+    /// on another arch `built ⚠`. The names of the failing arches are in the
+    /// package's log, the column has no room for them.
+    pub(super) fn status_cell(&self) -> String {
+        match (
+            self.status == PkgStatus::Succeeded,
+            self.arch_fails.is_empty(),
+        ) {
+            (true, false) => "built ⚠".to_string(),
+            _ => self.status.label().to_string(),
         }
     }
 
@@ -245,6 +261,7 @@ impl PkgState {
             waiting_on: Vec::new(),
             sr: None,
             spec_diffs: Vec::new(),
+            arch_fails: Vec::new(),
         }
     }
 

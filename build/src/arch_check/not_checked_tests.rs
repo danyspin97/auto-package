@@ -80,3 +80,24 @@ fn a_package_that_fails_on_an_arch_gets_a_badge_line_and_a_clean_one_does_not() 
     );
     assert!(section_lines(&[for_pkg(ArchState::Succeeded, "aarch64", "libdfp")]).is_empty());
 }
+
+#[test]
+fn an_event_label_names_a_failure_exactly_when_the_state_is_one() {
+    let failures = [
+        ArchState::Failed { detail: None },
+        ArchState::Unresolvable { detail: None },
+        ArchState::Broken,
+        ArchState::NoBaseline { detail: None },
+    ];
+    for s in &failures {
+        assert!(is_failure_label(&s.label()), "{}", s.label());
+    }
+    for s in [
+        ArchState::Succeeded,
+        ArchState::Ignored,
+        ArchState::NotTestable { detail: None },
+        ArchState::Pending("building".into()),
+    ] {
+        assert!(!is_failure_label(&s.label()), "{}", s.label());
+    }
+}

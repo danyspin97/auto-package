@@ -253,9 +253,7 @@ fn failing_arch_checks(events: &[Value]) -> Vec<String> {
         .iter()
         .flat_map(|v| v["results"].as_array().into_iter().flatten())
     {
-        let state = r["state"].as_str().unwrap_or("");
-        let fails =
-            matches!(state, "failed" | "unresolvable" | "broken") || state.starts_with("failed (");
+        let fails = crate::arch_check::is_failure_label(r["state"].as_str().unwrap_or(""));
         let name = format!(
             "{}/{}",
             r["repo"].as_str().unwrap_or("?"),
