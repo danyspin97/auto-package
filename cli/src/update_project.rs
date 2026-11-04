@@ -40,6 +40,9 @@ mod cmd;
 mod context;
 mod deprecated;
 mod existing;
+mod fix_landed;
+#[cfg(test)]
+mod fix_landed_tests;
 mod items;
 mod maintenance;
 mod origin;

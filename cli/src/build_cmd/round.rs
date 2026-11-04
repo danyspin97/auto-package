@@ -328,7 +328,8 @@ pub(super) fn package_config(
         // The root package's findings are not a dependency's.
         patch_request: None,
         patch_condition: None,
-        bug_fix: None,
+        // The fix is the root package's: a dependency is an ordinary build.
+        bug_fix: config.bug_fix.clone().filter(|_| is_root),
         update: config.update && is_root,
         branch_version: config.branch_version.clone().filter(|_| is_root),
         unknown_build_system: config.unknown_build_system && is_root,
@@ -386,5 +387,41 @@ mod tests {
         let pkg = package_config(&root(), "libfoo", "1.0", "libfoo");
         assert!(!pkg.update);
         assert!(!pkg.unknown_build_system);
+    }
+
+    #[test]
+    fn the_fix_task_goes_to_the_root_and_not_to_a_dependency() {
+        use ap_build::bugfix::{FixJob, FixTask, FixedIn, Found};
+        let task = std::sync::Arc::new(FixTask::Bug(FixJob {
+            pkg: "cagebreak".into(),
+            refs: Vec::new(),
+            description: Some("x".into()),
+            bug_texts: Vec::new(),
+            read: Vec::new(),
+            not_read: Vec::new(),
+            warnings: Vec::new(),
+            upstream_repo: None,
+            patches: Vec::new(),
+            candidates: Vec::new(),
+            found: Found::NotFound,
+            unmerged: Vec::new(),
+            fixed_in: FixedIn::NoneYet,
+            fetch_hosts: Vec::new(),
+            nonce: "n".into(),
+        }));
+        let config = PipelineConfig {
+            bug_fix: Some(task),
+            ..root()
+        };
+        assert!(
+            package_config(&config, "cagebreak", "3.2.1", "cagebreak")
+                .bug_fix
+                .is_some()
+        );
+        assert!(
+            package_config(&config, "libfoo", "1.0", "libfoo")
+                .bug_fix
+                .is_none()
+        );
     }
 }

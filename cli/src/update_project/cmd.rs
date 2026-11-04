@@ -42,14 +42,16 @@ pub(super) fn cmd_update_project(
     // and built as it turns up, while the thread goes on with the others.
     let mut mechanical: HashSet<String> = HashSet::new();
     let (mut sweep, mut audit) = (None, None);
-    // A maintenance backport builds each package at the version it has: no
-    // sweep, the items come straight from the source's specs.
-    let backports: Option<std::cell::RefCell<VecDeque<Item>>> = match &a.backport_job {
-        Some(_) => Some(std::cell::RefCell::new(
-            backport_items(a, emit).map_err(|e| eyre!(e))?.into(),
-        )),
-        None => None,
-    };
+    // A maintenance backport or a bug fix builds each package at the version it
+    // has: no sweep, the items come straight from the source's specs.
+    let backports: Option<std::cell::RefCell<VecDeque<Item>>> =
+        if a.backport_job.is_some() || a.fix_task.is_some() {
+            Some(std::cell::RefCell::new(
+                backport_items(a, emit).map_err(|e| eyre!(e))?.into(),
+            ))
+        } else {
+            None
+        };
     if backports.is_some() {
         // The items are queued above.
     } else if a.improve {
@@ -396,6 +398,23 @@ pub(super) fn cmd_update_project(
         ));
         for i in &ready {
             for line in ap_build::backport::dry_run_lines(job, &i.pkg, &i.new_version, branch) {
+                ctx.say(line);
+            }
+        }
+        report.paths.clear();
+        return Ok(());
+    }
+    if a.dry_run
+        && let Some(ap_build::bugfix::FixTask::Bug(job)) = a.fix_task.as_deref()
+    {
+        ctx.say(format!(
+            "dry run: nothing is branched, built, committed or submitted; {} stays untouched",
+            a.source
+        ));
+        for i in &ready {
+            for line in
+                ap_build::bugfix::dry_run_lines(job, &i.new_version, branch, &a.source, a.submit)
+            {
                 ctx.say(line);
             }
         }

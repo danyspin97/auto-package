@@ -353,6 +353,7 @@ fn cmd_update(
             from_version: None,
             upstream_tag: None,
             update: true,
+            bug_fix: None,
         };
         let ap_build::update::Decision::Update {
             ecosystem,

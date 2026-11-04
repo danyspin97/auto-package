@@ -284,6 +284,12 @@ pub struct UpdateProjectArgs {
     /// the version it has, with these patches staged for the agent to add.
     #[arg(skip)]
     pub backport_job: Option<Arc<ap_build::backport::Job>>,
+
+    /// Set by `fix`: the bug to fix in the one package of `--only`, built at
+    /// the version it has in the branch project. The pipeline stages the fix
+    /// instead of reviewing the recipe.
+    #[arg(skip)]
+    pub fix_task: Option<Arc<ap_build::bugfix::FixTask>>,
 }
 
 /// What `update` changes about how one package is built.
@@ -305,4 +311,6 @@ pub struct BranchBuild {
     /// and the update is checked against its origin. Not for `lint`, a
     /// maintenance run or a backport.
     pub update: bool,
+    /// `fix`: the bug to fix in this package, at the version it has.
+    pub bug_fix: Option<Arc<ap_build::bugfix::FixTask>>,
 }

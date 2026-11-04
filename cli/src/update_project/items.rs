@@ -370,6 +370,13 @@ pub(super) fn build_ready(
             ));
             stage_backport(branch, &item, job, ctx)
                 .and_then(|()| build_item(a, branch, &item, resolver, ctx))
+        } else if let Some(task) = &a.fix_task {
+            ctx.say(format!(
+                "fixing a bug in {} {} in {branch} (the version stays)",
+                item.pkg, item.new_version
+            ));
+            build_item(a, branch, &item, resolver, ctx)
+                .and_then(|()| super::fix_landed::check(branch, &item, task, ctx))
         } else if a.improve {
             ctx.say(format!("improving {} in {branch}", item.pkg));
             if mechanical.contains(&item.pkg) {
@@ -448,7 +455,11 @@ fn build_item(
         upstream_tag: item.upstream_tag.clone(),
         // A maintenance run (its code streams and backports) keeps its own
         // recipe rules and is not an update of the package.
-        update: !a.improve && !a.maintenance_source && a.backport_job.is_none(),
+        update: !a.improve
+            && !a.maintenance_source
+            && a.backport_job.is_none()
+            && a.fix_task.is_none(),
+        bug_fix: a.fix_task.clone(),
     };
     let distro = crate::choose_distro(a.distro.as_deref(), branch, &a.arch);
     catch_panic(|| {
