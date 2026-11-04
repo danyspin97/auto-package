@@ -96,8 +96,13 @@ pub fn build_findings(
                 ids::BUILD_FAILS_IN_TARGET_TOO,
                 Severity::Note,
                 &format!(
-                    "{name} {} and fails in the target project too{detail}",
-                    s.label()
+                    "{name} {} and {}{detail}",
+                    s.label(),
+                    if baseline == BaselineState::NoResult {
+                        "has no result in the target project"
+                    } else {
+                        "fails in the target project too"
+                    }
                 ),
             )),
             ArchState::Pending(what) => out.push(mk(

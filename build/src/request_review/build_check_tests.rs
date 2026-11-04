@@ -62,6 +62,30 @@ fn a_failure_whose_baseline_was_not_read_is_a_blocker() {
 }
 
 #[test]
+fn a_failure_the_target_has_no_result_for_is_a_note_that_says_so() {
+    let rows = [GateRow {
+        repo: "Tumbleweed".into(),
+        arch: "riscv64".into(),
+        state: failed(),
+        baseline: Some(Baseline {
+            project: "Base:System".into(),
+            state: None,
+        }),
+    }];
+    let found = build_findings("p", &rows, &[], None);
+    assert_eq!(
+        one(&found),
+        (ids::BUILD_FAILS_IN_TARGET_TOO, Severity::Note)
+    );
+    assert!(
+        found[0]
+            .message
+            .contains("has no result in the target project"),
+        "{found:?}"
+    );
+}
+
+#[test]
 fn a_pending_result_is_a_warning_and_a_port_that_is_not_final_a_note() {
     let rows = [row(
         "Tumbleweed",
