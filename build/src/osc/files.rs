@@ -58,7 +58,7 @@ pub fn list_package_files_checked(
 
 /// The spec file of OBS package `pkg` given its file listing: the one `*.spec`
 /// it holds. A package with several, or none, falls back to `<pkg>.spec`.
-pub(super) fn spec_file_name(files: &[String], pkg: &str) -> String {
+pub fn spec_file_name(files: &[String], pkg: &str) -> String {
     let specs: Vec<&String> = files.iter().filter(|f| f.ends_with(".spec")).collect();
     match specs.as_slice() {
         [only] => only.to_string(),

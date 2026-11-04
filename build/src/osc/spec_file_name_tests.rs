@@ -11,6 +11,14 @@ fn a_single_spec_is_the_spec_whatever_the_package_is_called() {
 }
 
 #[test]
+fn a_single_spec_is_the_spec_whatever_its_name_is() {
+    let listing = files(&["_service", "python-foo.spec"]);
+    assert_eq!(spec_file_name(&listing, "foo"), "python-foo.spec");
+    let listing = files(&["foo.spec", "foo-1.0.tar.gz"]);
+    assert_eq!(spec_file_name(&listing, "foo:flavor"), "foo.spec");
+}
+
+#[test]
 fn several_specs_fall_back_to_the_package_name() {
     let listing = files(&["a.spec", "b.spec"]);
     assert_eq!(spec_file_name(&listing, "pkg"), "pkg.spec");

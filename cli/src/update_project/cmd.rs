@@ -130,6 +130,7 @@ pub(super) fn cmd_update_project(
     let mut admitted = 0;
     let mut dependency_count = 0;
     let mut branch_checked = false;
+    let mut open_requests = requested::OpenRequests::default();
     loop {
         let mut item = match queue.pop_front() {
             Some(item) => item,
@@ -221,6 +222,14 @@ pub(super) fn cmd_update_project(
                     item.pkg
                 )),
             }
+        }
+        // A package that an open submit request already updates is listed, not
+        // branched: the request is read once per origin, for all its packages.
+        // A lint continued from the branch is not checked: its version is the
+        // branch's, so no request can bring an update to it.
+        if !continuing && requested::settled_as_requested(&item, a, &mut open_requests, ctx, report)
+        {
+            continue;
         }
         // A package whose openSUSE:Factory copy comes from another devel project
         // is left to the maintainer, unless `--deprecated` asks for it. It is

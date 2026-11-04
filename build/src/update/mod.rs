@@ -39,7 +39,7 @@ mod lookup_macro_tests;
 mod lookups;
 mod pins;
 mod requested;
-pub use requested::AlreadyRequested;
+pub use requested::{AlreadyRequested, clean_version};
 mod plan;
 mod read;
 #[cfg(test)]
