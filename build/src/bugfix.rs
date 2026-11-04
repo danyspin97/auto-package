@@ -8,6 +8,9 @@
 mod bugzilla;
 #[cfg(test)]
 mod bugzilla_tests;
+mod cve;
+#[cfg(test)]
+mod cve_tests;
 mod input;
 #[cfg(test)]
 mod input_tests;
@@ -16,5 +19,6 @@ mod patch;
 mod patch_tests;
 
 pub use bugzilla::*;
+pub use cve::*;
 pub use input::*;
 pub use patch::*;
