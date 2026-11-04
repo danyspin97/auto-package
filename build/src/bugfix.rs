@@ -26,6 +26,9 @@ mod patch_tests;
 mod prepare;
 #[cfg(test)]
 mod prepare_tests;
+mod spec_edit;
+#[cfg(test)]
+mod spec_edit_tests;
 
 pub use bugzilla::*;
 pub use cve::*;
@@ -34,3 +37,4 @@ pub use live::*;
 pub use lookup::*;
 pub use patch::*;
 pub use prepare::*;
+pub use spec_edit::*;
