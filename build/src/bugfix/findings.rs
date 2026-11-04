@@ -37,7 +37,7 @@ impl From<&Finding> for ReviewFinding {
 /// A fix the tool makes on file texts, without a model. Each is a function of
 /// `findings_fix`; one that cannot be sure refuses, and the finding then goes
 /// to the route in [`MechanicalFix::fallback`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MechanicalFix {
     /// The Refresh bullets of the entry become one grouped bullet.
     RefreshBullets,
@@ -180,6 +180,10 @@ pub struct FindingsJob {
     /// The branch's `Version:`; a fix never changes it.
     pub version: String,
     pub findings: Vec<(ReviewFinding, FindingRoute)>,
+    /// The target's newest `.changes` text, `None` for a package it lacks.
+    pub target_changes: Option<String>,
+    /// The file names of the target package.
+    pub target_files: Vec<String>,
     /// Ties `fix-end.json` to this run.
     pub nonce: String,
 }

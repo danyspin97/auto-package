@@ -243,19 +243,7 @@ mod target;
 pub use target::*;
 
 #[cfg(test)]
-mod resolvable_tests {
-    use super::*;
-
-    #[test]
-    fn a_finished_build_without_a_result_is_still_in_flight() {
-        let finished = osc::BuildStatus::Unknown("finished".to_string());
-        assert!(status_is_resolvable(Some(&finished)));
-        assert!(!status_is_resolvable(Some(&osc::BuildStatus::Failed)));
-        assert!(!status_is_resolvable(Some(&osc::BuildStatus::Unknown(
-            "weird".into()
-        ))));
-    }
-}
+mod resolvable_tests;
 mod select;
 pub use select::*;
 mod closure_gate;
@@ -372,6 +360,8 @@ mod bug_fix_rounds;
 mod bug_fix_stage;
 #[cfg(test)]
 mod bug_fix_stage_tests;
+mod findings_rounds;
+mod findings_stage;
 mod ladder;
 mod ladder_memo;
 pub use ladder::*;

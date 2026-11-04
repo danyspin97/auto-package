@@ -25,12 +25,14 @@ pub(super) fn fix_findings_task() -> &'static str {
      - `changes.*`: the `.changes` entry is not yours to edit directly. Give the bullets in \
      `changes_entry`: one bullet per line, replacing the bullets of the request's own newest \
      entry; keep every bullet that names a patch, says `Update to <version>` or cites a \
-     reference. Say what the request changes, in imperative sentences under 100 characters, \
-     with no dependency changes, no macros and no package name.\n\
+     reference. `changes_entry` is the whole list of the entry's bullets, those for your own \
+     edits included. Say what the request changes, in imperative sentences under 100 \
+     characters, with no dependency changes, no macros and no package name.\n\
      \n\
      A finding you cannot fix without changing something outside this list is `not_fixed`; one \
      a person must decide (a version, a security matter, a policy) is `needs_maintainer`. \
-     Leave `changelog` empty.\n\
+     `changelog` is one bullet per change you make to a file, as for any edit, unless you give \
+     `changes_entry`.\n\
      \n\
      Answer in `finding_answers`: one entry for each finding of the Context, with its id, \
      `fixed`, `not_fixed` or `needs_maintainer`, and a one-line reason. Action `edited` when \

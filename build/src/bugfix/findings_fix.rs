@@ -282,3 +282,66 @@ pub fn removable_leftover(name: &str, spec: &str, had_series: bool) -> Result<()
     }
     Err(format!("{name} does not look like a leftover"))
 }
+
+/// The bullets of the request's own newest entry replaced by `bullets` (one
+/// per line, each starting `- ` or not), the header kept. Refuses when the
+/// entry is not the request's, when `bullets` has none, or when it drops a
+/// bullet that names one of `patches`, says `Update to <version>` or cites a
+/// reference (`bsc#`, `CVE-`, a link): those are facts of the change.
+pub fn apply_changes_entry(
+    new: &str,
+    base: Option<&str>,
+    bullets: &str,
+    patches: &[String],
+) -> Result<String, String> {
+    let prefix = own_prefix(new, base)?;
+    let lines: Vec<&str> = prefix.lines().collect();
+    let sep = lines
+        .iter()
+        .position(|l| is_changes_separator(l))
+        .ok_or("the request adds no entry")?;
+    let header = (sep + 1..lines.len())
+        .find(|&i| !lines[i].trim().is_empty())
+        .ok_or("the entry has no header")?;
+    let end = (header + 1..lines.len())
+        .find(|&i| is_changes_separator(lines[i]))
+        .unwrap_or(lines.len());
+    let old = lines[header + 1..end].join("\n");
+    let fresh: Vec<String> = bullets
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            if l.starts_with(' ') || l.starts_with("- ") {
+                l.to_string()
+            } else {
+                format!("- {l}")
+            }
+        })
+        .collect();
+    if !fresh.iter().any(|l| l.starts_with("- ")) {
+        return Err("changes_entry holds no bullet".into());
+    }
+    let fresh_text = fresh.join("\n");
+    let fact = |b: &str| {
+        update_target(b).is_some()
+            || [
+                "bsc#", "boo#", "bnc#", "jsc#", "gh#", "CVE-", "http://", "https://",
+            ]
+            .iter()
+            .any(|r| b.contains(r))
+            || patches.iter().any(|p| b.contains(p.as_str()))
+    };
+    for b in old.lines().filter_map(|l| l.strip_prefix("- ")) {
+        if fact(b) && !fresh_text.contains(b.trim()) {
+            return Err(format!("changes_entry drops the bullet `{}`", b.trim()));
+        }
+    }
+    let mut out: Vec<String> = lines[..=header].iter().map(|l| l.to_string()).collect();
+    out.push(String::new());
+    out.extend(fresh);
+    out.push(String::new());
+    out.extend(lines[end..].iter().map(|l| l.to_string()));
+    let own = format!("{}\n", out.join("\n"));
+    Ok(with_own(new, prefix, own))
+}

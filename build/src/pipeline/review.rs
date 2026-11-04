@@ -43,8 +43,14 @@ pub(super) fn review_stage(
     checkout: &CheckoutFacts,
     build_log_nonempty: bool,
 ) -> Result<(), PipelineResult> {
-    if let Some(task) = ctx.config.bug_fix.as_deref().filter(|t| t.bug().is_some()) {
-        return crate::pipeline::bug_fix_stage::bug_fix_stage(ctx, st, task);
+    match ctx.config.bug_fix.as_deref() {
+        Some(task @ crate::bugfix::FixTask::Bug(_)) => {
+            return crate::pipeline::bug_fix_stage::bug_fix_stage(ctx, st, task);
+        }
+        Some(crate::bugfix::FixTask::Findings(job)) => {
+            return crate::pipeline::findings_stage::findings_stage(ctx, st, job);
+        }
+        None => {}
     }
     let RunCtx {
         config,

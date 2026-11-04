@@ -175,3 +175,37 @@ fn only_a_leftover_the_spec_does_not_name_is_removable() {
     assert!(removable_leftover("series", "", true).is_err());
     assert!(removable_leftover("series", "", false).is_ok());
 }
+
+#[test]
+fn the_entry_bullets_are_replaced_but_a_fact_of_the_change_is_kept() {
+    let new = format!(
+        "{}{OLD}",
+        entry(
+            DATE,
+            "- Update to 2.10.4\n  * https://x.test/notes\n- Add fix.patch: a fix (bsc#1)\n- Odd bullet"
+        )
+    );
+    let patches = vec!["fix.patch".to_string()];
+    let ok = "- Update to 2.10.4\n  * https://x.test/notes\n- Add fix.patch: a fix (bsc#1)\n- Fix the header of fix.patch";
+    let fixed = apply_changes_entry(&new, Some(OLD), ok, &patches).unwrap();
+    assert!(fixed.contains("- Fix the header of fix.patch") && !fixed.contains("Odd bullet"));
+    assert!(fixed.starts_with(&format!("{SEP}\n{DATE} - {MAIL}\n\n- Update to")));
+    assert!(fixed.ends_with(OLD));
+    // Dropping the patch bullet, the Update bullet or a reference is refused.
+    for bad in [
+        "- Update to 2.10.4\n  * https://x.test/notes\n- Other",
+        "- Add fix.patch: a fix (bsc#1)\n- Other",
+        "- Update to 2.10.4\n  * https://x.test/notes\n- Add fix.patch: a fix",
+        "",
+    ] {
+        assert!(
+            apply_changes_entry(&new, Some(OLD), bad, &patches).is_err(),
+            "{bad:?}"
+        );
+    }
+    // Bullets without a dash are written with one; an entry that is not the request's is refused.
+    let plain = format!("{}{OLD}", entry(DATE, "- a"));
+    let fixed = apply_changes_entry(&plain, Some(OLD), "Say it", &[]).unwrap();
+    assert!(fixed.contains("\n- Say it\n"));
+    assert!(apply_changes_entry(OLD, Some(OLD), "- x", &[]).is_err());
+}
