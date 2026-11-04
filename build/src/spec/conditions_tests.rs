@@ -123,3 +123,37 @@ fn a_define_under_an_unknown_frame_is_not_recorded() {
     assert_eq!(defines.get("b"), None);
     assert_eq!(defines.get("c").map(String::as_str), Some("3"));
 }
+
+#[test]
+fn else_and_endif_with_blanks_or_a_comment_still_close_the_frame() {
+    let m = macros(&[]);
+    assert_eq!(
+        taken_after("%if 1\n%else  \nb\n%endif # x\nc", &m),
+        [Some(true), Some(false), Some(false), Some(true), Some(true)]
+    );
+    assert_eq!(
+        taken_after("%if 0\n%else # y\nb\n%endif\t", &m),
+        [Some(false), Some(true), Some(true), Some(true)]
+    );
+}
+
+#[test]
+fn elifarch_and_elifos_open_an_unknown_branch() {
+    let m = macros(&[]);
+    assert_eq!(
+        taken_after("%if 0\n%elifarch x86_64\na\n%else\nb\n%endif", &m),
+        [Some(false), None, None, None, None, Some(true)]
+    );
+    assert_eq!(
+        taken_after("%if 0\n%elifos linux\n%endif", &m),
+        [Some(false), None, Some(true)]
+    );
+}
+
+#[test]
+fn a_define_after_an_endif_with_a_comment_is_read() {
+    let spec = "%if 0\n%global a 1\n%endif # a\n%global b 2\n";
+    let defines = crate::spec::collect_simple_defines(spec);
+    assert_eq!(defines.get("a"), None);
+    assert_eq!(defines.get("b").map(String::as_str), Some("2"));
+}

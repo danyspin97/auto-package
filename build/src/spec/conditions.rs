@@ -51,49 +51,40 @@ impl CondStack {
     /// the caller then skips it.
     pub(crate) fn feed(&mut self, line: &str, macros: &HashMap<String, String>) -> bool {
         let trimmed = line.trim_start();
-        if let Some(cond) = trimmed
-            .strip_prefix("%if ")
-            .or_else(|| trimmed.strip_prefix("%if\t"))
-        {
-            let state = eval_condition(cond, macros);
-            self.frames.push(Frame::new(state));
-            return true;
-        }
-        if trimmed.starts_with("%ifarch")
-            || trimmed.starts_with("%ifnarch")
-            || trimmed.starts_with("%ifos")
-            || trimmed.starts_with("%ifnos")
-        {
-            self.frames.push(Frame::new(None));
-            return true;
-        }
-        if let Some(cond) = trimmed.strip_prefix("%elif ") {
-            if let Some(frame) = self.frames.last_mut() {
-                frame.advance();
-                frame.state = match frame.prior {
-                    Taken::No => eval_condition(cond, macros),
-                    Taken::Yes => Some(false),
-                    Taken::Maybe => None,
-                };
+        let word = trimmed.split_whitespace().next().unwrap_or("");
+        let rest = trimmed[word.len()..].trim();
+        match word {
+            "%if" => {
+                let state = eval_condition(rest, macros);
+                self.frames.push(Frame::new(state));
             }
-            return true;
-        }
-        if trimmed == "%else" {
-            if let Some(frame) = self.frames.last_mut() {
-                frame.advance();
-                frame.state = match frame.prior {
-                    Taken::Yes => Some(false),
-                    Taken::Maybe => None,
-                    Taken::No => Some(true),
-                };
+            "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos" => self.frames.push(Frame::new(None)),
+            "%elif" | "%elifarch" | "%elifnarch" | "%elifos" | "%elifnos" => {
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.advance();
+                    frame.state = match frame.prior {
+                        Taken::No if word == "%elif" => eval_condition(rest, macros),
+                        Taken::Yes => Some(false),
+                        _ => None,
+                    };
+                }
             }
-            return true;
+            "%else" => {
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.advance();
+                    frame.state = match frame.prior {
+                        Taken::Yes => Some(false),
+                        Taken::Maybe => None,
+                        Taken::No => Some(true),
+                    };
+                }
+            }
+            "%endif" => {
+                self.frames.pop();
+            }
+            _ => return false,
         }
-        if trimmed == "%endif" {
-            self.frames.pop();
-            return true;
-        }
-        false
+        true
     }
 
     /// `Some(true)`: every open frame is taken. `Some(false)`: one is skipped.
