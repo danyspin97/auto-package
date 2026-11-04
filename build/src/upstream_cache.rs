@@ -49,11 +49,18 @@ struct Entry {
     /// kept read back as 0.
     #[serde(default)]
     logic: u32,
+    /// How long the answer stays fresh, in seconds.
+    #[serde(default = "default_ttl_secs")]
+    ttl: u64,
+}
+
+fn default_ttl_secs() -> u64 {
+    TTL.as_secs()
 }
 
 impl Entry {
     fn fresh(&self, now: u64) -> bool {
-        self.logic == LOGIC_VERSION && now.saturating_sub(self.at) < TTL.as_secs()
+        self.logic == LOGIC_VERSION && now.saturating_sub(self.at) < self.ttl
     }
 }
 
@@ -92,11 +99,18 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// The entries of the file. A file that is not a JSON object is an empty cache;
+/// an entry that does not read is dropped alone, so the others keep their time.
 fn load(dir: &Path) -> HashMap<String, Entry> {
-    std::fs::read_to_string(dir.join(FILE))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    let Some(text) = std::fs::read_to_string(dir.join(FILE)).ok() else {
+        return HashMap::new();
+    };
+    let Ok(raw) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&text) else {
+        return HashMap::new();
+    };
+    raw.into_iter()
+        .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
+        .collect()
 }
 
 /// The entries in memory, and which of them this process has added since the
@@ -125,14 +139,21 @@ impl Store {
             .map(|e| e.version.clone())
     }
 
-    /// Keep an answer; `true` when enough are waiting to be written.
+    /// Keep an answer for [`TTL`]; `true` when enough are waiting to be written.
+    #[cfg(test)]
     fn put(&mut self, key: &str, version: &str, now: u64) -> bool {
+        self.put_for(key, version, now, TTL)
+    }
+
+    /// Keep an answer for `ttl`; `true` when enough are waiting to be written.
+    fn put_for(&mut self, key: &str, version: &str, now: u64, ttl: Duration) -> bool {
         self.entries.insert(
             key.to_string(),
             Entry {
                 version: version.to_string(),
                 at: now,
                 logic: LOGIC_VERSION,
+                ttl: ttl.as_secs(),
             },
         );
         self.unsaved.insert(key.to_string());
@@ -179,21 +200,50 @@ pub fn lookup(key: &str, fetch: impl FnOnce() -> Result<String, String>) -> Resu
     let Some(dir) = DIR.get() else {
         return fetch();
     };
-    let t = now();
-    if !REFRESH.load(Ordering::Relaxed) {
-        let mut guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let refresh = REFRESH.load(Ordering::Relaxed);
+    lookup_in(&STORE, dir, key, TTL, now(), refresh, fetch)
+}
+
+/// [`lookup`] for an answer kept for `ttl`. `refresh` asks `fetch` anyway; the
+/// global `--refresh` does not apply, the caller decides. The answer is kept
+/// either way, and a failure never is.
+pub fn lookup_with_ttl(
+    key: &str,
+    ttl: Duration,
+    refresh: bool,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let Some(dir) = DIR.get() else {
+        return fetch();
+    };
+    lookup_in(&STORE, dir, key, ttl, now(), refresh, fetch)
+}
+
+/// The lookup behind [`lookup_with_ttl`], with the cache and the clock given:
+/// `now` is seconds since the epoch.
+fn lookup_in(
+    cache: &Mutex<Option<Store>>,
+    dir: &Path,
+    key: &str,
+    ttl: Duration,
+    now: u64,
+    refresh: bool,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    if !refresh {
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         let store = guard.get_or_insert_with(|| Store::open(dir));
-        if let Some(version) = store.fresh(key, t) {
+        if let Some(version) = store.fresh(key, now) {
             HITS.fetch_add(1, Ordering::Relaxed);
             return Ok(version);
         }
     }
     let version = fetch()?;
     FETCHED.fetch_add(1, Ordering::Relaxed);
-    let mut guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     let store = guard.get_or_insert_with(|| Store::open(dir));
-    if store.put(key, &version, t) {
-        store.save(t);
+    if store.put_for(key, &version, now, ttl) {
+        store.save(now);
     }
     Ok(version)
 }
@@ -272,6 +322,7 @@ mod tests {
             version: "1".into(),
             at: 100,
             logic: LOGIC_VERSION,
+            ttl: TTL.as_secs(),
         };
         assert!(current.fresh(101));
         let old = Entry {
@@ -282,6 +333,81 @@ mod tests {
         // A file written before the field existed has no `logic` at all.
         let legacy: Entry = serde_json::from_str(r#"{"version":"1","at":100}"#).unwrap();
         assert!(!legacy.fresh(101));
+    }
+
+    #[test]
+    fn an_answer_is_fresh_for_the_ttl_it_was_kept_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path());
+        store.put_for("short", "1", 100, Duration::from_secs(60));
+        store.put_for("long", "2", 100, Duration::from_secs(30 * 24 * 3600));
+        assert_eq!(store.fresh("short", 159).as_deref(), Some("1"));
+        assert_eq!(store.fresh("short", 160), None);
+        assert_eq!(store.fresh("long", 160).as_deref(), Some("2"));
+        store.save(160);
+        // Saving keeps the long answer and drops the short one.
+        let on_disk = read(dir.path());
+        assert!(!on_disk.contains_key("short"));
+        assert!(on_disk.contains_key("long"));
+    }
+
+    #[test]
+    fn an_entry_without_a_ttl_keeps_the_default_ttl() {
+        // Written before the field existed: fresh for the default TTL.
+        let legacy: Entry = serde_json::from_str(r#"{"version":"1","at":100,"logic":2}"#).unwrap();
+        assert!(legacy.fresh(100 + TTL.as_secs() - 1));
+        assert!(!legacy.fresh(100 + TTL.as_secs()));
+    }
+
+    #[test]
+    fn one_bad_entry_does_not_discard_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(FILE),
+            r#"{"good":{"version":"1","at":100,"logic":2,"ttl":3600},"bad":{"version":5}}"#,
+        )
+        .unwrap();
+        let entries = load(dir.path());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries["good"].version, "1");
+    }
+
+    #[test]
+    fn a_lookup_asks_again_only_after_its_ttl_and_never_keeps_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Mutex::new(None);
+        let ttl = Duration::from_secs(3600);
+        let asked = std::cell::Cell::new(0);
+        let fetch = |v: &'static str| {
+            asked.set(asked.get() + 1);
+            Ok(v.to_string())
+        };
+        let got = lookup_in(&cache, dir.path(), "k", ttl, 1000, false, || fetch("a"));
+        assert_eq!(got.as_deref(), Ok("a"));
+        // Within the TTL: kept, no fetch.
+        let got = lookup_in(&cache, dir.path(), "k", ttl, 1000 + 3599, false, || {
+            fetch("b")
+        });
+        assert_eq!(got.as_deref(), Ok("a"));
+        assert_eq!(asked.get(), 1);
+        // Past the TTL: fetched again.
+        let got = lookup_in(&cache, dir.path(), "k", ttl, 1000 + 3600, false, || {
+            fetch("c")
+        });
+        assert_eq!(got.as_deref(), Ok("c"));
+        // `refresh` fetches although the answer is fresh.
+        let got = lookup_in(&cache, dir.path(), "k", ttl, 4000, true, || fetch("d"));
+        assert_eq!(got.as_deref(), Ok("d"));
+        assert_eq!(asked.get(), 3);
+        // A failed fetch is not kept: the next call asks again.
+        let failing = || Err("503".to_string());
+        assert_eq!(
+            lookup_in(&cache, dir.path(), "f", ttl, 5000, false, failing),
+            Err("503".into())
+        );
+        let got = lookup_in(&cache, dir.path(), "f", ttl, 5001, false, || fetch("e"));
+        assert_eq!(got.as_deref(), Ok("e"));
+        assert_eq!(asked.get(), 4);
     }
 
     #[test]
