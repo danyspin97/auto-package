@@ -73,6 +73,16 @@ fn package_summary(name: &str, findings: &[String]) -> String {
     format!("{name}: {}", parts.join("; "))
 }
 
+/// Files the tool itself leaves in a checkout. They are not package content, so
+/// an uncommitted one is not a finding: `series` is the quilt scratch of the
+/// patch stage (published only when OBS already has one), `state.json` is the
+/// bookkeeping of the state directory, and `wheel-origin.txt` and
+/// `<pkg>.spec.pre-wheel-switch` are what a wheel switch writes.
+pub(crate) fn is_tool_bookkeeping(name: &str) -> bool {
+    matches!(name, "series" | "state.json" | "wheel-origin.txt")
+        || name.ends_with(".spec.pre-wheel-switch")
+}
+
 /// What the checkout and the state directory of one package say about each other.
 fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path) -> Vec<String> {
     let mut out = Vec::new();
@@ -93,11 +103,7 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
             .into_iter()
             // The switch's own files have a finding of their own below, and
             // the source archive it replaced is an expected leftover.
-            .filter(|f| {
-                !(f == "wheel-origin.txt"
-                    || f.ends_with(".spec.pre-wheel-switch")
-                    || (wheel_spec && archives.contains(f)))
-            })
+            .filter(|f| !(is_tool_bookkeeping(f) || (wheel_spec && archives.contains(f))))
             .collect();
         if !skipped.is_empty() {
             out.push(format!(
@@ -314,6 +320,30 @@ mod tests {
         write(&state_root, "python-apscheduler", |s| s.obs_name = None);
         let all = run(&state_root, &checkouts, || None).join("\n");
         assert!(!all.contains("python-apscheduler"), "{all}");
+    }
+
+    #[test]
+    fn the_tools_own_files_in_a_checkout_are_not_findings() {
+        assert!(is_tool_bookkeeping("series"));
+        assert!(is_tool_bookkeeping("state.json"));
+        assert!(is_tool_bookkeeping("foo.spec.pre-wheel-switch"));
+        assert!(!is_tool_bookkeeping("foo.spec"));
+        assert!(!is_tool_bookkeeping("serieses"));
+        let root = tempfile::tempdir().unwrap();
+        let state_root = root.path().join("state");
+        let checkouts = root.path().join("proj");
+        let dir = checkouts.join("python-q");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("python-q.spec"), "Name: python-q\nVersion: 1.0\n").unwrap();
+        for f in ["series", "state.json", "stray.bin"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        write(&state_root, "python-q", |s| {
+            s.last_outcome = Some("failed".into())
+        });
+        let found = run(&state_root, &checkouts, || None).join("\n");
+        assert!(found.contains("not committed: stray.bin"), "{found}");
+        assert!(!found.contains("series"), "{found}");
     }
 
     #[test]
