@@ -571,23 +571,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                 print!("{text}");
             }
         }
-        Commands::Explain {
-            name,
-            work_dir,
-            project,
-            arch,
-            run,
-            notes_dir,
-            json,
-        } => explain_command(
-            &name,
-            &work_dir,
-            project.as_deref(),
-            &arch,
-            run.as_deref(),
-            &notes_dir,
-            json,
-        )?,
+        Commands::Explain(args) => explain_cmd::run(&args)?,
         Commands::Baseline { command } => baseline_command(command)?,
         Commands::EditBytes(args) => edit_bytes::run(&args)?,
         Commands::Update(mut args) => {

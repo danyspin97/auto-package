@@ -4,6 +4,7 @@ mod build_cmd;
 mod cleanup;
 mod diffview;
 mod edit_bytes;
+mod explain_cmd;
 mod keyring;
 mod local_opts;
 mod run_limits;
@@ -273,37 +274,7 @@ enum Commands {
     /// was chosen, each attempt with the agent's own summary, the outcome, the
     /// cost and the notes kept. Read from the run files only: no model, no
     /// network, nothing is written.
-    Explain {
-        /// RPM package name, e.g. aws-c-http.
-        name: String,
-
-        #[arg(long, default_value = "ap-work")]
-        work_dir: PathBuf,
-
-        /// OBS project whose work directory to read (needed when the work
-        /// directory holds several projects that know the package).
-        #[arg(long)]
-        project: Option<String>,
-
-        #[arg(long, default_value = "x86_64")]
-        arch: String,
-
-        /// Run id to explain (default: the latest run that touched the package).
-        #[arg(long)]
-        run: Option<String>,
-
-        /// Directory the package notes are kept in.
-        #[arg(
-            long = "notes",
-            alias = "notes-dir",
-            default_value = "../auto-package-notes"
-        )]
-        notes_dir: PathBuf,
-
-        /// Print the same data as JSON.
-        #[arg(long)]
-        json: bool,
-    },
+    Explain(explain_cmd::ExplainArgs),
 }
 mod allow_host;
 #[cfg(test)]
@@ -432,47 +403,6 @@ pub(crate) fn init_disk_guard(
 mod run;
 use run::*;
 
-/// `explain`: print what the work directory says about one package.
-fn explain_command(
-    name: &str,
-    work_dir: &Path,
-    project: Option<&str>,
-    arch: &str,
-    run: Option<&str>,
-    notes_dir: &Path,
-    json: bool,
-) -> color_eyre::Result<()> {
-    use std::io::IsTerminal;
-    let err = |e: String| color_eyre::eyre::eyre!(e);
-    let dir = ap_build::explain::resolve_project_dir(work_dir, project, arch, name).map_err(err)?;
-    ap_build::package_notes::set_notes_dir(std::path::absolute(notes_dir)?);
-    let package_notes = ap_build::package_notes::path_for(name)
-        .map(|_| ap_build::package_notes::read(name))
-        .unwrap_or_default();
-    let ex = ap_build::explain::explain(&ap_build::explain::Query {
-        project_dir: &dir,
-        package: name,
-        run,
-        package_notes,
-    })
-    .map_err(err)?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&ex)?);
-        return Ok(());
-    }
-    let tty = std::io::stdout().is_terminal();
-    let width = if tty {
-        crossterm::terminal::size().map_or(100, |(w, _)| w as usize)
-    } else {
-        100
-    };
-    let color = tty && std::env::var_os("NO_COLOR").is_none();
-    print!(
-        "{}",
-        ap_build::explain::ansi(&ap_build::explain::render(&ex, width.clamp(40, 140)), color)
-    );
-    Ok(())
-}
 mod update;
 use update::*;
 mod sweep;
