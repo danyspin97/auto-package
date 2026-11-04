@@ -75,6 +75,27 @@ fn split_entries(text: &str) -> (Vec<&str>, Vec<Vec<&str>>) {
     (head, entries)
 }
 
+/// The texts a recap writes when no upstream notes were found, in place of
+/// notes. They are not changes and never belong in a `.changes` entry.
+const PLACEHOLDERS: [&str; 4] = [
+    "no upstream changelog",
+    "no upstream changelog found or provided",
+    "no upstream release notes",
+    "no release notes",
+];
+
+/// Whether `line` is only such a placeholder, as a bullet or as a nested
+/// bullet (`  * No upstream changelog found or provided`).
+pub fn is_placeholder(line: &str) -> bool {
+    let text = line
+        .trim()
+        .trim_start_matches(['-', '*'])
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    PLACEHOLDERS.contains(&text.as_str())
+}
+
 /// The version a bullet line `- Update to <version>` names, when it names a
 /// version (`Update to git snapshot ...` names none).
 fn update_version(line: &str) -> Option<String> {
@@ -173,7 +194,9 @@ fn normalised_entry(entry: &[&str], version: &str, package: &str) -> Option<Vec<
             }
         }
     }
+    bullets.retain(|b| !is_placeholder(b.head()));
     for b in &mut bullets {
+        b.lines.retain(|l| !is_placeholder(l));
         while b.lines.len() > 1 && b.lines.last().is_some_and(|l| l.trim().is_empty()) {
             b.lines.pop();
         }

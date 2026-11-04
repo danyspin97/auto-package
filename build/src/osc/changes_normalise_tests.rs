@@ -63,7 +63,6 @@ fn an_entry_for_the_spec_version_loses_dependency_bullets_and_groups_refreshes()
     let out = normalise_unpublished_entries(ORIGIN, DEBUGEDIT_BRANCH, "5.4", "debugedit").unwrap();
     let want = "\
 - Update to 5.4
-  * No upstream changelog found or provided
 - Refresh patches:
   * debuginfo-mono.patch
   * debuglink.patch
@@ -79,6 +78,30 @@ fn an_entry_for_the_spec_version_loses_dependency_bullets_and_groups_refreshes()
     // it, so it goes.
     assert!(out.ends_with(ORIGIN));
     assert_eq!(out.matches("Update to 5.3").count(), 1);
+}
+
+#[test]
+fn a_placeholder_bullet_is_removed_from_an_update_entry() {
+    let branch = entry(
+        HEADER,
+        "- Update to 1.1\n  * No upstream changelog found or provided\n- Fix the build\n- No release notes.",
+    );
+    let out = normalise_unpublished_entries("", &branch, "1.1", "pkg").unwrap();
+    assert!(!out.contains("No upstream"), "{out}");
+    assert!(!out.contains("No release notes"), "{out}");
+    assert!(out.contains("- Update to 1.1\n- Fix the build\n"), "{out}");
+}
+
+#[test]
+fn a_placeholder_is_recognised_as_a_bullet_or_a_nested_bullet_only() {
+    use super::changes_normalise::is_placeholder;
+    assert!(is_placeholder("  * No upstream changelog"));
+    assert!(is_placeholder("- no release notes"));
+    assert!(is_placeholder("No upstream changelog found or provided."));
+    assert!(!is_placeholder(
+        "  * No upstream changelog was read, so see the tarball"
+    ));
+    assert!(!is_placeholder("- Fix the build"));
 }
 
 #[test]

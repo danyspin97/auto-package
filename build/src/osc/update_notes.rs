@@ -9,6 +9,13 @@ use super::*;
 /// earlier pass wrote is replaced. Nothing is written when the newest entry is
 /// not this release's.
 pub fn set_update_notes(checkout_dir: &Path, version: &str, lines: &[String]) -> Result<(), Error> {
+    // A placeholder is not a note: it is never written under the bullet.
+    let lines: Vec<String> = lines
+        .iter()
+        .filter(|l| !is_placeholder(l))
+        .cloned()
+        .collect();
+    let lines = lines.as_slice();
     fs::read_dir(checkout_dir).map_err(|e| {
         Error::NotActionable(format!("cannot read {}: {e}", checkout_dir.display()))
     })?;
@@ -107,6 +114,17 @@ mod tests {
             with_update_notes_in_release_entry(&twice, "2.0", &[]).unwrap(),
             working
         );
+    }
+
+    #[test]
+    fn a_placeholder_recap_is_never_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pkg.changes");
+        let working = entry("- Update to 2.0\n");
+        std::fs::write(&file, &working).unwrap();
+        let recap = lines(&["  * No upstream changelog found or provided"]);
+        set_update_notes(dir.path(), "2.0", &recap).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), working);
     }
 
     #[test]
