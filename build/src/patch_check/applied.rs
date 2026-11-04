@@ -293,6 +293,36 @@ pub fn applied_paths(spec: &str) -> BTreeMap<String, BTreeSet<GuardPath>> {
     out
 }
 
+/// `spec` without the lines of `%prep` that apply only patches in `numbers`:
+/// `%patchN`, `%patch -P N`, `%patch N`, and a shell line naming `%{PATCHn}`
+/// or `%{P:n}`. A line that also applies another patch, `%autosetup` and
+/// `%autopatch` stay.
+pub fn without_applications(spec: &str, numbers: &[String]) -> String {
+    let mut in_prep = false;
+    let mut out = String::new();
+    for line in spec.lines() {
+        if let Some(section) = section_word(line) {
+            in_prep = section == "prep";
+        }
+        let trimmed = line.trim();
+        let only_these = in_prep
+            && !trimmed.starts_with('#')
+            && matches!(
+                application(trimmed),
+                Some((Applies::Numbers(ns), None))
+                    if !ns.is_empty()
+                        && ns.iter().all(|n| {
+                            numbers.iter().any(|m| crate::pipeline::same_patch_number(m, n))
+                        })
+            );
+        if !only_these {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// The lines of `%prep` that narrow what the spec applies: `%autosetup` with
 /// `-N`, and `%autopatch` with a list or a range. Whitespace is collapsed.
 fn narrowing_lines(spec: &str) -> BTreeSet<String> {

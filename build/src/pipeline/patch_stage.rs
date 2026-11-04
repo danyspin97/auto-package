@@ -218,7 +218,7 @@ pub(super) fn drop_series_lines(checkout: &Path, names: &[String]) {
     }
 }
 
-/// `spec` without the `%patch` lines that apply the patch numbers in `nums`.
+/// `spec` without the lines of `%prep` that apply the patch numbers in `nums`.
 pub(super) fn without_patch_applications(spec: &str, nums: &[String]) -> String {
     let mut kept = String::new();
     for line in spec.lines() {
@@ -229,12 +229,15 @@ pub(super) fn without_patch_applications(spec: &str, nums: &[String]) -> String 
             kept.push('\n');
         }
     }
-    kept
+    // The forms `applied_patch_number` does not read: `%patch 1` and a shell
+    // line naming `%{PATCH1}`.
+    crate::patch_check::without_applications(&kept, nums)
 }
 
 /// What a kept round did to the patches, made whole and recorded: a proven
 /// removal the turn left half done (the `PatchN:` line gone but the file or a
-/// `%patch` line left, or the file gone but the line left) is finished, a
+/// `%patch` line left, or the file gone but the line left) is finished, as is a
+/// proven disable (the `PatchN:` line kept but no longer applied), a
 /// removed patch gets its `.changes` bullet, a refreshed one is added to
 /// `refreshed` (its bullet is written once the rounds are over, when it is
 /// still there), and each gets a line in `lines`. `true` when the round changed
@@ -257,8 +260,15 @@ pub(super) fn settle_patch_changes(
         .keys()
         .map(|n| (n.clone(), std::fs::read(ctx.checkout_dir.join(n)).ok()))
         .collect();
-    let (refreshed, removed) =
+    let (refreshed, mut removed) =
         crate::patch_check::diff_patches(before_files, &after_names, &after_files);
+    // A patch the turn kept declared but stopped applying was proven upstream by
+    // the gate (it refused every other): it is finished as a removal.
+    for (name, _) in crate::patch_check::disabled_patches(before_spec, &spec) {
+        if before_files.contains_key(&name) && !removed.contains(&name) {
+            removed.push(name);
+        }
+    }
     if !removed.is_empty() {
         let nums: Vec<String> = crate::patch_check::declared_patches(before_spec)
             .into_iter()

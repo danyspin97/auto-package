@@ -420,3 +420,26 @@ fn only_a_new_narrowing_line_narrows() {
         &edit(&s(), "%patch -P 1 -p1\n", "")
     ));
 }
+
+#[test]
+fn the_lines_applying_only_the_removed_patches_are_dropped() {
+    let numbers = ["1".to_string()];
+    for line in [
+        "%patch1 -p1",
+        "%patch -P 1 -p1",
+        "%patch 1 -p1",
+        "patch -p1 < %{PATCH1}",
+        "git apply %{P:1}",
+    ] {
+        let text = spec(&format!("%setup -q\n%patch -P 0 -p1\n{line}\n"));
+        let out = without_applications(&text, &numbers);
+        assert!(!out.contains(line), "{line}: {out}");
+        assert!(out.contains("%patch -P 0 -p1"), "{line}: {out}");
+    }
+    // What also applies another patch, a comment, and the autosetup stay.
+    let text = spec("%autosetup -p1\n%patch 0 1\n# %patch1\n");
+    let out = without_applications(&text, &numbers);
+    assert_eq!(out, text);
+    let other = spec("%setup -q\n%build_helper %{PATCH1}\n");
+    assert!(!without_applications(&other, &["2".to_string()]).is_empty());
+}
