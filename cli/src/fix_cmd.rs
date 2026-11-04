@@ -66,6 +66,7 @@ pub(crate) fn update_args(
     u.tui = a.tui;
     u.log = a.log.clone();
     u.allow_host = a.allow_host.clone();
+    u.limits = a.limits.clone();
     u.fix_task = task.map(std::sync::Arc::new);
     u
 }

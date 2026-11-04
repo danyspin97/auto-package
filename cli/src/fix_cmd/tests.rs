@@ -164,6 +164,20 @@ fn the_update_arguments_carry_the_fix_and_keep_every_other_default() {
 }
 
 #[test]
+fn the_run_limits_reach_the_update_arguments() {
+    let a = fix(&[
+        "--only",
+        "curl",
+        "--max-total-usd",
+        "3",
+        "--max-packages",
+        "0",
+    ]);
+    let u = update_args(&a, "home:u:branches:openSUSE:Factory".into(), None);
+    assert_eq!((u.limits.max_total_usd, u.limits.max_packages), (3.0, 0));
+}
+
+#[test]
 fn the_exit_code_comes_from_the_verdict_and_the_run() {
     assert_eq!(ending(true, Some(&end("fixed"))), Ending::Fixed);
     // Fixed but the run failed (a build, a declined request): the run's own error.

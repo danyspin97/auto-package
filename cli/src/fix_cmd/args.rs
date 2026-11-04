@@ -110,4 +110,7 @@ pub struct FixArgs {
 
     #[command(flatten)]
     pub allow_host: crate::allow_host::AllowHostArgs,
+
+    #[command(flatten)]
+    pub limits: crate::run_limits::RunLimits,
 }
