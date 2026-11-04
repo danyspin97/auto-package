@@ -184,22 +184,21 @@ fn models_escalate_with_the_attempt_and_rotate_on_demand() {
 }
 
 #[test]
-fn a_patch_review_never_runs_below_sonnet_whatever_the_attempt_or_rotation() {
+fn a_patch_review_or_bug_fix_never_runs_below_sonnet_whatever_the_attempt_or_rotation() {
     let sonnet = "claude-sonnet-5-5";
     let opus = "claude-opus-5-5";
-    assert_eq!(model_for_task(Task::PatchReview, 1, 0), sonnet);
-    assert_eq!(model_for_task(Task::PatchReview, 3, 0), sonnet);
-    assert_eq!(model_for_task(Task::PatchReview, 6, 0), opus);
-    // a 429 moves it to the other tier at or above Sonnet, never to Haiku
-    assert_eq!(model_for_task(Task::PatchReview, 1, 1), opus);
-    assert_eq!(model_for_task(Task::PatchReview, 1, 2), sonnet);
-    assert_eq!(model_for_task(Task::PatchReview, 6, 1), sonnet);
-    for attempt in 0..9 {
-        for rotation in 0..6 {
-            assert_ne!(
-                model_for_task(Task::PatchReview, attempt, rotation),
-                "claude-haiku-5-5"
-            );
+    for task in [Task::PatchReview, Task::FixBug] {
+        assert_eq!(model_for_task(task, 1, 0), sonnet);
+        assert_eq!(model_for_task(task, 3, 0), sonnet);
+        assert_eq!(model_for_task(task, 6, 0), opus);
+        // a 429 moves it to the other tier at or above Sonnet, never to Haiku
+        assert_eq!(model_for_task(task, 1, 1), opus);
+        assert_eq!(model_for_task(task, 1, 2), sonnet);
+        assert_eq!(model_for_task(task, 6, 1), sonnet);
+        for attempt in 0..9 {
+            for rotation in 0..6 {
+                assert_ne!(model_for_task(task, attempt, rotation), "claude-haiku-5-5");
+            }
         }
     }
     // every other task keeps the escalation
