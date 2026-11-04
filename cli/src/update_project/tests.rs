@@ -396,6 +396,39 @@ fn a_bug_reference_is_refused_outside_maintenance() {
 }
 
 #[test]
+fn a_submit_without_a_terminal_or_yes_is_refused_before_anything_runs() {
+    let no_terminal = |submit, maintenance, yes, dry_run| {
+        needs_terminal(submit, maintenance, yes, dry_run, false)
+    };
+    assert!(
+        no_terminal(true, false, false, false)
+            .unwrap()
+            .contains("--yes")
+    );
+    assert!(
+        no_terminal(false, true, false, false)
+            .unwrap()
+            .contains("--maintenance")
+    );
+    assert!(no_terminal(true, false, true, false).is_none());
+    assert!(no_terminal(true, false, false, true).is_none());
+    assert!(no_terminal(false, false, false, false).is_none());
+    assert!(needs_terminal(true, false, false, false, true).is_none());
+}
+
+#[test]
+fn a_maintenance_run_without_a_terminal_is_refused_before_it_starts() {
+    // Through `run_on`, the path `run` takes: no limits applied, no build.
+    for flags in [&["--maintenance"][..], &["--submit"][..]] {
+        let err = run_on(args(flags), &mut None, false).unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::session::NotSubmitted>().is_some(),
+            "{err}"
+        );
+    }
+}
+
+#[test]
 fn nvidia_redist_is_off_unless_asked() {
     assert!(!args(&[]).nvidia_redist && args(&[]).nvidia.is_none());
     assert!(args(&["--nvidia-redist"]).nvidia_redist);

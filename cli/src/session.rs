@@ -16,6 +16,20 @@ impl std::fmt::Display for AgentUnavailable {
 
 impl std::error::Error for AgentUnavailable {}
 
+/// A run refused before it started because it would submit with no terminal
+/// to confirm on, so nothing was submitted. `main` exits with
+/// `EXIT_NOT_SUBMITTED`.
+#[derive(Debug)]
+pub struct NotSubmitted(pub String);
+
+impl std::fmt::Display for NotSubmitted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotSubmitted {}
+
 /// The longest an interrupted run waits for the OBS writes still in progress
 /// (package runs, restores, update commits). A restore is one `osc addremove`
 /// and one `osc ci`, each capped by the restore timeout, so this covers a

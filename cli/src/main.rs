@@ -322,6 +322,10 @@ use nvidia::*;
 /// usage error. 75 is EX_TEMPFAIL: run `claude`, `/login`, then re-run.
 const EXIT_AGENT_UNAVAILABLE: i32 = 75;
 
+/// Exit status of a run refused before it started because it would submit
+/// with no terminal to confirm on: nothing was submitted.
+const EXIT_NOT_SUBMITTED: i32 = 5;
+
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     // The version line is built at run time (clap wants a 'static string, and
@@ -366,6 +370,12 @@ fn main() -> color_eyre::Result<()> {
     {
         eprintln!("error: {unavailable}");
         std::process::exit(EXIT_AGENT_UNAVAILABLE);
+    }
+    if let Err(e) = &result
+        && let Some(not_submitted) = e.downcast_ref::<NotSubmitted>()
+    {
+        eprintln!("error: {not_submitted}");
+        std::process::exit(EXIT_NOT_SUBMITTED);
     }
     if ap_build::proc::shutting_down() {
         // Ctrl-C (or SIGTERM) stopped the scheduler, which returned an

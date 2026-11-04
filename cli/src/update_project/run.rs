@@ -1,11 +1,28 @@
 use super::*;
+use std::io::IsTerminal;
 
 pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Result<()> {
+    run_on(a, summary, std::io::stdin().is_terminal())
+}
+
+/// `run`, with whether stdin is a terminal passed in. The terminal check comes
+/// before the limits and the maintenance dispatch, so nothing is built or sent
+/// when no one can confirm.
+pub(super) fn run_on(
+    a: UpdateProjectArgs,
+    summary: &mut Option<String>,
+    is_tty: bool,
+) -> color_eyre::Result<()> {
     deprecated::check_args(&a).map_err(|e| eyre!("{e}"))?;
     if a.local && (a.maintenance.is_some() || a.maintenance_list) {
         return Err(eyre!(
             "--local builds on this machine: it cannot be combined with --maintenance, which sends the change to OBS"
         ));
+    }
+    if let Some(message) =
+        needs_terminal(a.submit, a.maintenance.is_some(), a.yes, a.dry_run, is_tty)
+    {
+        return Err(crate::session::NotSubmitted(message).into());
     }
     a.local_opts.apply(a.local)?;
     a.limits.apply(&a.work_dir)?;
@@ -293,6 +310,31 @@ pub(super) fn maintenance_only_flags(a: &UpdateProjectArgs) -> color_eyre::Resul
         ));
     }
     Ok(())
+}
+
+/// Why a run that would submit cannot ask its question: `--submit` (or
+/// `--maintenance`) asks for confirmation on the terminal, and without one the
+/// run would build for hours and submit nothing. `--yes` and `--dry-run` ask
+/// nothing, so they are never refused here.
+pub fn needs_terminal(
+    submit: bool,
+    maintenance: bool,
+    yes: bool,
+    dry_run: bool,
+    is_tty: bool,
+) -> Option<String> {
+    if yes || dry_run || is_tty || !(submit || maintenance) {
+        return None;
+    }
+    Some(if submit {
+        "--submit asks for confirmation and there is no terminal: pass --yes (risky changes \
+         are still refused), or drop --submit and submit later from the TUI"
+            .to_string()
+    } else {
+        "--maintenance asks for confirmation and there is no terminal: pass --yes (risky \
+         changes are still refused), or run it from a terminal"
+            .to_string()
+    })
 }
 
 /// The packages whose names `only` and `exclude` allow, as the listing spells
