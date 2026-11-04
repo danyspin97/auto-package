@@ -572,6 +572,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             }
         }
         Commands::Explain(args) => explain_cmd::run(&args)?,
+        Commands::Review(_) => unreachable!("handled in main"),
         Commands::Baseline { command } => baseline_command(command)?,
         Commands::EditBytes(args) => edit_bytes::run(&args)?,
         Commands::Update(mut args) => {

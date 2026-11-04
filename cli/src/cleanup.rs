@@ -1,10 +1,12 @@
 //! `--cleanup`: delete what a run can rebuild, never what it cannot.
 //!
 //! Kept: `runs/` (the only audit record), `state/` (per-package state and
-//! notes), `ledger.json` and every osc checkout. Deleted: `rpms/` (downloaded
-//! and built RPMs) and the unpacked sdist caches under `state/<pkg>/`. Refused
-//! outright, with the checkouts listed, when an osc checkout holds edits that
-//! were never committed.
+//! notes), `ledger.json`, every osc checkout and `reviews/` (the saved reviews
+//! of submit requests, which sit at the root of the work directory, beside the
+//! project directories this works on). Deleted: `rpms/` (downloaded and built
+//! RPMs) and the unpacked sdist caches under `state/<pkg>/`. Refused outright,
+//! with the checkouts listed, when an osc checkout holds edits that were never
+//! committed.
 
 use std::path::{Path, PathBuf};
 
@@ -160,6 +162,20 @@ mod tests {
         std::fs::write(p.join("ledger.json"), "{}").unwrap();
         std::fs::write(p.join("home:me:py/pkg/pkg.spec"), "spec").unwrap();
         d
+    }
+
+    #[test]
+    fn saved_reviews_at_the_root_of_the_work_directory_are_kept() {
+        let work = tempfile::tempdir().unwrap();
+        let review = work.path().join("reviews/1394662/r1");
+        std::fs::create_dir_all(&review).unwrap();
+        std::fs::write(review.join("review.json"), "{}").unwrap();
+        let project = work.path().join("proj-x86_64");
+        std::fs::create_dir_all(project.join("rpms")).unwrap();
+        std::fs::write(project.join("rpms/a.rpm"), "x").unwrap();
+        cleanup(&project, |_| false).unwrap();
+        assert!(!project.join("rpms").exists());
+        assert!(review.join("review.json").is_file());
     }
 
     #[test]

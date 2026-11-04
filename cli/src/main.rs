@@ -7,6 +7,7 @@ mod edit_bytes;
 mod explain_cmd;
 mod keyring;
 mod local_opts;
+mod review_cmd;
 mod run_limits;
 mod tui;
 mod update_project;
@@ -275,6 +276,16 @@ enum Commands {
     /// cost and the notes kept. Read from the run files only: no model, no
     /// network, nothing is written.
     Explain(explain_cmd::ExplainArgs),
+
+    /// Review one OBS submit request, read only: its spec, `.changes`, patches,
+    /// sources, signatures, build results and version are checked, and each
+    /// finding has a stable id and a severity. Nothing is written to OBS.
+    ///
+    /// Exit status: 0 when no finding is at or above `--fail-on`, 1 when one
+    /// is, 2 when the review could not be completed (the request cannot be read, has
+    /// no submit action, or a read the checks need failed: the spec, a patch,
+    /// the build results, a signed file's download).
+    Review(review_cmd::ReviewArgs),
 }
 mod allow_host;
 #[cfg(test)]
@@ -305,6 +316,13 @@ fn main() -> color_eyre::Result<()> {
     let matches = Cli::command().version(version).get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
+    // Handled before `run`: its exit status is the review's own (an error is 2,
+    // not the 1 of an `Err` from `main`).
+    if let Commands::Review(args) = &cli.command {
+        let code = review_cmd::main(args);
+        finish();
+        std::process::exit(code);
+    }
     let mut summary: Option<String> = None;
     let result = run(cli, &mut summary);
     finish();
