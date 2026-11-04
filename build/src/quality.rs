@@ -27,8 +27,7 @@ pub enum Kind {
     NoCheck,
     /// Tests were dropped from `%check` to get the package to build.
     DroppedTests,
-    /// An rpmlintrc line that convention 39 does not allow: the
-    /// `from Config import *` line.
+    /// An rpmlintrc line [`crate::rpmlintrc_lint::tidy`] removes.
     RpmlintrcStyle,
     /// An rpmlintrc line that convention 39 does not allow, or a filter
     /// without its reason.
@@ -60,7 +59,10 @@ impl Kind {
 
     /// Whether [`tidy`] fixes it without a build or a model.
     pub fn is_mechanical(self) -> bool {
-        matches!(self, Kind::SpecStyle | Kind::SpecHygiene)
+        matches!(
+            self,
+            Kind::SpecStyle | Kind::SpecHygiene | Kind::RpmlintrcStyle
+        )
     }
 
     /// Whether the finding is only reported: nothing fixes it by itself and

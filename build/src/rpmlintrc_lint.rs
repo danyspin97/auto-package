@@ -2,7 +2,8 @@
 //! `addFilter(...)` lines, each with its `# reason:` comment directly above,
 //! no `from Config import *` and no `setBadness`, named `<name>-rpmlintrc`.
 //!
-//! Only reported here: nothing rewrites the file yet.
+//! The only fix is a text one: [`tidy`] removes the `from Config import *`
+//! line. The filters are never rewritten.
 
 use crate::quality::{Finding, Kind};
 
@@ -17,6 +18,29 @@ pub fn spec_rpmlintrc_files(spec: &str) -> Vec<String> {
         .filter(|f| f.ends_with("rpmlintrc"))
         .collect()
 }
+
+/// `text` without its `from Config import *` lines, each with the blank
+/// line that follows it. Nothing else changes.
+pub fn tidy(text: &str) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() == CONFIG_IMPORT {
+            i += 1;
+            if lines.get(i).is_some_and(|l| l.trim().is_empty()) {
+                i += 1;
+            }
+            continue;
+        }
+        out.push_str(lines[i]);
+        i += 1;
+    }
+    out
+}
+
+/// The changelog bullet for the rpmlintrc part of a tidy commit.
+pub const BULLET: &str = "Drop `from Config import *` from the rpmlintrc";
 
 /// What is wrong with the rpmlintrc `name` that holds `text`.
 pub fn audit(name: &str, text: &str) -> Vec<Finding> {

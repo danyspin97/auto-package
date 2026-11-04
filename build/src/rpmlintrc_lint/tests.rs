@@ -45,3 +45,32 @@ fn only_the_rpmlintrc_a_spec_names_is_read() {
     assert_eq!(spec_rpmlintrc_files(spec), ["fwupd-efi-rpmlintrc"]);
     assert!(spec_rpmlintrc_files("Name: a\nVersion: 1\nSource0: a.tar.gz\n").is_empty());
 }
+
+#[test]
+fn the_import_is_a_mechanical_finding_and_the_rest_is_clean() {
+    let found = audit("fwupd-efi-rpmlintrc", FWUPD);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(!crate::quality::needs_pipeline(&found));
+}
+
+#[test]
+fn tidy_removes_the_import_and_the_blank_line_after_it_only() {
+    assert_eq!(
+        tidy(FWUPD),
+        "# reason: the EFI binary is not an ELF\naddFilter(\"no-binary\")\n"
+    );
+    // Nothing else is touched, a second blank line and the filters stay.
+    let text = "# c\nfrom Config import *\n\n\naddFilter(\"x\")\n";
+    assert_eq!(tidy(text), "# c\n\naddFilter(\"x\")\n");
+    assert_eq!(tidy("addFilter(\"x\")\n"), "addFilter(\"x\")\n");
+    assert!(audit("a-rpmlintrc", &tidy(FWUPD)).is_empty());
+}
+
+#[test]
+fn the_guard_accepts_the_removal_of_the_import() {
+    let after = tidy(FWUPD);
+    assert_eq!(
+        crate::pipeline::rpmlintrc_guard::rpmlintrc_problems(Some(FWUPD), &after),
+        Vec::<String>::new()
+    );
+}
