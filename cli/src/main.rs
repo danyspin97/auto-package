@@ -29,7 +29,23 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use build_cmd::*;
 
 #[derive(Parser)]
-#[command(name = "auto-package", about = "Automated RPM packaging for openSUSE")]
+#[command(
+    name = "auto-package",
+    about = "Automated RPM packaging for openSUSE",
+    after_help = "\
+Exit status:
+  0    success (review: no finding at or above --fail-on)
+  1    the run failed: a package failed, or a check of the arguments failed
+  2    usage error (clap)
+  3    fix: no fix needed, or none found
+  4    fix: a maintainer must decide
+  5    not submitted: --submit or --maintenance with no terminal to confirm on
+       (pass --yes, or run it from a terminal)
+  75   agent unavailable: claude is not logged in (run `claude`, `/login`,
+       then re-run)
+  130  interrupted (Ctrl-C or SIGTERM)
+  review: 1 a finding at or above --fail-on, 2 the review could not be completed"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

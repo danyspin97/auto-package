@@ -554,3 +554,20 @@ fn only_a_python_parent_with_a_known_build_system_is_looked_up_on_pypi_first() {
     assert!(!is_python_parent("python-foo", false, true));
     assert!(!is_python_parent("cagebreak", false, true));
 }
+
+#[test]
+fn the_help_lists_the_exit_codes_the_run_returns() {
+    use clap::CommandFactory;
+    let help = crate::Cli::command()
+        .get_after_help()
+        .map(|h| h.to_string())
+        .unwrap_or_default();
+    for line in [
+        "  2    usage error",
+        "  5    not submitted",
+        "  75   agent unavailable",
+        "  130  interrupted",
+    ] {
+        assert!(help.contains(line), "{line:?} missing from:\n{help}");
+    }
+}
