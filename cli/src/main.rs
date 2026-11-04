@@ -128,7 +128,7 @@ enum Commands {
 
         /// Agent backend. Only `cli` is accepted; the flag stays so existing
         /// invocations still parse.
-        #[arg(long, default_value = "cli")]
+        #[arg(long, default_value = "cli", hide = true)]
         agent_backend: String,
 
         /// Build only; never call the model.
@@ -489,6 +489,8 @@ use update::*;
 mod sweep;
 use sweep::*;
 
+#[cfg(test)]
+mod clap_tests;
 #[cfg(test)]
 mod tests;
 
