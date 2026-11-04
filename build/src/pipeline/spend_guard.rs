@@ -75,7 +75,7 @@ pub(super) const REPEATED_NO_CHANGE: &str = "repeated no change";
 /// Whether a turn may start with `spent` already spent against `budget`: a
 /// turn that would reach the budget (spent plus `last_turn`) does not start.
 /// `Err` is the reason, for the package's skip or failure.
-pub(super) fn spend_allows_turn(budget: f64, spent: f64, last_turn: f64) -> Result<(), String> {
+pub(crate) fn spend_allows_turn(budget: f64, spent: f64, last_turn: f64) -> Result<(), String> {
     if spent + last_turn < budget {
         return Ok(());
     }

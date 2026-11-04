@@ -41,7 +41,7 @@ pub(super) fn charge_failed_call(
 /// Add a finished turn's cost to the work directory's daily ledger. Spend
 /// already incurred cannot be refused, so a ledger that cannot be written is
 /// only reported; the next turn then fails closed in `daily_cap_check`.
-pub(super) fn record_daily_spend(work_dir: &Path, usd: f64) {
+pub(crate) fn record_daily_spend(work_dir: &Path, usd: f64) {
     let dir = ap_core::limits::ledger_dir().unwrap_or_else(|| work_dir.to_path_buf());
     if let Err(e) = ap_core::ledger::record(&dir, usd) {
         ap_core::diag!("  cannot record ${usd:.2} in the spend ledger: {e}");
@@ -50,7 +50,7 @@ pub(super) fn record_daily_spend(work_dir: &Path, usd: f64) {
 
 /// Refuse a turn that would take the day's spend past `--max-total-usd`, or
 /// when the ledger cannot be read or locked.
-pub(super) fn daily_cap_check(work_dir: &Path) -> Result<(), String> {
+pub(crate) fn daily_cap_check(work_dir: &Path) -> Result<(), String> {
     let dir = ap_core::limits::ledger_dir().unwrap_or_else(|| work_dir.to_path_buf());
     ap_core::ledger::check(
         &dir,
