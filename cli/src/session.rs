@@ -29,6 +29,8 @@ pub(super) fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     // A second interrupt while the first one waits for restores ends the wait.
     static INTERRUPTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if INTERRUPTING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // The wait is over: the same final lines, without waiting for the writes.
+        print_exit_lines(0, false, Some(&memory.usage()));
         std::process::exit(130);
     }
     // Stop the build workers (own process groups, so the terminal's Ctrl-C
@@ -45,21 +47,12 @@ pub(super) fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     let writing = ap_build::proc::obs_writes_in_flight();
     if writing > 0 {
         eprintln!("{}", obs_wait_line(RESTORE_WAIT.as_secs(), writing));
-        if !ap_build::proc::wait_for_obs_writes(RESTORE_WAIT) {
-            eprintln!(
-                "warning: an OBS write did not finish: OBS may keep a failed attempt; \
-                 its saved baseline stays in the work directory marked pending, and the \
-                 next run of that package restores it first"
-            );
-        }
     }
+    let timed_out = writing > 0 && !ap_build::proc::wait_for_obs_writes(RESTORE_WAIT);
     ap_build::proc::remove_private_dir();
     ap_build::upstream_cache::flush();
     ap_core::sink::flush_jsonl_sinks();
-    let usage = memory.usage();
-    for line in after_tui_lines(Some(&usage), ap_core::sink::held_summary()) {
-        eprintln!("{line}");
-    }
+    print_exit_lines(writing, timed_out, Some(&memory.usage()));
     // The shell convention for death by SIGINT; scripts can tell an
     // interrupted run from a failed one.
     std::process::exit(130);
@@ -75,21 +68,44 @@ pub(super) fn obs_wait_line(secs: u64, writes: usize) -> String {
     )
 }
 
-/// The lines printed once the terminal is back: the interruption, when the run
-/// was interrupted, and then the count of messages held while the TUI was open
-/// (see `ap_core::sink::held_summary`). Each is one line.
-pub(crate) fn after_tui_lines(
+/// Prints the lines that end a run, once the terminal is back. `writes` is how
+/// many OBS writes were in flight when the wait began and `timed_out` whether
+/// they outlived it. The held count is read now, so it includes everything held
+/// up to the exit.
+pub(crate) fn print_exit_lines(
+    writes: usize,
+    timed_out: bool,
     interrupted: Option<&ap_core::event::Usage>,
-    held: (usize, Option<std::path::PathBuf>),
+) {
+    let held = ap_core::sink::held_summary();
+    for line in exit_lines(writes, timed_out, interrupted, (held.0, held.1.as_deref())) {
+        eprintln!("{line}");
+    }
+}
+
+/// The lines that end a run, in order: the OBS warning when a write was in
+/// flight and did not finish, the interruption, then the held count. Each is
+/// one line. The wait line is printed before the wait (see `obs_wait_line`).
+pub(crate) fn exit_lines(
+    writes: usize,
+    timed_out: bool,
+    interrupted: Option<&ap_core::event::Usage>,
+    held: (usize, Option<&std::path::Path>),
 ) -> Vec<String> {
     let mut out = Vec::new();
+    if writes > 0 && timed_out {
+        out.push(
+            "warning: an OBS write did not finish; the next run of that package restores it first"
+                .to_string(),
+        );
+    }
     if let Some(usage) = interrupted {
         out.push(format!(
             "Interrupted — tokens: {} in / {} out — cost: ${:.2}",
             usage.input_tokens, usage.output_tokens, usage.cost_usd
         ));
     }
-    if let Some(line) = ap_core::sink::held_line(held.0, held.1.as_deref()) {
+    if let Some(line) = ap_core::sink::held_line(held.0, held.1) {
         out.push(line);
     }
     out
@@ -113,22 +129,29 @@ mod tests {
     }
 
     #[test]
-    fn after_the_tui_an_interruption_and_the_held_count_are_two_lines_at_most() {
+    fn the_exit_lines_come_in_order_and_each_is_one_line() {
         let usage = ap_core::event::Usage {
             input_tokens: 440,
             output_tokens: 165605,
             cost_usd: 6.34,
             ..Default::default()
         };
-        let lines = after_tui_lines(Some(&usage), (2, Some("/w/run/diagnostics.log".into())));
+        let path = std::path::Path::new("/w/run/diagnostics.log");
+        let lines = exit_lines(1, true, Some(&usage), (2, Some(path)));
         assert_eq!(
             lines,
             vec![
+                "warning: an OBS write did not finish; the next run of that package restores it first".to_string(),
                 "Interrupted — tokens: 440 in / 165605 out — cost: $6.34".to_string(),
                 "2 messages held while the TUI was open, see /w/run/diagnostics.log".to_string(),
             ]
         );
-        assert!(after_tui_lines(None, (0, None)).is_empty());
+        assert!(lines.iter().all(|l| !l.contains('\n')));
+        // A write that finished in time adds no warning; nothing held, no line.
+        let lines = exit_lines(1, false, Some(&usage), (0, None));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("Interrupted"));
+        assert!(exit_lines(0, false, None, (0, None)).is_empty());
     }
 }
 

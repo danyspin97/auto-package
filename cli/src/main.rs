@@ -345,9 +345,7 @@ fn main() -> color_eyre::Result<()> {
     // Printed after `run` returns so the TUI has restored the terminal, and
     // whether or not the run failed: a failed run is the one where the list of
     // what was built and what is still queued matters most.
-    for line in after_tui_lines(None, ap_core::sink::held_summary()) {
-        eprintln!("{line}");
-    }
+    print_exit_lines(0, false, None);
     if let Some(text) = summary {
         print!("{text}");
     }
