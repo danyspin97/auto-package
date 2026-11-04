@@ -18,6 +18,12 @@ pub(super) struct ExplainArgs {
     #[arg(long)]
     project: Option<String>,
 
+    /// The branch project the package was built in, as `update` names it
+    /// (for example `home:<user>:branches:Base:System`). Read instead of
+    /// `--project`, which is the source project.
+    #[arg(long, conflicts_with = "project")]
+    branch_project: Option<String>,
+
     #[arg(long, default_value = "x86_64")]
     arch: String,
 
@@ -52,7 +58,7 @@ pub(super) fn run(args: &ExplainArgs) -> color_eyre::Result<()> {
     explain_command(
         &args.name,
         &args.work_dir,
-        args.project.as_deref(),
+        args.branch_project.as_deref().or(args.project.as_deref()),
         &args.arch,
         args.run.as_deref(),
         &args.notes_dir,
@@ -73,6 +79,10 @@ fn explain_command(
     use std::io::IsTerminal;
     let err = |e: String| color_eyre::eyre::eyre!(e);
     let dir = ap_build::explain::resolve_project_dir(work_dir, project, arch, name).map_err(err)?;
+    if project.is_some() {
+        // Says which directory was read: after `update` it is the branch's.
+        eprintln!("note: reading {}", dir.display());
+    }
     ap_build::package_notes::set_notes_dir(std::path::absolute(notes_dir)?);
     let package_notes = ap_build::package_notes::path_for(name)
         .map(|_| ap_build::package_notes::read(name))
@@ -122,6 +132,17 @@ mod tests {
         assert_eq!(w.args.run.as_deref(), Some("r1"));
         assert_eq!(w.args.arch, "x86_64");
         assert_eq!(w.args.work_dir.to_str(), Some("ap-work"));
+    }
+
+    #[test]
+    fn a_branch_project_is_read_instead_of_the_source_project() {
+        let w =
+            Wrapper::try_parse_from(["x", "pkg", "--branch-project", "home:u:branches:B"]).unwrap();
+        assert_eq!(w.args.branch_project.as_deref(), Some("home:u:branches:B"));
+        assert!(
+            Wrapper::try_parse_from(["x", "pkg", "--project", "B", "--branch-project", "C"])
+                .is_err()
+        );
     }
 
     #[test]

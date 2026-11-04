@@ -288,6 +288,30 @@ fn the_project_directory_is_resolved_like_the_other_commands() {
     );
 }
 
+#[test]
+fn a_source_project_finds_its_one_branch_directory() {
+    let t = tempfile::tempdir().unwrap();
+    let w = t.path();
+    write(
+        &w.join("home_dany_branches_Base_System-x86_64/state/foo/state.json"),
+        "{}",
+    );
+    write(
+        &w.join("home_dany_branches_Other-x86_64/state/foo/state.json"),
+        "{}",
+    );
+    let found = resolve_project_dir(w, Some("Base:System"), "x86_64", "foo").unwrap();
+    assert!(found.ends_with("home_dany_branches_Base_System-x86_64"));
+    write(
+        &w.join("home_bob_branches_Base_System-x86_64/state/foo/state.json"),
+        "{}",
+    );
+    let err = resolve_project_dir(w, Some("Base:System"), "x86_64", "foo").unwrap_err();
+    assert!(err.contains("--branch-project"), "{err}");
+    let err = resolve_project_dir(w, Some("Nope"), "x86_64", "foo").unwrap_err();
+    assert!(err.contains("no work directory for Nope"), "{err}");
+}
+
 /// A run records the build that wrote it, and a log from before the field
 /// has no build to show.
 #[test]

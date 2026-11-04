@@ -2,7 +2,8 @@ use super::*;
 
 /// The per-project directory for `--work-dir` / `--project` / `--arch`: the
 /// work directory itself when it already holds `runs` or `state`, the
-/// `<project>-<arch>` subdirectory when a project is given, and otherwise the
+/// `<project>-<arch>` subdirectory when a project is given (or else the one
+/// branch project's directory of that project), and otherwise the
 /// only subdirectory that knows `package`.
 pub fn resolve_project_dir(
     work_dir: &Path,
@@ -19,13 +20,44 @@ pub fn resolve_project_dir(
             ap_core::run::sanitize_name(p),
             ap_core::run::sanitize_name(arch)
         ));
-        return if dir.is_dir() {
-            Ok(dir)
-        } else {
-            Err(format!(
+        if dir.is_dir() {
+            return Ok(dir);
+        }
+        // After `update`, the package is in the branch project,
+        // `home:<user>:branches:<p>`, whose directory ends with the same
+        // suffix. Take the one such directory, if there is exactly one.
+        let suffix = format!(
+            "branches_{}-{}",
+            ap_core::run::sanitize_name(p),
+            ap_core::run::sanitize_name(arch)
+        );
+        let mut branches: Vec<PathBuf> = std::fs::read_dir(work_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|d| {
+                d.is_dir()
+                    && d.file_name()
+                        .is_some_and(|n| n.to_string_lossy().ends_with(&suffix))
+            })
+            .collect();
+        branches.sort();
+        return match branches.len() {
+            0 => Err(format!(
                 "no work directory for {p} ({arch}) at {}",
                 dir.display()
-            ))
+            )),
+            1 => Ok(branches.remove(0)),
+            _ => Err(format!(
+                "several branch projects of {p} ({arch}) are in {}: pass --branch-project (one of: {})",
+                work_dir.display(),
+                branches
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
         };
     }
     let mut known: Vec<PathBuf> = std::fs::read_dir(work_dir)
