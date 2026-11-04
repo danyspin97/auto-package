@@ -109,6 +109,9 @@ pub(super) fn turn_allowed_tools(
     workspace: &std::path::Path,
     checkout: Option<&std::path::Path>,
 ) -> String {
+    if task == Task::RequestReview {
+        return request_review_tools(workspace, &[]);
+    }
     let patch_tools: String;
     let (base_tools, roots): (&str, Vec<&std::path::Path>) = if task
         == Task::TranslateUnresolvableDeps

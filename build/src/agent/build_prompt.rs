@@ -54,6 +54,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         Task::PostBuildReview => post_build_review_prompt(),
         Task::RefreshPatches => refresh_patches_task(),
         Task::PatchReview => patch_review_task(),
+        Task::RequestReview => request_review_task(),
         Task::PatchDependency => {
             "This package is a distro package that was branched into the project \
              because another package needs a change to it (convention 62). The \
@@ -166,6 +167,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              keep this turn short.",
             remaining = (req.budget_usd - req.spent_usd).max(0.0),
         ),
+        Task::RequestReview => request_review_budget_line(req.budget_usd - req.spent_usd),
         Task::PatchDependency => format!(
             "Patch a branched dependency. ${remaining:.2} of model budget left for this package.",
             remaining = (req.budget_usd - req.spent_usd).max(0.0),
@@ -222,7 +224,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         ("notes.md", "attempt journal — also inlined below", false),
     ] {
         let path = ws.join(name);
-        if *always || path.exists() {
+        if (*always && req.task != Task::RequestReview) || path.exists() {
             map_lines.push(format!("  {name:<20} {desc}"));
         }
     }

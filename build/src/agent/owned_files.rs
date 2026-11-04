@@ -45,7 +45,10 @@ pub(super) fn denied_tools(workspace: &std::path::Path) -> Vec<String> {
 pub(super) fn may_edit_service(task: Task) -> bool {
     !matches!(
         task,
-        Task::RefreshPatches | Task::PatchReview | Task::TranslateUnresolvableDeps
+        Task::RefreshPatches
+            | Task::PatchReview
+            | Task::TranslateUnresolvableDeps
+            | Task::RequestReview
     )
 }
 

@@ -5,6 +5,7 @@ mod errors;
 mod integrity;
 mod links;
 mod prompt;
+mod request_review;
 mod review_tools;
 mod scrub;
 mod stub;

@@ -123,7 +123,43 @@ pub(super) fn turn_response_schema(task: Task) -> String {
     {
         required.push("review".into());
     }
+    if task == Task::RequestReview {
+        if let Some(required) = schema.get_mut("required").and_then(|r| r.as_array_mut()) {
+            required.push("findings".into());
+        }
+        // A review changes nothing: the only action is no_change.
+        schema["properties"]["action"]["enum"] = serde_json::json!(["no_change"]);
+        schema["properties"]["findings"] = serde_json::json!({
+            "type": "array",
+            "description": "RequestReview only: what you found that the checks listed in the Context did not. Empty when there is nothing.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["blocker", "warning", "note"]},
+                    "file": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "claim": {"type": "string"},
+                    "evidence": {"type": "string"}
+                },
+                "required": ["severity", "file", "claim", "evidence"],
+                "additionalProperties": false
+            }
+        });
+    }
     schema.to_string()
+}
+
+/// One finding of a RequestReview turn: the model's claim, with its evidence.
+/// It is an opinion; the review labels it so.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AgentFinding {
+    /// `blocker`, `warning` or `note`, as the model judged it.
+    pub severity: String,
+    pub file: String,
+    #[serde(default)]
+    pub line: Option<usize>,
+    pub claim: String,
+    pub evidence: String,
 }
 
 /// What a RefreshPatches turn did with one patch.
@@ -209,6 +245,9 @@ pub(super) struct TurnResponse {
     pub(super) patches: Vec<PatchAnswer>,
     #[serde(default)]
     pub(super) review: Option<PatchReviewAnswer>,
+    /// RequestReview only; absent for every other task.
+    #[serde(default)]
+    pub(super) findings: Option<Vec<AgentFinding>>,
 }
 
 /// Pick a usable `TurnResponse` out of a finished turn's output.

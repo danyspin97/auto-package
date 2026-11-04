@@ -4,15 +4,20 @@
 use super::*;
 use crate::agent::build_prompt::*;
 
-pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
+pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<TurnOutcome, Error> {
     let prompt = build_turn_prompt(&req);
 
     let mut allowed_tools = if req.task == Task::PatchReview {
         review_allowed_tools(req.workspace, req.checkout_dir, req.writable_patches)
+    } else if req.task == Task::RequestReview {
+        request_review_tools(req.workspace, web_hosts)
     } else {
         turn_allowed_tools(req.task, req.workspace, req.checkout_dir)
     };
-    if req.task != Task::TranslateUnresolvableDeps {
+    if !matches!(
+        req.task,
+        Task::TranslateUnresolvableDeps | Task::RequestReview
+    ) {
         allowed_tools.push_str(&rpm_inspection_tools(req.rpms_dir));
         allowed_tools.push_str(&sibling_read_tools(req.sibling_dirs));
     }
@@ -410,6 +415,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
     let needs_answer = |r: &TurnResponse| match req.task {
         Task::RefreshPatches => !r.patches.is_empty(),
         Task::PatchReview => r.review.is_some() || r.action == "blocked",
+        Task::RequestReview => r.findings.is_some(),
         _ => true,
     };
     let resp = match pick_turn_response_where(&result_event.result, &tool_calls, needs_answer) {
@@ -453,7 +459,9 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
                 // answer without a verdict, is a retryable "no usable turn
                 // response", the same as a missing answer.
                 let detail = if pick_turn_response(&result_event.result, &tool_calls).is_some() {
-                    if req.task == Task::PatchReview {
+                    if req.task == Task::RequestReview {
+                        "the answer has no `findings`, which a RequestReview turn must give"
+                    } else if req.task == Task::PatchReview {
                         "the answer has no `review`, which a PatchReview turn must give"
                     } else {
                         "the answer has no `patches` list, which a RefreshPatches turn must give"
@@ -533,6 +541,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         stage_files: resp.stage_files,
         patch_answers: resp.patches,
         patch_review: resp.review,
+        review_findings: resp.findings.unwrap_or_default(),
         confidence: resp.confidence,
         usage,
         tool_calls,

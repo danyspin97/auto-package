@@ -453,3 +453,58 @@ fn a_patch_review_answer_without_a_verdict_is_no_usable_response() {
     let out = review_turn(&answer("blocked")).expect("a blocked review is an answer");
     assert!(out.patch_review.is_none());
 }
+
+/// A RequestReview turn against a stub that gives `response`.
+fn request_review_turn(response: &serde_json::Value) -> Result<TurnOutcome, Error> {
+    let stub = Stub::answering(response, 0);
+    let ws = tempfile::tempdir().unwrap();
+    let mut req = request(ws.path(), &[]);
+    req.task = Task::RequestReview;
+    TURN_TEST_OVERRIDES.with(|o| {
+        o.borrow_mut().program = Some(stub.dir.path().join("claude-stub"));
+    });
+    let result = turn_with_hosts(req, &["github.com".to_string()]);
+    TURN_TEST_OVERRIDES.with(|o| *o.borrow_mut() = TurnTestOverrides::default());
+    let args = stub.recorded("args.txt");
+    let lines: Vec<&str> = args.lines().collect();
+    let at = lines.iter().position(|l| *l == "--allowed-tools").unwrap();
+    let granted = lines[at + 1];
+    assert!(granted.contains("WebFetch(domain:github.com)"), "{granted}");
+    assert!(
+        !granted.contains("Edit(") && !granted.contains("Bash("),
+        "{granted}"
+    );
+    result
+}
+
+#[test]
+fn the_findings_of_a_request_review_reach_the_outcome() {
+    let mut response = answer("no_change");
+    response["findings"] = serde_json::json!([
+        {"severity": "warning", "file": "new/foo.spec", "line": 7,
+         "claim": "the bump needs no new BuildRequires", "evidence": "BuildRequires: x"},
+        {"severity": "note", "file": "request.xml", "claim": "c", "evidence": "e"}
+    ]);
+    let out = request_review_turn(&response).expect("turn");
+    assert_eq!(out.review_findings.len(), 2);
+    assert_eq!(out.review_findings[0].line, Some(7));
+    assert_eq!(out.review_findings[1].line, None);
+    assert_eq!(out.review_findings[1].severity, "note");
+}
+
+#[test]
+fn a_request_review_answer_without_findings_is_no_usable_response() {
+    let Err(Error::Parse { message, .. }) = request_review_turn(&answer("no_change")) else {
+        panic!("an answer without `findings` was accepted");
+    };
+    assert!(message.contains("`findings`"), "{message}");
+    // Nothing found is an answer.
+    let mut none = answer("no_change");
+    none["findings"] = serde_json::json!([]);
+    assert!(
+        request_review_turn(&none)
+            .expect("turn")
+            .review_findings
+            .is_empty()
+    );
+}

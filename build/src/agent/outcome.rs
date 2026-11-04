@@ -249,6 +249,10 @@ pub enum Task {
     /// Look at one patch another turn rebased, wrote or edited, and accept it,
     /// rewrite it or reject it. May change that patch file only.
     PatchReview,
+    /// Read the files of an OBS submit request and say what the deterministic
+    /// checks cannot (see `request_review`). Read-only: it grants no Edit, Write
+    /// or Bash, and the pipeline never starts it.
+    RequestReview,
 }
 
 /// What a [`Task::RefreshPatches`] turn is told to do. The quilt report (each
@@ -445,6 +449,8 @@ pub struct TurnOutcome {
     pub patch_answers: Vec<PatchAnswer>,
     /// A PatchReview turn's verdict. `None` for every other task.
     pub patch_review: Option<PatchReviewAnswer>,
+    /// A RequestReview turn's findings. Empty for every other task.
+    pub review_findings: Vec<AgentFinding>,
     pub confidence: Confidence,
     pub usage: Usage,
     pub tool_calls: Vec<ToolCall>,

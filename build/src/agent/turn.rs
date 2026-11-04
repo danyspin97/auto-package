@@ -136,15 +136,15 @@ fn attempt_tier(attempt: usize) -> usize {
     }
 }
 
-/// The first tier a PatchReview turn may run on: Sonnet. A review is a judge of
-/// another turn's work, so it is never run on a cheaper model, whatever the run
+/// The first tier a PatchReview or RequestReview turn may run on: Sonnet. A
+/// review is a judge of other work, so it is never run on a cheaper model, whatever the run
 /// uses; a quota rotation moves only among the tiers from here up.
 const REVIEW_FLOOR_TIER: usize = 1;
 
-/// [`model_for_attempt`] for the turn of `task`: a PatchReview turn stays at or
-/// above [`REVIEW_FLOOR_TIER`], also when the rotation wraps.
+/// [`model_for_attempt`] for the turn of `task`: a PatchReview or RequestReview
+/// turn stays at or above [`REVIEW_FLOOR_TIER`], also when the rotation wraps.
 pub(crate) fn model_for_task(task: Task, attempt: usize, rotation: usize) -> &'static str {
-    if task != Task::PatchReview {
+    if !matches!(task, Task::PatchReview | Task::RequestReview) {
         return model_for_attempt(attempt, rotation);
     }
     let tiers = &AGENT_MODELS[REVIEW_FLOOR_TIER..];
@@ -160,6 +160,14 @@ pub(crate) fn model_for_task(task: Task, attempt: usize, rotation: usize) -> &'s
 /// printed to stderr in real time as they arrive. The structured JSON response
 /// is parsed from the final `result` event in the stream.
 pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
+    turn_with_hosts(req, &[])
+}
+
+/// [`turn`] for a RequestReview turn that may read the web pages of
+/// `web_hosts` (each already allowed by the allowed-hosts list: see
+/// `request_review_tools`, which checks the spelling again). Any other task
+/// ignores them.
+pub fn turn_with_hosts(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<TurnOutcome, Error> {
     // The checkout's osc and git metadata is copied before the turn and checked
     // after it, and the symbolic links it made are checked too, whatever the
     // turn returned: a turn that changed either outside the rules is rejected
@@ -169,7 +177,7 @@ pub fn turn(req: TurnRequest<'_>) -> Result<TurnOutcome, Error> {
         req.checkout_dir,
         !super::owned_files::may_edit_service(req.task),
     );
-    let result = turn_inner(req);
+    let result = turn_inner(req, web_hosts);
     let result = match guard.settle() {
         None => result,
         Some(detail) => Err(Error::Tampered {
