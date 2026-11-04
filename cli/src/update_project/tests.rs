@@ -382,6 +382,20 @@ fn the_run_limits_are_applied_in_branch_mode() {
 }
 
 #[test]
+fn a_bug_reference_is_refused_outside_maintenance() {
+    for flags in [&["--bug", "bsc#1"][..], &["--no-bug-ref"][..]] {
+        let err = maintenance_only_flags(&args(flags))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--maintenance"), "{err}");
+        assert!(
+            err.contains("auto-package fix --project Base:System"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
 fn nvidia_redist_is_off_unless_asked() {
     assert!(!args(&[]).nvidia_redist && args(&[]).nvidia.is_none());
     assert!(args(&["--nvidia-redist"]).nvidia_redist);

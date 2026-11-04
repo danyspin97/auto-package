@@ -12,16 +12,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
     if a.maintenance.is_some() || a.maintenance_list {
         return run_maintenance(a, summary);
     }
-    if !a.maintenance_source
-        && (a.maintenance_mode.is_some()
-            || !a.backport.is_empty()
-            || a.backport_repo.is_some()
-            || a.affected_by.is_some())
-    {
-        return Err(eyre!(
-            "--maintenance-mode, --backport, --backport-repo and --affected-by are for --maintenance runs"
-        ));
-    }
+    maintenance_only_flags(&a)?;
     if a.in_place && (a.submit || a.branch_project.is_some()) {
         return Err(eyre!(
             "--in-place changes {} itself: there is no branch to name and no request to submit",
@@ -284,6 +275,24 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
             }
         }
     }
+}
+
+/// The flags that only `--maintenance` runs take: refused in any other run.
+pub(super) fn maintenance_only_flags(a: &UpdateProjectArgs) -> color_eyre::Result<()> {
+    if !a.maintenance_source
+        && (a.maintenance_mode.is_some()
+            || !a.backport.is_empty()
+            || a.backport_repo.is_some()
+            || a.affected_by.is_some()
+            || !a.bug.is_empty()
+            || a.no_bug_ref)
+    {
+        return Err(eyre!(
+            "--maintenance-mode, --backport, --backport-repo, --affected-by, --bug and --no-bug-ref are for --maintenance runs; to fix a bug in a package use `auto-package fix --project {} --only PKG --bug REF`",
+            a.source
+        ));
+    }
+    Ok(())
 }
 
 /// The packages whose names `only` and `exclude` allow, as the listing spells
