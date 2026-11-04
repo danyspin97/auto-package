@@ -214,6 +214,7 @@ pub(super) fn flavor_version(flavor: &str) -> Option<(u32, u32)> {
 /// `ap_ecosystem::sdist::SdistInfo::cmake_manifest`/`autotools_manifest`.
 pub enum CBuildSystem {
     Cmake,
+    Meson,
     Autotools,
 }
 
@@ -231,6 +232,8 @@ pub fn c_project_skeleton(
     url: &str,
     top_level_dir: &str,
     build: CBuildSystem,
+    // The subdirectory of the top-level directory the build file is in.
+    subdir: Option<&str>,
 ) -> String {
     let name = pkg_name.to_lowercase();
     let (build_kind, build_requires, build_section, install_section): (&str, &str, &str, &str) =
@@ -243,6 +246,15 @@ pub fn c_project_skeleton(
                 "%cmake\n\
              %cmake_build\n",
                 "%cmake_install\n",
+            ),
+            CBuildSystem::Meson => (
+                "meson",
+                "BuildRequires:  meson\n\
+             BuildRequires:  gcc-c++\n\
+             BuildRequires:  pkg-config\n",
+                "%meson\n\
+             %meson_build\n",
+                "%meson_install\n",
             ),
             CBuildSystem::Autotools => (
                 "autotools",
@@ -262,6 +274,14 @@ pub fn c_project_skeleton(
              find %{buildroot} -type f -name \"*.la\" -delete -print\n",
             ),
         };
+    // Each section starts in the top-level directory.
+    let (build_section, install_section) = match subdir {
+        Some(dir) => (
+            format!("cd {dir}\n{build_section}"),
+            format!("cd {dir}\n{install_section}"),
+        ),
+        None => (build_section.to_string(), install_section.to_string()),
+    };
 
     format!(
         "#\n\

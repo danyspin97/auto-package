@@ -236,6 +236,7 @@ fn c_project_skeleton_uses_cmake_macros() {
         "https://example.org",
         "libthing-1.0",
         CBuildSystem::Cmake,
+        None,
     );
     assert!(spec.contains("Name:           libthing"), "{spec}");
     assert!(spec.contains("%autosetup -n libthing-1.0"), "{spec}");
@@ -257,6 +258,7 @@ fn c_project_skeleton_uses_autotools_macros() {
         "https://example.org",
         "libthing-1.0",
         CBuildSystem::Autotools,
+        None,
     );
     assert!(spec.contains("autoreconf -fiv"), "{spec}");
     assert!(spec.contains("%configure"), "{spec}");
@@ -276,5 +278,39 @@ fn a_monorepo_project_is_built_from_its_subdirectory() {
     assert_eq!(
         out,
         "%build\ncd cuda_python\n%pyproject_wheel\n\n%install\ncd cuda_python\n%pyproject_install\n"
+    );
+}
+
+#[test]
+fn c_project_skeleton_uses_meson_macros() {
+    let spec = c_project_skeleton(
+        "fwupd-efi",
+        "1.8",
+        "https://example.org",
+        "fwupd-efi-1.8",
+        CBuildSystem::Meson,
+        None,
+    );
+    assert!(spec.contains("BuildRequires:  meson"), "{spec}");
+    assert!(spec.contains("%meson\n%meson_build"), "{spec}");
+    assert!(spec.contains("%meson_install"), "{spec}");
+    assert!(!spec.contains("%cmake"), "{spec}");
+    assert!(!spec.contains("\ncd "), "no subdirectory, no cd:\n{spec}");
+}
+
+#[test]
+fn c_project_skeleton_changes_into_the_build_subdirectory() {
+    let spec = c_project_skeleton(
+        "fortune-mod",
+        "2.10.0",
+        "https://example.org",
+        "fortune-mod-2.10.0",
+        CBuildSystem::Cmake,
+        Some("fortune-mod"),
+    );
+    assert!(spec.contains("%build\ncd fortune-mod\n%cmake\n"), "{spec}");
+    assert!(
+        spec.contains("%install\ncd fortune-mod\n%cmake_install\n"),
+        "{spec}"
     );
 }

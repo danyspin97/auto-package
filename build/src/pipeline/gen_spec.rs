@@ -486,13 +486,13 @@ fn generate_from_repo(
         return generate_rust_spec(config, repo_url, spec_path, step);
     }
 
-    if info.cmake_at_root || info.autotools_at_root {
+    if let Some(native) = &info.native {
         // Unlike Rust, a plain C/C++ project vendors nothing through OBS
         // services — the archive already downloaded is the real Source0.
-        let build = if info.cmake_at_root {
-            crate::spec::CBuildSystem::Cmake
-        } else {
-            crate::spec::CBuildSystem::Autotools
+        let build = match native.kind {
+            ap_ecosystem::sdist::NativeKind::Cmake => crate::spec::CBuildSystem::Cmake,
+            ap_ecosystem::sdist::NativeKind::Meson => crate::spec::CBuildSystem::Meson,
+            ap_ecosystem::sdist::NativeKind::Autotools => crate::spec::CBuildSystem::Autotools,
         };
         let top_level = info
             .top_level_dir
@@ -504,6 +504,7 @@ fn generate_from_repo(
             repo_url,
             &top_level,
             build,
+            native.dir.as_deref(),
         );
         let spec_text = crate::spec::strip_ap_fix_comments(&spec_text);
         ap_core::fsx::write_atomic(spec_path, &spec_text)

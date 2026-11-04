@@ -34,6 +34,13 @@ pub(super) struct UnknownBuild<'a> {
     pub carry: Option<Result<(), &'a str>>,
 }
 
+/// Whether a failed carry-forward keeps the checkout's recipe rather than
+/// generating a spec over it: every package but a Python one, whatever its
+/// archive's source (a forge's `source_repo`, or none for PyPI).
+pub(super) fn keeps_recipe_on_failed_carry(rpm_name: &str) -> bool {
+    !rpm_name.starts_with("python-")
+}
+
 /// `Ok` when the stage may go on, else the failure to report.
 pub(super) fn unknown_build_gate(case: &UnknownBuild) -> Result<(), String> {
     if !case.unknown || !case.need_spec {
@@ -157,7 +164,7 @@ pub(super) fn generate_spec_stage(
                     // multibuild, patches). That is only done when asked for
                     // (`--regen`); Python packages keep the old fallback, as a
                     // generated spec is what they are normally made from.
-                    if config.source_repo.is_some() && !config.rpm_name.starts_with("python-") {
+                    if keeps_recipe_on_failed_carry(&config.rpm_name) {
                         step.finish(StepOutcome::Failed);
                         return Err(ctx.failed(format!(
                             "could not carry the existing recipe forward to {} ({why}); a new \

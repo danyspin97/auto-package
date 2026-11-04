@@ -115,7 +115,7 @@ pub struct PipelineConfig {
     /// reviewing the recipe.
     pub bug_fix: Option<std::sync::Arc<crate::bugfix::FixTask>>,
     /// The release archive is built by a build system auto-package does not
-    /// know (meson, Go, Zig, a plain Makefile): see `sources::probe`. Only the
+    /// know (Go, Zig, a plain Makefile): see `sources::probe`. Only the
     /// recipe the checkout holds can build it, so no spec is generated for it,
     /// and it is not a Python package whatever its RPM name says.
     pub unknown_build_system: bool,

@@ -126,7 +126,7 @@ pub enum Ecosystem {
     /// unprefixed RPM name, same as Rust — see the `plain-c-cpp-packaging`
     /// skill.
     PlainC,
-    /// An archive with no build system auto-package knows (meson, Go, Zig, a
+    /// An archive with no build system auto-package knows (Go, Zig, a
     /// plain Makefile). Only an update builds one, from the recipe its
     /// checkout already holds: see [`probe`]. The RPM name is unprefixed, as
     /// for [`Ecosystem::PlainC`].

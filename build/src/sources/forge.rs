@@ -42,7 +42,7 @@ pub fn probe(
         // a Cargo.toml too, and it is a Python package that compiles Rust.
         //
         // EXCEPTION — see `is_python_hijack`.
-        let native_root = info.cmake_at_root || info.autotools_at_root;
+        let native_root = info.cmake_at_root || info.autotools_at_root || info.native.is_some();
         let python_hijack = is_python_hijack(&info, want);
         let ecosystem = if info.python_packaging && !python_hijack {
             Ecosystem::Python
@@ -153,22 +153,22 @@ pub(crate) fn unclassified(url: &str, refusal: Option<Refusal>) -> Result<Ecosys
 pub fn cannot_tell_message(archive: &str, why: Refusal) -> String {
     let hint = match why {
         Refusal::NewPackage => {
-            "meson, Go, Zig and plain Makefile projects are not supported for a NEW \
+            "Go, Zig and plain Makefile projects are not supported for a NEW \
              package; an update of a package that already has a spec keeps its \
              recipe instead"
         }
         Refusal::Regen => {
-            "meson, Go, Zig and plain Makefile projects are not supported with \
+            "Go, Zig and plain Makefile projects are not supported with \
              --regen; drop --regen to keep the package's recipe instead"
         }
         Refusal::Recipe => {
-            "meson, Go, Zig and plain Makefile projects are built only from the \
+            "Go, Zig and plain Makefile projects are built only from the \
              package's own recipe"
         }
     };
     format!(
-        "{archive} contains no pyproject.toml, setup.py, Cargo.toml, CMakeLists.txt \
-         or configure.ac, so auto-package cannot tell how to build it. {hint}"
+        "{archive} contains no pyproject.toml, setup.py, Cargo.toml, CMakeLists.txt, \
+         meson.build or configure.ac, so auto-package cannot tell how to build it. {hint}"
     )
 }
 
