@@ -307,9 +307,7 @@ fn main() -> color_eyre::Result<()> {
 
     let mut summary: Option<String> = None;
     let result = run(cli, &mut summary);
-    ap_build::upstream_cache::flush();
-    ap_core::sink::flush_jsonl_sinks();
-    ap_build::proc::remove_private_dir();
+    finish();
     // Printed after `run` returns so the TUI has restored the terminal, and
     // whether or not the run failed: a failed run is the one where the list of
     // what was built and what is still queued matters most.
@@ -330,6 +328,14 @@ fn main() -> color_eyre::Result<()> {
         std::process::exit(130);
     }
     result
+}
+
+/// What every command does before the process ends: keep the upstream cache,
+/// flush the run logs and remove the private directory.
+fn finish() {
+    ap_build::upstream_cache::flush();
+    ap_core::sink::flush_jsonl_sinks();
+    ap_build::proc::remove_private_dir();
 }
 
 /// Set the free-space minimum and warn once, before any TUI takes the
