@@ -233,6 +233,13 @@ pub(super) fn parse_settings_env(text: &str) -> BTreeMap<String, String> {
 /// the operator asked for them by name (Bedrock and Vertex need `AWS_*` and
 /// `GOOGLE_*`, which are otherwise removed). `OSC*` names are never passed:
 /// the agent does not publish.
+/// A line saying that an agent subprocess was not given a variable. It is
+/// written once per variable name, and printed only at `--log debug`, never
+/// under the TUI (see `ap_core::sink::debug_once`).
+fn scrub_notice(name: &str, line: &str) {
+    ap_core::sink::debug_once(&format!("scrub:{name}"), line);
+}
+
 pub(crate) fn scrub_env_for_agent_passing(
     vars: Vec<(String, String)>,
     extra_deny: &[String],
@@ -243,8 +250,11 @@ pub(crate) fn scrub_env_for_agent_passing(
         let upper = name.to_ascii_uppercase();
         if pass.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
             if upper.starts_with("OSC") {
-                ap_core::diag!(
-                    "ap-build: not passing {name} to the agent subprocess (OBS credential)"
+                scrub_notice(
+                    &name,
+                    &format!(
+                        "ap-build: not passing {name} to the agent subprocess (OBS credential)"
+                    ),
                 );
             } else if !extra_deny.iter().any(|a| a == &name) {
                 kept.insert(name, value);
@@ -259,29 +269,41 @@ pub(crate) fn scrub_env_for_agent_passing(
             continue;
         }
         if AGENT_ENV_DENYLIST.contains(&upper.as_str()) {
-            ap_core::diag!(
-                "ap-build: scrubbing publishing credential {name} from agent subprocess \
+            scrub_notice(
+                &name,
+                &format!(
+                    "ap-build: scrubbing publishing credential {name} from agent subprocess \
                  (the agent never commits — see the Oct 2026 build/src/agent.rs review)"
+                ),
             );
             continue;
         }
         if extra_deny.iter().any(|a| a == &name) {
-            ap_core::diag!("ap-build: scrubbing user-denied env var {name} from agent subprocess");
+            scrub_notice(
+                &name,
+                &format!("ap-build: scrubbing user-denied env var {name} from agent subprocess"),
+            );
             continue;
         }
         // Proxy URLs routinely embed credentials and the CLI itself needs
         // them to reach the API; dropping them would break every turn.
         if !upper.ends_with("_PROXY") && value_embeds_credentials(&value) {
-            ap_core::diag!(
-                "ap-build: scrubbing {name} from agent subprocess (its value is a URL \
+            scrub_notice(
+                &name,
+                &format!(
+                    "ap-build: scrubbing {name} from agent subprocess (its value is a URL \
                  with embedded credentials)"
+                ),
             );
             continue;
         }
         if matches_credential_pattern(&upper) && !CREDENTIAL_EXCEPTIONS.contains(&upper.as_str()) {
-            ap_core::diag!(
-                "ap-build: scrubbing credential-shaped env var {name} from agent subprocess \
+            scrub_notice(
+                &name,
+                &format!(
+                    "ap-build: scrubbing credential-shaped env var {name} from agent subprocess \
                  (name ends in _TOKEN/_SECRET/_PASSWORD/_API_KEY)"
+                ),
             );
             continue;
         }
