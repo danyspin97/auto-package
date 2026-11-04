@@ -25,9 +25,9 @@ fn files_of(side: &Side) -> Files {
     }
 }
 
-/// The id of a flag `from_change` produces. The two it does not produce are
-/// `None`: `NoUpstreamNotes` is read from the `.changes` entry, and
-/// `ReviewerRewrote` comes from a pipeline run.
+/// The id of a flag `from_change` produces. The others are `None`:
+/// `NoUpstreamNotes` is read from the `.changes` entry, and `ReviewerRewrote`
+/// and the fix flags come from a pipeline run.
 fn id_of(flag: &RiskFlag) -> Option<&'static str> {
     Some(match flag {
         RiskFlag::NewScriptlet { .. } => ids::RISK_NEW_SCRIPTLET,
@@ -40,7 +40,12 @@ fn id_of(flag: &RiskFlag) -> Option<&'static str> {
         RiskFlag::Unanalysed { .. } => ids::RISK_UNANALYSED,
         RiskFlag::LargePatch { .. } => ids::RISK_LARGE_PATCH,
         RiskFlag::LargeJump { .. } => ids::RISK_LARGE_JUMP,
-        RiskFlag::NoUpstreamNotes { .. } | RiskFlag::ReviewerRewrote { .. } => return None,
+        // From a pipeline run, not from a change of two sides.
+        RiskFlag::NoUpstreamNotes { .. }
+        | RiskFlag::ReviewerRewrote { .. }
+        | RiskFlag::FixWithoutUpstream { .. }
+        | RiskFlag::AdaptedUpstreamFix { .. }
+        | RiskFlag::UnmergedUpstreamFix { .. } => return None,
     })
 }
 

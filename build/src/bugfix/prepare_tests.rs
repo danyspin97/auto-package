@@ -250,3 +250,33 @@ fn a_subject_with_a_macro_cannot_reach_the_spec_comment_or_the_bullet() {
         assert!(!text.replace("%%", "").contains('%'), "{text}");
     }
 }
+
+#[test]
+fn a_request_or_an_unvouched_commit_is_unmerged() {
+    let net = Fake {
+        patch: Some(COMMIT.to_string()),
+        ..Default::default()
+    };
+    // The user's own commit is vouched for; a pull request never is.
+    let given = [format!("https://github.com/o/r/commit/{SHA}")];
+    let job = run(&net, &input(&["CVE-2025-1234"], None), &given, Some(REPO)).unwrap();
+    assert!(job.unmerged.is_empty());
+    let pr = ["https://github.com/o/r/pull/13".to_string()];
+    let job = run(&net, &input(&["CVE-2025-1234"], None), &pr, Some(REPO)).unwrap();
+    assert_eq!(job.unmerged.len(), 1);
+    // A commit a bug text names is unmerged until a release contains it.
+    let named = input(
+        &["CVE-2025-1234"],
+        Some(&format!("https://github.com/o/r/commit/{SHA}")),
+    );
+    let job = run(&net, &named, &[], Some(REPO)).unwrap();
+    assert_eq!(job.unmerged.len(), 1);
+    let net = Fake {
+        patch: Some(COMMIT.to_string()),
+        compare: Some(BEHIND.to_string()),
+        tags: vec!["v1.2.4".to_string()],
+        ..Default::default()
+    };
+    let job = run(&net, &named, &[], Some(REPO)).unwrap();
+    assert!(job.unmerged.is_empty(), "a tag contains it");
+}

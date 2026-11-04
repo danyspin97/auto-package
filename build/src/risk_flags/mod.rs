@@ -24,9 +24,13 @@ use crate::pipeline::PkgState;
 use crate::workspace::Workspace;
 
 mod analysis;
+mod fix;
+#[cfg(test)]
+mod fix_tests;
 mod flags;
 #[cfg(test)]
 mod tests;
 
 pub use analysis::*;
+pub use fix::*;
 pub use flags::*;

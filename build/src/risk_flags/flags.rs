@@ -35,6 +35,16 @@ pub enum RiskFlag {
     /// A patch the patch reviewer rewrote itself, not only judged: a person
     /// looks at it before it is submitted.
     ReviewerRewrote { patch: String },
+    /// A fix patch whose header says `Upstream: not yet reported`: the agent
+    /// wrote the fix, and a person checks it before it is submitted.
+    FixWithoutUpstream { patch: String },
+    /// An upstream fix whose code was changed to apply to this version (not
+    /// only its offsets): a person checks it before it is submitted.
+    AdaptedUpstreamFix { patch: String },
+    /// A staged fix that is a pull or merge request, or a commit nothing shows is
+    /// on the default branch (a bug text can name an attacker's request): a
+    /// person checks that upstream stands behind it.
+    UnmergedUpstreamFix { patch: String },
 }
 
 impl RiskFlag {
@@ -69,6 +79,18 @@ impl RiskFlag {
             RiskFlag::ReviewerRewrote { patch } => {
                 format!("RISK: {patch} was rewritten by the patch reviewer, needs a review")
             }
+            RiskFlag::FixWithoutUpstream { patch } => format!(
+                "RISK: {patch} is a fix without an upstream commit: a person checks it before it \
+                 is submitted"
+            ),
+            RiskFlag::UnmergedUpstreamFix { patch } => format!(
+                "RISK: {patch} is an upstream request or a commit not shown to be merged: a \
+                 person checks it before it is submitted"
+            ),
+            RiskFlag::AdaptedUpstreamFix { patch } => format!(
+                "RISK: {patch} is the upstream fix changed to apply here, not only its offsets: \
+                 a person checks it before it is submitted"
+            ),
         };
         one_line(&text)
     }

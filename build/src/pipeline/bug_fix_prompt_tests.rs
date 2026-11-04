@@ -19,6 +19,7 @@ fn job() -> FixJob {
         upstream_repo: Some("https://github.com/o/r".into()),
         patches: Vec::new(),
         candidates: Vec::new(),
+        unmerged: Vec::new(),
         fixed_in: FixedIn::Tag("v1.2.4".into()),
         fetch_hosts: Vec::new(),
         nonce: "n".into(),

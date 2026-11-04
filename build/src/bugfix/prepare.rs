@@ -28,6 +28,9 @@ pub struct FixJob {
     pub patches: Vec<PreparedPatch>,
     /// Several upstream fixes were found and none chosen: nothing is staged.
     pub candidates: Vec<String>,
+    /// The staged patches nothing shows are merged upstream: a pull or merge
+    /// request, or a commit the user did not give and no release contains.
+    pub unmerged: Vec<String>,
     pub fixed_in: FixedIn,
     /// Hosts the fix turn may read besides the fixed ones: the upstream
     /// repository's and those of the `--commit-url`s.
@@ -57,6 +60,27 @@ pub fn fetch_hosts_of(task: Option<&FixTask>) -> &[String] {
         Some(FixTask::Bug(job)) => &job.fetch_hosts,
         None => &[],
     }
+}
+
+/// The risk flags of a fix run: the patches the fix added without an upstream
+/// commit, and the staged upstream patches whose code was changed.
+pub fn fix_risk_flags(
+    task: &FixTask,
+    before: &crate::risk_flags::Files,
+    after: &crate::risk_flags::Files,
+) -> Vec<crate::risk_flags::RiskFlag> {
+    let FixTask::Bug(job) = task;
+    let staged: Vec<(String, String)> = job
+        .patches
+        .iter()
+        .map(|p| {
+            (
+                p.file_name.clone(),
+                String::from_utf8_lossy(&p.bytes).into_owned(),
+            )
+        })
+        .collect();
+    crate::risk_flags::bug_fix_risks(&staged, &job.unmerged, before, after)
 }
 
 /// What `fix` was asked, checked.
@@ -307,6 +331,7 @@ pub fn prepare_fix(
         upstream_repo: req.upstream_repo.clone(),
         patches: Vec::new(),
         candidates: Vec::new(),
+        unmerged: Vec::new(),
         fixed_in: FixedIn::NotChecked("no upstream fix found".to_string()),
         fetch_hosts: Vec::new(),
         nonce: new_nonce(req.pkg),
@@ -331,5 +356,14 @@ pub fn prepare_fix(
     } else if !job.patches.is_empty() {
         job.fixed_in = FixedIn::NotChecked("the upstream repository is unknown".to_string());
     }
+    // A commit is vouched for by the user (`--commit-url`), or by a release
+    // that contains it.
+    let vouched = !req.commit_urls.is_empty() || matches!(job.fixed_in, FixedIn::Tag(_));
+    job.unmerged = job
+        .patches
+        .iter()
+        .filter(|p| is_request(&p.origin) || !vouched)
+        .map(|p| p.file_name.clone())
+        .collect();
     Ok(job)
 }

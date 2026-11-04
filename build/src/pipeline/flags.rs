@@ -57,6 +57,9 @@ pub(super) fn settle_risk_flags(ctx: &RunCtx, baseline: &Path) {
         &reviewer_rewrites(&ctx.ws, &ctx.checkout_dir),
         &after,
     ));
+    if let Some(task) = ctx.config.bug_fix.as_deref() {
+        found.extend(crate::bugfix::fix_risk_flags(task, &before, &after));
+    }
     update_state(&ctx.ws, ctx.reporter, |st| {
         crate::risk_flags::settle(st, &ctx.config.run_id, found)
     });
