@@ -31,6 +31,9 @@ pub mod source_checks;
 #[cfg(test)]
 mod source_checks_tests;
 pub mod spec_checks;
+pub mod upstream_check;
+#[cfg(test)]
+mod upstream_check_tests;
 
 /// How much a finding matters. `Note < Warning < Blocker`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]

@@ -69,6 +69,9 @@ ids! {
     BUILD_STALE = "build.stale",
     BUILD_DISABLED_ARCH = "build.disabled-arch",
     BUILD_NOT_TESTABLE = "build.not-testable",
+    VERSION_BEHIND_UPSTREAM = "version.behind-upstream",
+    VERSION_NOT_CHECKED = "version.not-checked",
+    VERSION_REPOLOGY_NEWER = "version.repology-newer",
 }
 
 #[cfg(test)]
@@ -139,6 +142,9 @@ mod tests {
                 "build.stale",
                 "build.disabled-arch",
                 "build.not-testable",
+                "version.behind-upstream",
+                "version.not-checked",
+                "version.repology-newer",
             ]
         );
         let mut sorted = ALL.to_vec();
