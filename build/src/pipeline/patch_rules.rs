@@ -67,7 +67,7 @@ pub(super) fn patch_key(raw: &str, name: &str) -> String {
 
 /// The `Patch` declarations of `spec`: `(line index, value as written, file name)`.
 /// The file name of a URL is its last path segment, and the spec's macros are expanded.
-pub(super) fn declared_patches(spec: &str) -> Vec<(usize, String, String)> {
+pub(crate) fn declared_patches(spec: &str) -> Vec<(usize, String, String)> {
     spec.lines()
         .enumerate()
         .filter_map(|(index, line)| {

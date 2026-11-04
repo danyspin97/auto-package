@@ -15,6 +15,9 @@ pub mod gather;
 #[cfg(test)]
 mod gather_tests;
 pub mod ids;
+pub mod patch_checks;
+#[cfg(test)]
+mod patch_checks_tests;
 pub mod request;
 pub mod spec_checks;
 

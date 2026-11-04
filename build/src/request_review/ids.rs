@@ -34,6 +34,16 @@ ids! {
     CHANGES_REFRESH_NOT_GROUPED = "changes.refresh-not-grouped",
     CHANGES_PATCH_NOT_NAMED = "changes.patch-not-named",
     CHANGES_FORBIDDEN_TEXT = "changes.forbidden-text",
+    PATCH_HEADER = "patch.header",
+    PATCH_COMMENT = "patch.comment",
+    PATCH_VERSION_IN_NAME = "patch.version-in-name",
+    PATCH_NOT_SOURCE_ONLY = "patch.not-source-only",
+    PATCH_SPEC_ROUTE = "patch.spec-route",
+    PATCH_UNREADABLE = "patch.unreadable",
+    PATCH_DROPPED = "patch.dropped",
+    RPMLINTRC_NON_FILTER = "rpmlintrc.non-filter",
+    RPMLINTRC_SET_BADNESS = "rpmlintrc.set-badness",
+    RPMLINTRC_NO_REASON = "rpmlintrc.no-reason",
 }
 
 #[cfg(test)]
@@ -69,6 +79,16 @@ mod tests {
                 "changes.refresh-not-grouped",
                 "changes.patch-not-named",
                 "changes.forbidden-text",
+                "patch.header",
+                "patch.comment",
+                "patch.version-in-name",
+                "patch.not-source-only",
+                "patch.spec-route",
+                "patch.unreadable",
+                "patch.dropped",
+                "rpmlintrc.non-filter",
+                "rpmlintrc.set-badness",
+                "rpmlintrc.no-reason",
             ]
         );
         let mut sorted = ALL.to_vec();
