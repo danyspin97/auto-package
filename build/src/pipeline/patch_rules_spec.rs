@@ -20,7 +20,7 @@ fn sed_edit_is_allowed(line: &str) -> bool {
 /// The problems the spec lines of an edit have: a new `Source:` that names a patch, a
 /// patch applied from `%prep` by a shell command, and (in an edit that adds a patch) a
 /// `sed -i` in `%prep` that does not fix a path or the spec itself.
-pub(super) fn spec_route_problems(before: &str, after: &str) -> Vec<String> {
+pub(crate) fn spec_route_problems(before: &str, after: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut old: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for line in before.lines() {

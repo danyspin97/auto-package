@@ -109,7 +109,7 @@ pub(super) struct AddedLine {
 /// What a patch changes: each added and removed line with the file it is in, and the
 /// files its diff deletes or renames away.
 #[derive(Debug, Default, PartialEq)]
-pub(super) struct PatchChanges {
+pub(crate) struct PatchChanges {
     pub(super) added: Vec<AddedLine>,
     pub(super) removed: Vec<(String, String)>,
     pub(super) deleted: Vec<String>,
@@ -200,7 +200,7 @@ pub(super) fn patch_changes(text: &str) -> PatchChanges {
 /// The changes of a patch that the edit did not already have: `new` minus `old`,
 /// as lines (a file, a line and a deletion are counted as many times as they occur).
 /// With no `old` every change is new.
-pub(super) fn patch_delta(old: Option<&str>, new: &str) -> PatchChanges {
+pub(crate) fn patch_delta(old: Option<&str>, new: &str) -> PatchChanges {
     let new = patch_changes(new);
     let Some(old) = old else {
         return new;
@@ -490,7 +490,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 }
 
 /// The problems of a patch's changes that the source-only rule refuses.
-pub(super) fn source_only_problems(changes: &PatchChanges) -> Vec<String> {
+pub(crate) fn source_only_problems(changes: &PatchChanges) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut add = |msg: String| {
         if !out.contains(&msg) {

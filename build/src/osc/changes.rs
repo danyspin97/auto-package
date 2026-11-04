@@ -271,7 +271,7 @@ pub(super) fn with_bullet_in_release_entry(
     Some(text)
 }
 
-fn is_changes_separator(l: &str) -> bool {
+pub(crate) fn is_changes_separator(l: &str) -> bool {
     let l = l.trim();
     l.len() >= 20 && l.bytes().all(|b| b == b'-')
 }

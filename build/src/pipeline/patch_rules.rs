@@ -166,7 +166,7 @@ pub(super) fn added_patches(
 
 /// Whether `line` is the type 1 markup of the guidelines: a comment that starts with
 /// `PATCH-FIX-` or `PATCH-FEATURE-` and names its kind (`OPENSUSE`, `SLE`, `UPSTREAM`).
-pub(super) fn is_patch_comment(line: &str) -> bool {
+pub(crate) fn is_patch_comment(line: &str) -> bool {
     let Some(rest) = line.trim().strip_prefix('#') else {
         return false;
     };
@@ -255,7 +255,7 @@ fn is_upstream_ref(value: &str) -> bool {
 
 /// What the header of a patch file lacks. An X11 header (`Patch-Mainline:` with
 /// `Git-commit:`) stands for the `Upstream:` line.
-pub(super) fn header_problems(text: &str) -> Vec<String> {
+pub(crate) fn header_problems(text: &str) -> Vec<String> {
     let header = header_lines(text);
     let mut out = Vec::new();
     if header_field(&header, "Subject").is_none_or(|v| v.is_empty()) {
@@ -279,7 +279,7 @@ pub(super) fn header_problems(text: &str) -> Vec<String> {
 /// Whether the `.changes` bullet words name the patch `name`: the name, as a whole
 /// word or in backticks, after a verb (`Add foo.patch`, `Add patch foo.patch`) or
 /// in backticks by itself.
-fn names_in_bullet(words: &[&str], name: &str) -> bool {
+pub(crate) fn names_in_bullet(words: &[&str], name: &str) -> bool {
     let clean = |w: &str| {
         w.trim_matches(|c: char| "`'\"()[]:,;".contains(c))
             .to_string()
