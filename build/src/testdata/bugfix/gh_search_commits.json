@@ -1,0 +1,5 @@
+{"total_count":3,"items":[
+{"html_url":"https://github.com/o/r/commit/0123456789abcdef0123456789abcdef01234567","commit":{"message":"parser: reject a long token\n\nFixes CVE-2025-1234"}},
+{"html_url":"https://github.com/o/r/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","commit":{"message":"Revert \"parser: reject a long token\"\n\nCVE-2025-1234"}},
+{"html_url":"https://github.com/fork/r/commit/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","commit":{"message":"CVE-2025-1234 in a fork"}}
+]}

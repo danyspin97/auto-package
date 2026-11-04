@@ -14,6 +14,9 @@ mod cve_tests;
 mod input;
 #[cfg(test)]
 mod input_tests;
+mod lookup;
+#[cfg(test)]
+mod lookup_tests;
 mod patch;
 #[cfg(test)]
 mod patch_tests;
@@ -21,4 +24,5 @@ mod patch_tests;
 pub use bugzilla::*;
 pub use cve::*;
 pub use input::*;
+pub use lookup::*;
 pub use patch::*;

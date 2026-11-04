@@ -84,6 +84,8 @@ pub(super) fn gh_api_only_takes_the_requests_this_crate_makes() {
         "repos/o/r/releases?per_page=30",
         "repos/o/r/tags?per_page=100",
         "search/repositories?q=foo%20bar&sort=stars&order=desc",
+        "search/commits?q=CVE-2025-1234+repo%3Ao%2Fr",
+        "repos/o/r/compare/v1.2...0123abc",
     ] {
         assert!(gh_api_path_ok(ok), "{ok}");
     }
@@ -92,6 +94,9 @@ pub(super) fn gh_api_only_takes_the_requests_this_crate_makes() {
         "-X",
         "user",
         "repos/o/r/contents/x",
+        "repos/o/r/compare/v1.2",
+        "search/code?q=x",
+        "search/commits -X DELETE",
         "repos/o/../r/tags",
         "repos/o/r/tags?x=1 -X DELETE",
         "graphql",
