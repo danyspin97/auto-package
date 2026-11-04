@@ -3,6 +3,19 @@
 
 use super::*;
 
+/// The agent cannot work (claude is not logged in), found before a run
+/// starts. `main` exits with `EXIT_AGENT_UNAVAILABLE` for it.
+#[derive(Debug)]
+pub struct AgentUnavailable(pub String);
+
+impl std::fmt::Display for AgentUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for AgentUnavailable {}
+
 /// The longest an interrupted run waits for the OBS writes still in progress
 /// (package runs, restores, update commits). A restore is one `osc addremove`
 /// and one `osc ci`, each capped by the restore timeout, so this covers a
@@ -129,6 +142,12 @@ pub(crate) fn exit_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_logged_out_agent_is_found_under_a_context() {
+        let report = color_eyre::Report::new(AgentUnavailable("log in".into())).wrap_err("run");
+        assert!(report.downcast_ref::<AgentUnavailable>().is_some());
+    }
 
     #[test]
     fn the_obs_wait_is_one_line_with_the_count_and_the_seconds() {

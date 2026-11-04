@@ -36,7 +36,7 @@ pub(super) fn update_in_place(
     let distro = choose_distro(distro.as_deref(), &project, &arch);
     ap_build::discovery::set_agent_enabled(!no_agent);
     if !no_agent {
-        ap_build::agent::ensure_logged_in().map_err(|e| color_eyre::eyre::eyre!(e))?;
+        ap_build::agent::ensure_logged_in().map_err(crate::session::AgentUnavailable)?;
     }
     ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
     ap_build::package_notes::set_notes_dir(std::path::absolute(&notes_dir)?);

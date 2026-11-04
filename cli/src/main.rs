@@ -318,8 +318,9 @@ mod nvidia;
 use nvidia::*;
 
 /// Exit status of a run stopped because the agent cannot work (claude is not
-/// logged in): distinct from 130 (interrupted) and 1 (an ordinary failure).
-const EXIT_AGENT_UNAVAILABLE: i32 = 2;
+/// logged in), before it started or in the middle of it. Not 2, which is a
+/// usage error. 75 is EX_TEMPFAIL: run `claude`, `/login`, then re-run.
+const EXIT_AGENT_UNAVAILABLE: i32 = 75;
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
@@ -359,6 +360,12 @@ fn main() -> color_eyre::Result<()> {
     {
         eprintln!("\nfix: {}", exit.message);
         std::process::exit(exit.code);
+    }
+    if let Err(e) = &result
+        && let Some(unavailable) = e.downcast_ref::<AgentUnavailable>()
+    {
+        eprintln!("error: {unavailable}");
+        std::process::exit(EXIT_AGENT_UNAVAILABLE);
     }
     if ap_build::proc::shutting_down() {
         // Ctrl-C (or SIGTERM) stopped the scheduler, which returned an

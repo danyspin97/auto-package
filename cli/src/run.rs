@@ -44,7 +44,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             // web-search fallback that locates an upstream for unknown names.
             ap_build::discovery::set_agent_enabled(!no_agent);
             if !no_agent {
-                ap_build::agent::ensure_logged_in().map_err(|e| color_eyre::eyre::eyre!(e))?;
+                ap_build::agent::ensure_logged_in().map_err(crate::session::AgentUnavailable)?;
             }
             ap_ecosystem::pip::set_unsafe_resolve(unsafe_resolve);
             local_opts.apply(local)?;
