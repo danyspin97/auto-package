@@ -92,7 +92,9 @@ impl RequestObs for FakeRequestObs {
         into: &Path,
     ) -> Result<PathBuf, ReadFailure> {
         self.record(&format!("download {project}/{pkg}/{file}"))?;
-        Ok(into.join(file))
+        let path = into.join(file);
+        std::fs::write(&path, file).map_err(|e| ReadFailure::new(e.to_string()))?;
+        Ok(path)
     }
 
     fn diff(&self, _spec: &DiffSpec<'_>) -> Result<String, ReadFailure> {

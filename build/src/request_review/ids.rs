@@ -59,6 +59,9 @@ ids! {
     SOURCE_OLD_ARCHIVE_KEPT = "source.old-archive-kept",
     FILES_LEFTOVER = "files.leftover",
     FILES_UNREFERENCED = "files.unreferenced",
+    SOURCE_SIGNATURE = "source.signature",
+    SOURCE_SIGNATURE_NOT_CHECKED = "source.signature-not-checked",
+    SOURCE_KEYRING_CHANGED = "source.keyring-changed",
 }
 
 #[cfg(test)]
@@ -119,6 +122,9 @@ mod tests {
                 "source.old-archive-kept",
                 "files.leftover",
                 "files.unreferenced",
+                "source.signature",
+                "source.signature-not-checked",
+                "source.keyring-changed",
             ]
         );
         let mut sorted = ALL.to_vec();

@@ -436,6 +436,9 @@ mod service_source;
 #[cfg(test)]
 mod service_source_tests;
 mod source_signature;
+pub(crate) use source_signature::{
+    SIGNATURE_SUFFIXES, SignatureCheck, archive_of, check_signed_sources,
+};
 #[cfg(test)]
 mod source_signature_tests;
 use crate::obs_xml::{

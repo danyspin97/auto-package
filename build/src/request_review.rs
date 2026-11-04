@@ -8,6 +8,9 @@ use serde::Serialize;
 pub mod changes_checks;
 #[cfg(test)]
 mod changes_checks_tests;
+pub mod downloads;
+#[cfg(test)]
+mod downloads_tests;
 pub mod fetch;
 #[cfg(test)]
 mod fetch_fake;
@@ -20,6 +23,7 @@ pub mod patch_checks;
 mod patch_checks_tests;
 pub mod request;
 pub mod risk;
+pub mod signature_checks;
 pub mod source_checks;
 #[cfg(test)]
 mod source_checks_tests;

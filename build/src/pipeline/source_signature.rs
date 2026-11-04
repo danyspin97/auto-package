@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// The detached-signature suffixes, stripped in the order the validator strips them.
-pub(super) const SIGNATURE_SUFFIXES: &[&str] = &[".asc", ".sig", ".sign"];
+pub(crate) const SIGNATURE_SUFFIXES: &[&str] = &[".asc", ".sig", ".sign"];
 
 /// The compressed forms an archive may have, with the tool that decompresses each.
 const COMPRESSED: &[(&str, &str)] = &[
@@ -26,7 +26,7 @@ const COMPRESSED: &[(&str, &str)] = &[
 ];
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum SignatureCheck {
+pub(crate) enum SignatureCheck {
     /// Nothing is signed, or every signed archive verifies.
     Ok,
     /// The check could not run here; the text is the note to show. The
@@ -39,7 +39,7 @@ pub(super) enum SignatureCheck {
 
 /// Checks the signed files of `checkout` with `gpg` (the program, looked up on
 /// `PATH` when it is a bare name).
-pub(super) fn check_signed_sources(checkout: &Path) -> SignatureCheck {
+pub(crate) fn check_signed_sources(checkout: &Path) -> SignatureCheck {
     check_with(Path::new("gpg"), checkout)
 }
 
@@ -373,7 +373,7 @@ fn not_in_keyring(
 
 /// The archive a signature file names: its name without the signature suffix
 /// (the validator strips them in turn, `.asc` first).
-pub(super) fn archive_of(sig: &str) -> String {
+pub(crate) fn archive_of(sig: &str) -> String {
     let mut name = sig;
     for suffix in SIGNATURE_SUFFIXES {
         name = name.strip_suffix(suffix).unwrap_or(name);
