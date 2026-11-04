@@ -138,6 +138,21 @@ impl Frontier<'_> {
                     });
                     return true;
                 }
+                if settles_as_skip(kind) {
+                    // OBS does not build the package for this repository and
+                    // arch: another round gets the same answer, so it is given
+                    // up at once, as a skip, and not counted as a failed attempt.
+                    self.permanently_failed.insert(rpm_name.clone());
+                    self.give_ups.insert(
+                        rpm_name.clone(),
+                        format!("OBS does not build it here ({reason})"),
+                    );
+                    (self.pkg_reporter)(&rpm_name).report(&Event::Warning {
+                        step: None,
+                        message: format!("{rpm_name} is skipped: {reason}"),
+                    });
+                    return true;
+                }
                 let rate_limited = kind == FailureKind::RateLimited;
                 // A package that already spent its *entire* budget or attempt
                 // allowance on this round gives up at once, instead of
@@ -212,5 +227,24 @@ impl Frontier<'_> {
             }
         }
         true
+    }
+}
+
+/// Whether a failure settles the package as a skip at once: OBS does not build
+/// it for this repository and arch (excluded or disabled there), so it is not
+/// retried and not counted toward giving up.
+pub(super) fn settles_as_skip(kind: FailureKind) -> bool {
+    kind == FailureKind::Excluded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_excluded_build_settles_as_a_skip_at_once() {
+        assert!(settles_as_skip(FailureKind::Excluded));
+        assert!(!settles_as_skip(FailureKind::Other));
+        assert!(!settles_as_skip(FailureKind::NeedsMaintainer));
     }
 }

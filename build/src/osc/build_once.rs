@@ -448,12 +448,13 @@ pub(super) fn obs_build_once(
                 None => BROKEN_MESSAGE.to_string(),
             })
         }
-        BuildStatus::Disabled => {
-            Error::NotActionable("OBS: build is disabled in project config".to_string())
-        }
-        BuildStatus::Excluded => {
-            Error::NotActionable("OBS: build is excluded in project config".to_string())
-        }
+        BuildStatus::Disabled => Error::Excluded(format!(
+            "OBS: build is disabled for {repo}/{arch} in the project configuration"
+        )),
+        BuildStatus::Excluded => Error::Excluded(format!(
+            "OBS: build is excluded by OBS for {repo}/{arch} (project configuration or the \
+             spec's ExclusiveArch)"
+        )),
         _ => {
             // The log is the only evidence for what went wrong. One that
             // cannot be read, or is empty (a failed `osc buildlog` leaves an

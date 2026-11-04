@@ -569,3 +569,23 @@ fn transient_failures_are_retried_a_bounded_number_of_times() {
     );
     assert_eq!((r.is_err(), calls.get()), (true, 1));
 }
+
+#[test]
+fn an_excluded_build_is_recorded_as_skipped_not_failed() {
+    let excluded = PipelineResult::Failed {
+        rpm_name: "lsvpd".into(),
+        reason: "OBS: build is excluded for x86_64 in project config".into(),
+        kind: FailureKind::Excluded,
+    };
+    let (outcome, reason) = recorded_outcome(&excluded).unwrap();
+    assert_eq!(outcome, "skipped");
+    assert!(reason.contains("excluded"), "{reason}");
+}
+
+#[test]
+fn a_skip_from_an_earlier_run_is_cleared_when_the_package_is_worked_on_again() {
+    assert!(is_earlier_run_outcome(Some("skipped")));
+    assert!(is_earlier_run_outcome(Some("failed")));
+    assert!(!is_earlier_run_outcome(Some("success")));
+    assert!(!is_earlier_run_outcome(None));
+}

@@ -190,6 +190,11 @@ pub enum PackageOutcome {
     NeedsMaintainer {
         reason: String,
     },
+    /// OBS excludes the package for the build's repository and arch: nothing
+    /// was built and nothing is a failure. The reason says why.
+    Skipped {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

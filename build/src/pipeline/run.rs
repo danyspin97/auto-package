@@ -90,10 +90,7 @@ fn mark_run_started(config: &PipelineConfig, reporter: &dyn Reporter) {
     // was past that).
     if let Ok(ws) = Workspace::open(&config.state_root, &config.rpm_name) {
         let prior = PkgState::load(&ws);
-        if matches!(
-            prior.last_outcome.as_deref(),
-            Some("missing_deps" | "failed" | "interrupted" | WAITING_ON_FAILED)
-        ) {
+        if is_earlier_run_outcome(prior.last_outcome.as_deref()) {
             update_state(&ws, reporter, |state| {
                 state.last_outcome = Some("running".to_string());
                 state.last_failure_reason = None;

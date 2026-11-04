@@ -409,6 +409,21 @@ fn ensure_sources_present(ctx: &RunCtx, expanded: &str) -> Result<(), String> {
 
 /// The `last_outcome` and reason recorded for an unsuccessful result; `None`
 /// when the package's recorded outcome is left alone.
+/// The outcome a finished run recorded for a package, which a run that works
+/// on the package again clears: it is about the earlier run, not this one.
+pub(super) fn is_earlier_run_outcome(outcome: Option<&str>) -> bool {
+    matches!(
+        outcome,
+        Some(
+            "missing_deps"
+                | "failed"
+                | "interrupted"
+                | "skipped"
+                | super::blocked::WAITING_ON_FAILED
+        )
+    )
+}
+
 pub(super) fn recorded_outcome(result: &PipelineResult) -> Option<(&'static str, String)> {
     match result {
         // Nothing was attempted, so the package's last outcome is left alone.
@@ -421,6 +436,11 @@ pub(super) fn recorded_outcome(result: &PipelineResult) -> Option<(&'static str,
             kind: FailureKind::AgentUnavailable | FailureKind::Transient | FailureKind::DiskFull,
             ..
         } => Some(("interrupted", reason.clone())),
+        PipelineResult::Failed {
+            reason,
+            kind: FailureKind::Excluded,
+            ..
+        } => Some(("skipped", reason.clone())),
         PipelineResult::Failed { reason, .. } => Some(("failed", reason.clone())),
         PipelineResult::MissingDeps { deps, .. } => Some((
             "missing_deps",

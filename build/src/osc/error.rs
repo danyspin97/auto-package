@@ -81,6 +81,11 @@ pub enum Error {
     /// The caller should stop immediately and report the message.
     #[error("not actionable: {0}")]
     NotActionable(String),
+    /// OBS does not build the package for the build's repository and arch
+    /// (excluded or disabled there): nothing is built, so the package is
+    /// skipped, not failed. The text says why.
+    #[error("{0}")]
+    Excluded(String),
 
     /// One or more RPM dependencies could not be resolved. `names` holds the
     /// raw RPM package names (e.g. `python314-puccinialin`) the caller

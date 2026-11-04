@@ -190,6 +190,9 @@ pub enum FailureKind {
     /// key the package's keyring lacks. Nothing was sent to OBS, and nothing is
     /// retried: the same refusal would come back.
     NeedsMaintainer,
+    /// OBS does not build the package for this repository and arch (excluded
+    /// or disabled there). Recorded as a skip with the reason, not a failure.
+    Excluded,
     /// A source the package needs is gone upstream: its URL answers 404 or
     /// 410, so the release moved or was removed outside the tool (class 4 of
     /// D-06). Nothing is retried: the same answer would come back.

@@ -283,6 +283,13 @@ pub(super) fn package_outcome(result: &PipelineResult) -> PackageOutcome {
             reason: format!("broken outside the tool: {reason}"),
             disk_full: false,
         },
+        PipelineResult::Failed {
+            reason,
+            kind: FailureKind::Excluded,
+            ..
+        } => PackageOutcome::Skipped {
+            reason: reason.clone(),
+        },
         PipelineResult::Failed { reason, kind, .. } => PackageOutcome::Failed {
             reason: reason.clone(),
             disk_full: *kind == FailureKind::DiskFull,
@@ -456,5 +463,32 @@ fn cmd_update(
             failures.len()
         )),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_build_excluded_for_its_arch_is_a_skip_with_its_reason() {
+        let result = PipelineResult::Failed {
+            rpm_name: "lsvpd".into(),
+            reason: "excluded".into(),
+            kind: FailureKind::Excluded,
+        };
+        assert!(matches!(
+            package_outcome(&result),
+            PackageOutcome::Skipped { reason } if reason == "excluded"
+        ));
+        let failed = PipelineResult::Failed {
+            rpm_name: "lsvpd".into(),
+            reason: "boom".into(),
+            kind: FailureKind::Other,
+        };
+        assert!(matches!(
+            package_outcome(&failed),
+            PackageOutcome::Failed { .. }
+        ));
     }
 }

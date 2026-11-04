@@ -80,6 +80,10 @@ pub(super) fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, P
             build_step.finish(StepOutcome::Failed);
             Err(ctx.failed_osc(&e))
         }
+        Err(osc::Error::Excluded(why)) => {
+            build_step.finish(StepOutcome::Skipped);
+            Err(ctx.failed_as(FailureKind::Excluded, why))
+        }
         Err(osc::Error::BuildFailed { .. }) => {
             let build_step = build_step.finish(StepOutcome::Failed);
             fix_after_build(ctx, st, &build_step, &build_log, None)

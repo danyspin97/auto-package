@@ -221,6 +221,22 @@ pub(crate) fn print_run_summary(
         }
     }
 
+    // Excluded by OBS for the build's repository and arch: nothing was built
+    // there, and that is not a failure.
+    let skipped: Vec<(&String, &String)> = latest
+        .iter()
+        .filter_map(|(pkg, (_, outcome))| match outcome {
+            PackageOutcome::Skipped { reason } => Some((pkg, reason)),
+            _ => None,
+        })
+        .collect();
+    if !skipped.is_empty() {
+        let _ = writeln!(out, "\nSkipped ({}):", skipped.len());
+        for (pkg, reason) in skipped {
+            let _ = writeln!(out, "  {pkg}: {reason}");
+        }
+    }
+
     // What the fix loop changed in the packages it built or gave up on: the same
     // lines the changelog and the submit request carry.
     let touched = touched_packages(&latest);
@@ -334,5 +350,17 @@ mod tests {
             },
         )]);
         assert_eq!(touched_packages(&latest), vec![&"gamma".to_string()]);
+    }
+
+    #[test]
+    fn an_excluded_build_is_a_skip_not_a_failure() {
+        let latest = latest(&[(
+            "lsvpd",
+            PackageOutcome::Skipped {
+                reason: "excluded for x86_64".into(),
+            },
+        )]);
+        assert!(failed_packages(&latest).is_empty());
+        assert!(touched_packages(&latest).is_empty());
     }
 }

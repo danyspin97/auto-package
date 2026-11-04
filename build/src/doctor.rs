@@ -216,8 +216,10 @@ fn check_obs(name: &str, state: &PkgState, obs: Option<&BuildStatus>) -> Option<
             "{name}: state.json says it built, but OBS shows {obs:?}; it is checked again"
         ));
     }
-    if matches!(outcome, "failed" | "interrupted" | "missing_deps")
-        && *obs == BuildStatus::Succeeded
+    if matches!(
+        outcome,
+        "failed" | "interrupted" | "missing_deps" | "skipped"
+    ) && *obs == BuildStatus::Succeeded
     {
         return Some(format!(
             "{name}: state.json says {outcome}, but OBS shows it built (the start-up \
@@ -438,5 +440,15 @@ mod tests {
         assert!(run(&state_root, &checkouts, || None).is_empty());
         let ok = HashMap::from([("python-a".to_string(), BuildStatus::Succeeded)]);
         assert!(run(&state_root, &checkouts, || Some(ok)).is_empty());
+    }
+
+    #[test]
+    fn a_skip_that_obs_built_is_a_disagreement() {
+        let state = PkgState {
+            last_outcome: Some("skipped".into()),
+            ..Default::default()
+        };
+        assert!(check_obs("pkg", &state, Some(&BuildStatus::Succeeded)).is_some());
+        assert!(check_obs("pkg", &state, Some(&BuildStatus::Excluded)).is_none());
     }
 }

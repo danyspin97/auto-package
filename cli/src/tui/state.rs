@@ -242,6 +242,7 @@ impl TuiState {
                         }
                     }
                     PackageOutcome::NeedsMaintainer { .. } => PkgStatus::Failed,
+                    PackageOutcome::Skipped { .. } => PkgStatus::Skipped,
                 };
                 match outcome {
                     PackageOutcome::Failed { reason, .. }
@@ -258,7 +259,8 @@ impl TuiState {
                     PackageOutcome::Built
                     | PackageOutcome::BuiltLocally
                     | PackageOutcome::AlreadyBuilt
-                    | PackageOutcome::MissingDeps { .. } => {
+                    | PackageOutcome::MissingDeps { .. }
+                    | PackageOutcome::Skipped { .. } => {
                         state.step = None;
                         state.fail_reason = None;
                     }
@@ -274,16 +276,9 @@ impl TuiState {
                     PackageOutcome::NeedsMaintainer { reason } => {
                         format!("needs a maintainer: {reason}")
                     }
+                    PackageOutcome::Skipped { reason } => format!("skipped: {reason}"),
                 };
-                state.add_log(
-                    match outcome {
-                        PackageOutcome::Failed { .. } => LogLevel::Error,
-                        PackageOutcome::MissingDeps { .. }
-                        | PackageOutcome::NeedsMaintainer { .. } => LogLevel::Warn,
-                        _ => LogLevel::Success,
-                    },
-                    msg,
-                );
+                state.add_log(outcome_level(outcome), msg);
             }
             // Run-level progress, from before any package has a row.
             Event::Progress { message, .. } if msg.pkg.is_none() => {
@@ -509,5 +504,32 @@ impl TuiState {
             }
             _ => {}
         }
+    }
+}
+
+/// The level a package's final outcome is logged at.
+fn outcome_level(outcome: &PackageOutcome) -> LogLevel {
+    match outcome {
+        PackageOutcome::Failed { .. } => LogLevel::Error,
+        PackageOutcome::MissingDeps { .. } | PackageOutcome::NeedsMaintainer { .. } => {
+            LogLevel::Warn
+        }
+        PackageOutcome::Skipped { .. } => LogLevel::Info,
+        _ => LogLevel::Success,
+    }
+}
+
+#[cfg(test)]
+mod outcome_level_tests {
+    use super::*;
+
+    #[test]
+    fn a_skip_is_logged_as_information_not_as_success() {
+        let skipped = PackageOutcome::Skipped {
+            reason: "excluded".into(),
+        };
+        assert!(matches!(outcome_level(&skipped), LogLevel::Info));
+        let built = PackageOutcome::Built;
+        assert!(matches!(outcome_level(&built), LogLevel::Success));
     }
 }

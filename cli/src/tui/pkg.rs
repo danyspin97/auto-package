@@ -52,6 +52,9 @@ pub(super) enum PkgStatus {
     /// (nothing about the spec is wrong; there's nothing to fix but disk
     /// space) and so the `r` keybinding knows which row it applies to.
     NoSpace,
+    /// Excluded by OBS for this repository and arch: nothing was built, and
+    /// the reason is in the detail pane.
+    Skipped,
 }
 
 impl PkgStatus {
@@ -66,6 +69,7 @@ impl PkgStatus {
             PkgStatus::MissingDeps => "blocked",
             PkgStatus::Failed => "failed",
             PkgStatus::NoSpace => "no space",
+            PkgStatus::Skipped => "skipped",
         }
     }
 
@@ -80,6 +84,7 @@ impl PkgStatus {
             PkgStatus::Succeeded | PkgStatus::BuiltLocally => "✓",
             PkgStatus::AlreadyBuilt => "✔",
             PkgStatus::MissingDeps => "◇",
+            PkgStatus::Skipped => "⊘",
             PkgStatus::Failed | PkgStatus::NoSpace => "✗",
         }
     }
@@ -94,6 +99,7 @@ impl PkgStatus {
             PkgStatus::MissingDeps => Color::Magenta,
             PkgStatus::Failed => Color::Red,
             PkgStatus::NoSpace => Color::LightRed,
+            PkgStatus::Skipped => Color::DarkGray,
         }
     }
 }

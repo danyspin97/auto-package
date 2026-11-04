@@ -188,6 +188,9 @@ fn a_condition_failure_is_queued_again_in_the_same_run() {
     assert!(!r(K::VersionChanged, 0, 3));
     assert!(!r(K::NoFix, 0, 3));
     assert!(!r(K::FixDoesNotApply, 0, 3));
+    // A build OBS does not make for this arch is a skip: never run again.
+    assert!(!r(K::Excluded, 0, 3));
+    assert!(!r(K::Excluded, 0, 1));
 }
 
 use super::*;
