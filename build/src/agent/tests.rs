@@ -2,6 +2,7 @@ use super::*;
 mod denies;
 mod edit_bytes;
 mod errors;
+mod fix_findings;
 mod fix_tools;
 mod integrity;
 mod links;

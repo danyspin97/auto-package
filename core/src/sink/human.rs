@@ -35,7 +35,8 @@ impl HumanSink {
             | Event::HostAllowed { .. }
             | Event::ZigVendor { .. }
             | Event::PatchReviewed { .. }
-            | Event::BugFix(_) => LogLevel::Info,
+            | Event::BugFix(_)
+            | Event::FindingFix(_) => LogLevel::Info,
             Event::Command { .. }
             | Event::CommandDone { .. }
             | Event::ExtractResult { .. }
@@ -241,6 +242,7 @@ impl HumanSink {
                 },
             )),
             Event::BugFix(e) => Some(e.line()),
+            Event::FindingFix(e) => Some(e.line()),
             Event::PatchReviewed {
                 patch,
                 round,

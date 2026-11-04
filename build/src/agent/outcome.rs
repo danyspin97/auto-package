@@ -253,6 +253,9 @@ pub enum Task {
     /// (`auto-package fix`): add the upstream fix, or one the turn writes, as a
     /// patch.
     FixBug,
+    /// Fix the findings a review made about a submit request
+    /// (`auto-package fix --request`), in the request's own package.
+    FixFindings,
     /// Read the files of an OBS submit request and say what the deterministic
     /// checks cannot (see `request_review`). Read-only: it grants no Edit, Write
     /// or Bash, and the pipeline never starts it.
@@ -460,6 +463,11 @@ pub struct TurnOutcome {
     pub bug_fix: Option<FixAnswer>,
     /// A RequestReview turn's findings. Empty for every other task.
     pub review_findings: Vec<AgentFinding>,
+    /// A FixFindings turn's answer for each finding. Empty for every other task.
+    pub finding_answers: Vec<FindingAnswer>,
+    /// A FixFindings turn's bullets for the request's own newest `.changes`
+    /// entry; empty when it gave none.
+    pub changes_entry: String,
     pub confidence: Confidence,
     pub usage: Usage,
     pub tool_calls: Vec<ToolCall>,

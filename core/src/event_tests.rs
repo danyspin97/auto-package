@@ -87,3 +87,25 @@ fn bug_fix_has_its_wire_form_and_a_line_for_each_stage() {
     assert_eq!(end.line(), "  bug fix fixed (clean): applies");
     assert_eq!(Task::FixBug.to_string(), "fix bug");
 }
+
+#[test]
+fn a_finding_fix_event_round_trips_and_prints_one_line() {
+    use crate::fix_event::FindingFixEvent;
+    let f = FindingFixEvent {
+        step: None,
+        pkg: "p".into(),
+        request: "1394662".into(),
+        finding: "files.leftover".into(),
+        route: "tool".into(),
+        outcome: "fixed".into(),
+        reason: "removed a.orig".into(),
+    };
+    let json = serde_json::to_string(&Event::FindingFix(f.clone())).unwrap();
+    assert!(json.contains("\"event\":\"finding_fix\""), "{json}");
+    let back: Event = serde_json::from_str(&json).unwrap();
+    assert!(matches!(back, Event::FindingFix(b) if b == f));
+    assert_eq!(
+        f.line(),
+        "  request 1394662 finding files.leftover (tool): fixed: removed a.orig"
+    );
+}

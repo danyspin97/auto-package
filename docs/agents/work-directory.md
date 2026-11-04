@@ -136,6 +136,12 @@ staged; `end` says how the fix ended (`verdict`: `fixed`, `already_fixed`,
 `clean`, `refreshed`, `adapted` or `written`). The turn itself is `agent_prompt`
 with task `fix bug`.
 Recipe: `jq -c 'select(.pkg==env.K and .event=="bug_fix")' "$R"`.
+`finding_fix` (`step`, `pkg`, `request`, `finding`, `route`, `outcome`, `reason`)
+is a record of `auto-package fix --request`, one for each finding of the review
+of request `request`: `route` is `tool`, `agent`, `pipeline`, `wait`,
+`maintainer` or `not_acted_on`; `outcome` is `fixed`, `not_fixed`, `maintainer`
+or `not_acted_on`. The turn itself is `agent_prompt` with task `fix findings`.
+Recipe: `jq -c 'select(.pkg==env.K and .event=="finding_fix")' "$R"`.
 The workspace keeps three review files under `patch-review/`: `<name>.orig` (the
 patch before the rewrite, for the reviewer, removed after each round), `rewritten`
 (patches a reviewer rewrote itself, each with a hash of its bytes; the risk flag

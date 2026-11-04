@@ -83,3 +83,40 @@ impl BugFixEvent {
         }
     }
 }
+
+/// What `auto-package fix --request` did with one finding of the review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingFixEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<StepId>,
+    pub pkg: String,
+    /// The request the finding is about.
+    pub request: String,
+    /// The finding's id.
+    pub finding: String,
+    /// How the finding was routed: `tool`, `agent`, `pipeline`, `wait`,
+    /// `maintainer` or `not_acted_on`.
+    pub route: String,
+    /// `fixed`, `not_fixed`, `maintainer` or `not_acted_on`.
+    pub outcome: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+impl FindingFixEvent {
+    /// The line the human log prints.
+    pub fn line(&self) -> String {
+        format!(
+            "  request {} finding {} ({}): {}{}",
+            self.request,
+            self.finding,
+            self.route,
+            self.outcome,
+            if self.reason.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", self.reason)
+            }
+        )
+    }
+}

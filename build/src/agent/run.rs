@@ -134,7 +134,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
     cmd.envs(quilt_env(req.checkout_dir));
     if matches!(
         req.task,
-        Task::RefreshPatches | Task::PatchReview | Task::FixBug
+        Task::RefreshPatches | Task::PatchReview | Task::FixBug | Task::FixFindings
     ) {
         cmd.env("QUILT_SERIES", REFRESH_SERIES);
     }
@@ -426,6 +426,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
         Task::PatchReview => r.review.is_some() || r.action == "blocked",
         Task::RequestReview => r.findings.is_some(),
         Task::FixBug => r.fix.is_some() || r.action == "blocked",
+        Task::FixFindings => !r.finding_answers.is_empty() || r.action == "blocked",
         _ => true,
     };
     let resp = match pick_turn_response_where(&result_event.result, &tool_calls, needs_answer) {
@@ -475,6 +476,8 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
                         "the answer has no `review`, which a PatchReview turn must give"
                     } else if req.task == Task::FixBug {
                         "the answer has no `fix`, which a FixBug turn must give"
+                    } else if req.task == Task::FixFindings {
+                        "the answer has no `finding_answers`, which a FixFindings turn must give"
                     } else {
                         "the answer has no `patches` list, which a RefreshPatches turn must give"
                     }
@@ -555,6 +558,8 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
         patch_review: resp.review,
         bug_fix: resp.fix,
         review_findings: resp.findings.unwrap_or_default(),
+        finding_answers: resp.finding_answers,
+        changes_entry: resp.changes_entry,
         confidence: resp.confidence,
         usage,
         tool_calls,

@@ -136,7 +136,7 @@ fn attempt_tier(attempt: usize) -> usize {
     }
 }
 
-/// The first tier a PatchReview, RequestReview or FixBug turn may run on:
+/// The first tier a PatchReview, RequestReview, FixBug or FixFindings turn may run on:
 /// Sonnet. A review is a judge of other work and a bug fix writes code for a
 /// release, so none runs on a cheaper model, whatever the run uses; a quota
 /// rotation moves only among the tiers from here up.
@@ -146,7 +146,10 @@ const SONNET_FLOOR_TIER: usize = 1;
 /// or FixBug turn stays at or above [`SONNET_FLOOR_TIER`], also when the
 /// rotation wraps.
 pub(crate) fn model_for_task(task: Task, attempt: usize, rotation: usize) -> &'static str {
-    if !matches!(task, Task::PatchReview | Task::RequestReview | Task::FixBug) {
+    if !matches!(
+        task,
+        Task::PatchReview | Task::RequestReview | Task::FixBug | Task::FixFindings
+    ) {
         return model_for_attempt(attempt, rotation);
     }
     let tiers = &AGENT_MODELS[SONNET_FLOOR_TIER..];

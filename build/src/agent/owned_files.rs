@@ -48,6 +48,7 @@ pub(super) fn may_edit_service(task: Task) -> bool {
         Task::RefreshPatches
             | Task::PatchReview
             | Task::FixBug
+            | Task::FixFindings
             | Task::TranslateUnresolvableDeps
             | Task::RequestReview
     )

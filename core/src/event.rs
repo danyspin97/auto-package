@@ -218,6 +218,9 @@ pub enum Task {
     /// Fixing a reported bug in the package at its current version
     /// (`auto-package fix`).
     FixBug,
+    /// Fixing the findings of a review of a submit request
+    /// (`auto-package fix --request`).
+    FixFindings,
 }
 
 impl std::fmt::Display for Task {
@@ -235,6 +238,7 @@ impl std::fmt::Display for Task {
             Task::PostBuildReview => write!(f, "post-build review"),
             Task::PatchReview => write!(f, "patch review"),
             Task::FixBug => write!(f, "fix bug"),
+            Task::FixFindings => write!(f, "fix findings"),
         }
     }
 }
@@ -534,6 +538,9 @@ pub enum Event {
     },
     /// One record of `auto-package fix` (see [`BugFixEvent`]).
     BugFix(crate::fix_event::BugFixEvent),
+    /// What `auto-package fix --request` did with one finding of the review
+    /// (see [`FindingFixEvent`]).
+    FindingFix(crate::fix_event::FindingFixEvent),
 }
 
 /// One dependency a zig vendor archive holds.

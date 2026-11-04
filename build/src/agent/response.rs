@@ -17,8 +17,10 @@ pub(super) const MAX_AGENT_TURNS: u32 = 40;
 pub(crate) fn max_agent_turns(task: Task) -> u32 {
     match task {
         Task::RefreshPatches => 80,
-        // It may read the repository's history and rebase a patch.
-        Task::FixBug => 60,
+        // A FixBug turn may read the repository's history and rebase a patch.
+        // A FixFindings turn has no web search and no rebase, only a pypi.org
+        // fetch; it shares the cap.
+        Task::FixBug | Task::FixFindings => 60,
         _ => MAX_AGENT_TURNS,
     }
 }
@@ -142,6 +144,9 @@ pub(super) fn turn_response_schema(task: Task) -> String {
         && let Some(required) = schema.get_mut("required").and_then(|r| r.as_array_mut())
     {
         required.push("fix".into());
+    }
+    if task == Task::FixFindings {
+        super::fix_findings_response::add_to_schema(&mut schema);
     }
     if task == Task::RequestReview {
         if let Some(required) = schema.get_mut("required").and_then(|r| r.as_array_mut()) {
@@ -270,6 +275,11 @@ pub(super) struct TurnResponse {
     /// RequestReview only; absent for every other task.
     #[serde(default)]
     pub(super) findings: Option<Vec<AgentFinding>>,
+    /// FixFindings only; absent for every other task.
+    #[serde(default)]
+    pub(super) finding_answers: Vec<super::FindingAnswer>,
+    #[serde(default)]
+    pub(super) changes_entry: String,
 }
 
 /// Pick a usable `TurnResponse` out of a finished turn's output.
