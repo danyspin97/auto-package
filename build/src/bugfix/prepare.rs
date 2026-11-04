@@ -51,6 +51,14 @@ pub enum FixedIn {
     NotChecked(String),
 }
 
+/// The hosts a fix turn may read besides the fixed ones; none without a fix task.
+pub fn fetch_hosts_of(task: Option<&FixTask>) -> &[String] {
+    match task {
+        Some(FixTask::Bug(job)) => &job.fetch_hosts,
+        None => &[],
+    }
+}
+
 /// What `fix` was asked, checked.
 pub struct FixRequest<'a> {
     pub pkg: &'a str,

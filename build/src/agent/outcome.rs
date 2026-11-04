@@ -402,6 +402,9 @@ pub struct TurnRequest<'a> {
     pub model_rotation: usize,
     /// The patch files a PatchReview turn may write; empty for every other task.
     pub writable_patches: &'a [String],
+    /// The hosts a FixBug turn may WebFetch besides the GitHub ones and the
+    /// distribution patch hosts (see `fix_tools`); empty for every other task.
+    pub fetch_hosts: &'a [String],
     /// Called in real-time as each tool-use block is parsed, with `(tool_name,
     /// input_summary)`. Used by the pipeline to stream AgentToolUse events
     /// while the turn is still running so the TUI stays alive.

@@ -36,6 +36,7 @@ pub(crate) use user_prompt::*;
 mod build_prompt;
 mod fix_bug_text;
 mod fix_response;
+mod fix_tools;
 use fix_bug_text::*;
 pub use fix_response::*;
 mod patch_review_text;

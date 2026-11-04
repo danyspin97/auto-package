@@ -121,14 +121,18 @@ pub(super) fn turn_allowed_tools(
         // must not be able to touch the spec or checkout either way.
         ("WebFetch(domain:pypi.org),WebSearch", Vec::new())
     } else if let Some(checkout) = checkout {
-        if task == Task::PatchDependency {
-            // Reads the upstream history: the code to restore is not in the
-            // release archive the checkout holds.
-            patch_tools = format!(
-                "{CHECKOUT_TOOLS},{},WebFetch(domain:github.com),\
-                 WebFetch(domain:raw.githubusercontent.com),WebFetch(domain:api.github.com)",
-                self::patch_tools(workspace)
-            );
+        if matches!(task, Task::PatchDependency | Task::FixBug) {
+            // Reads the upstream history: the code to restore, or the fix, is not
+            // in the release archive the checkout holds. A FixBug turn's web
+            // grants are all decided by `fix_tools::web_grants`, from the hosts
+            // the user allowed.
+            let github = if task == Task::PatchDependency {
+                ",WebFetch(domain:github.com),WebFetch(domain:raw.githubusercontent.com),\
+                 WebFetch(domain:api.github.com)"
+            } else {
+                ""
+            };
+            patch_tools = format!("{CHECKOUT_TOOLS},{}{github}", self::patch_tools(workspace));
             (patch_tools.as_str(), vec![workspace, checkout])
         } else {
             patch_tools = format!("{CHECKOUT_TOOLS},{}", self::patch_tools(workspace));

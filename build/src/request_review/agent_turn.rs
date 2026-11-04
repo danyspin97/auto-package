@@ -350,6 +350,7 @@ pub fn agent_review(reviewed: &Reviewed, o: &AgentOptions<'_>, run: &RunTurn<'_>
             sibling_dirs: &[],
             model_rotation: rotation,
             writable_patches: &[],
+            fetch_hosts: &[],
             on_tool_use: None,
         };
         let model = agent::model_for_task(Task::RequestReview, 1, rotation).to_string();

@@ -342,6 +342,7 @@ pub(super) fn agent_turn(
         sibling_dirs: &sibling_dirs,
         model_rotation: model_rotation.get(),
         writable_patches,
+        fetch_hosts: crate::bugfix::fetch_hosts_of(config.bug_fix.as_deref()),
         on_tool_use: Some(&on_tool_use),
     };
 

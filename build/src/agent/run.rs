@@ -14,6 +14,12 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
     } else {
         turn_allowed_tools(req.task, req.workspace, req.checkout_dir)
     };
+    if req.task == Task::FixBug {
+        allowed_tools.push_str(&super::fix_tools::web_grants(
+            &crate::allowed_hosts::shared(),
+            req.fetch_hosts,
+        ));
+    }
     if !matches!(
         req.task,
         Task::TranslateUnresolvableDeps | Task::RequestReview
@@ -126,7 +132,10 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
         cmd.args(["--add-dir", &checkout.to_string_lossy()]);
     }
     cmd.envs(quilt_env(req.checkout_dir));
-    if matches!(req.task, Task::RefreshPatches | Task::PatchReview) {
+    if matches!(
+        req.task,
+        Task::RefreshPatches | Task::PatchReview | Task::FixBug
+    ) {
         cmd.env("QUILT_SERIES", REFRESH_SERIES);
     }
     if let Some(id) = req.session_id {

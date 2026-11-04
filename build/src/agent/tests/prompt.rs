@@ -165,6 +165,7 @@ pub(super) fn request<'a>(
         sibling_dirs: &[],
         model_rotation: 0,
         writable_patches: &[],
+        fetch_hosts: &[],
         on_tool_use: None,
     }
 }

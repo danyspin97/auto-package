@@ -402,6 +402,7 @@ fn a_patch_review_turn_reads_the_rebase_series_like_a_refresh_turn() {
     for (task, want) in [
         (Task::PatchReview, true),
         (Task::RefreshPatches, true),
+        (Task::FixBug, true),
         (Task::Review, false),
     ] {
         let stub = Stub::answering(&answer("no_change"), 0);
@@ -495,6 +496,25 @@ fn a_bug_fix_answer_without_a_verdict_is_no_usable_response() {
     // Giving up needs no verdict.
     let out = fix_turn(&answer("blocked")).expect("a blocked fix is an answer");
     assert!(out.bug_fix.is_none());
+}
+
+#[test]
+fn a_bug_fix_turn_gets_the_hosts_it_was_given_when_trusted_and_no_search() {
+    let stub = Stub::answering(&answer("no_change"), 0);
+    let ws = tempfile::tempdir().unwrap();
+    let hosts = ["codeberg.org".to_string(), "evil.example.org".to_string()];
+    let mut req = request(ws.path(), &[]);
+    req.task = Task::FixBug;
+    req.fetch_hosts = &hosts;
+    TURN_TEST_OVERRIDES.with(|o| {
+        o.borrow_mut().program = Some(stub.dir.path().join("claude-stub"));
+    });
+    let _ = turn(req);
+    TURN_TEST_OVERRIDES.with(|o| *o.borrow_mut() = TurnTestOverrides::default());
+    let args = stub.recorded("args.txt");
+    assert!(args.contains("WebFetch(domain:codeberg.org)"), "{args}");
+    assert!(!args.contains("evil.example.org"), "{args}");
+    assert!(!args.contains("WebSearch"), "{args}");
 }
 
 /// A RequestReview turn against a stub that gives `response`.
