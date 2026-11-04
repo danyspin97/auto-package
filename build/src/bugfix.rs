@@ -10,6 +10,9 @@
 mod bugzilla;
 #[cfg(test)]
 mod bugzilla_tests;
+mod bullet;
+#[cfg(test)]
+mod bullet_tests;
 mod cve;
 #[cfg(test)]
 mod cve_tests;
@@ -31,6 +34,7 @@ mod spec_edit;
 mod spec_edit_tests;
 
 pub use bugzilla::*;
+pub use bullet::*;
 pub use cve::*;
 pub use input::*;
 pub use live::*;
