@@ -74,6 +74,8 @@ press `Y` or type the name. The agent cannot read or write the file.
 - `q` or `Esc`: Exit the TUI
 - `Ctrl+C`: Force quit
 
+Warnings raised while the TUI is open are not printed over it: on exit the terminal is restored and one line counts them, with the diagnostics file that has them all (`diagnostics.log` in the run directory).
+
 ### Examples
 
 ```bash
