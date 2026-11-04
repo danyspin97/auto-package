@@ -589,6 +589,61 @@ Limits:
 - the lookup finds one commit: a fix in several commits is given by repeating
   `--commit-url`, each of which becomes its own patch;
 
+#### Fixing the findings of a request
+
+`fix --request ID` resolves what `review ID` found wrong in a submit request
+from your own branch project. It makes no change to the target project.
+
+```bash
+# Which findings go where? Reviews the request and prints the plan; changes
+# nothing on OBS (the review is saved under ap-work/reviews).
+auto-package fix --request 1394662 --dry-run
+
+# Fix them in the branch, check the request again and print what changed.
+auto-package fix --request 1394662
+
+# The same, from a saved review (must be of the request's current revision).
+auto-package fix --request 1394662 --findings ap-work/reviews/1394662/<run-id>/review.json
+
+# Also create a request that supersedes 1394662, after confirmation.
+auto-package fix --request 1394662 --submit
+```
+
+Each finding is routed by its id. The tool fixes leftover files, the `.changes`
+header, the dependency and version bullets of the entry, and the bullets of
+added patches, each with its own check. An agent turn
+(`FixFindings`, at least Sonnet) fixes the header, comment, rpmlintrc and spec
+findings. Build findings are left to the build rounds, or to OBS when it is
+still building. Signing keys, versions, risk flags, competing requests and
+the dates of entries are a person's decision and stay listed. Notes and the agent's opinions
+are never acted on. A reviewer's comment is shown in the review, never given to
+the agent.
+
+Refused before anything is downloaded or written: a request that is not an open
+submit from a named branch of your own (not the target project), or that renames
+the package. Refused once the review has run (a review run now is kept under
+`ap-work/reviews`): a saved review that is not of the request's current source
+and revision; a request without a pinned revision unless `--submit` is given
+(that request follows its source, and `--submit` pins the new one); a branch that
+moved since the review; a request with a version change or a target that does not
+exist; `--no-agent` when an agent finding exists.
+
+`--submit` creates the new request only when no finding is left that the tool
+or the agent could still fix, and no blocker is for a maintainer. The request is
+read again first, and it must still be yours. `--yes` refuses when a finding
+needs a person or a risk flag is recorded. The old request is superseded only
+after the new one exists; if that step fails both ids are printed and the old
+request is untouched.
+
+`fix --request` exits `0` when every finding the tool, the agent or the build
+could resolve is resolved and no blocker needs a maintainer, `1` when a finding
+is left (or the run failed), `3` when no finding is one the tool may fix, and
+`4` when a maintainer must decide or a request is refused. Limits: a declined
+request is superseded like any other, which relies on OBS allowing its creator
+to supersede it (not checked live); the findings of an agent opinion are never
+acted on; a fix that breaks something shows as a new finding and blocks the
+request.
+
 ### Exit codes
 
 - `0`: success.
