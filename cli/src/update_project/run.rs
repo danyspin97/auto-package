@@ -140,6 +140,8 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         _terminal_restore = None;
     }
     ap_core::sink::set_quiet(tui_ctrl.is_some());
+    ap_core::sink::set_diagnostics_file(&run_dir.diagnostics());
+    ap_core::sink::set_log_level(level);
 
     let mut sinks: Vec<Box<dyn Reporter>> = Vec::new();
     // Always attached: quiet while the TUI owns the terminal, and it starts

@@ -224,6 +224,8 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                 _terminal_restore = None;
             }
             ap_core::sink::set_quiet(tui_ctrl.is_some());
+            ap_core::sink::set_diagnostics_file(&run_dir.diagnostics());
+            ap_core::sink::set_log_level(level);
             tui::set_explain_dir(work_dir.clone());
 
             let mut sinks: Vec<Box<dyn ap_core::sink::Reporter>> = Vec::new();

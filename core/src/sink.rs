@@ -25,22 +25,17 @@ pub fn is_quiet() -> bool {
     QUIET.load(Ordering::Relaxed)
 }
 
-/// `eprintln!`, suppressed while [`set_quiet`] is in effect. Use for ad hoc
-/// diagnostic lines that aren't structured `Event`s and so can't reach the
-/// TUI as anything else — the alternative is losing them entirely while the
-/// TUI is active.
+/// Prints an ad hoc diagnostic line (not a structured `Event`). While the TUI
+/// owns the terminal it is held for a summary after the TUI, not printed; an
+/// identical line is printed once. See [`emit`].
 #[macro_export]
 macro_rules! diag {
     ($($arg:tt)*) => {
-        if !$crate::sink::is_quiet() {
-            let _ = std::io::Write::write_fmt(
-                &mut std::io::stderr(),
-                format_args!("{}\n", $crate::sink::printable(&format!($($arg)*))),
-            );
-        }
+        $crate::sink::emit(&format!($($arg)*))
     };
 }
 
+mod diagnostics;
 mod human;
 mod jsonl;
 mod memory;
@@ -48,12 +43,15 @@ mod reporter;
 mod text;
 
 #[cfg(test)]
+mod diagnostics_tests;
+#[cfg(test)]
 mod elapsed_tests;
 #[cfg(test)]
 mod printable_tests;
 #[cfg(test)]
 mod tests;
 
+pub use diagnostics::*;
 pub use human::*;
 pub use jsonl::*;
 pub use memory::*;

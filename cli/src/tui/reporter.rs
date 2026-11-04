@@ -45,8 +45,9 @@ impl RenderDeath {
 
 /// The plain-text sink, attached whether or not the run shows the TUI. While a
 /// TUI owns the terminal it is quiet (see `ap_core::sink::set_quiet`), so this
-/// prints nothing; once the render loop dies and [`RenderDeath::should_switch`]
-/// clears quiet, it prints the rest of the run.
+/// prints nothing (a warning is held for the summary); once the render loop
+/// dies and [`RenderDeath::should_switch`] clears quiet, it prints the rest of
+/// the run.
 pub struct PlainOutput {
     inner: ap_core::sink::HumanSink,
 }
@@ -60,6 +61,10 @@ impl PlainOutput {
 impl Reporter for PlainOutput {
     fn report(&self, event: &Event) {
         if ap_core::sink::is_quiet() {
+            // A warning is held for the summary after the TUI; the run log has every event.
+            if let Event::Warning { message, .. } = event {
+                ap_core::sink::emit(&format!("warning: {message}"));
+            }
             return;
         }
         self.inner.report(event);

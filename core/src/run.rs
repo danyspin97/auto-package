@@ -154,6 +154,11 @@ impl RunDir {
         self.path.join("run.jsonl")
     }
 
+    /// The diagnostic lines the run printed outside its event stream (see `sink::emit`).
+    pub fn diagnostics(&self) -> PathBuf {
+        self.path.join("diagnostics.log")
+    }
+
     pub fn summary(&self) -> PathBuf {
         self.path.join("run.json")
     }
