@@ -58,7 +58,10 @@ mod tidy;
 mod tests;
 
 pub use args::*;
+pub(crate) use request::prepare_request;
 pub use run::*;
+pub(crate) use submit::{review_gate, yes_refusal};
+pub(crate) use tidy::confirm_with;
 
 use audit::*;
 use cmd::*;

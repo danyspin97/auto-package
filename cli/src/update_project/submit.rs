@@ -254,7 +254,7 @@ pub(super) fn submit_requests(
 
 /// The packages among `pkgs` whose change needs a review (it has risk flags
 /// recorded), with those flags' lines, in the order given.
-pub(super) fn review_gate(state_root: &Path, pkgs: &[&str]) -> ReviewGate {
+pub(crate) fn review_gate(state_root: &Path, pkgs: &[&str]) -> ReviewGate {
     let mut gate = ReviewGate::default();
     for pkg in pkgs {
         match ap_build::risk_flags::try_of_package(state_root, pkg) {
@@ -272,19 +272,19 @@ pub(super) fn review_gate(state_root: &Path, pkgs: &[&str]) -> ReviewGate {
 
 /// What the review gate found among the packages of a batch.
 #[derive(Debug, Default, PartialEq)]
-pub(super) struct ReviewGate {
+pub(crate) struct ReviewGate {
     /// The packages that need a review, with each risk's line.
-    pub(super) needing: Vec<(String, Vec<String>)>,
+    pub(crate) needing: Vec<(String, Vec<String>)>,
     /// The packages whose recorded state cannot be read, with why. Nothing is
     /// known about them, so `--yes` does not go ahead for them either.
-    pub(super) unreadable: Vec<String>,
+    pub(crate) unreadable: Vec<String>,
 }
 
 /// What `--yes` refuses: when it is given and any package needs a review or
 /// has a state that cannot be read, the message first, then each such package
 /// and its flags or its error. `None` when the requests may go on (no `--yes`,
 /// or nothing needs a review and every state was read).
-pub(super) fn yes_refusal(yes: bool, gate: &ReviewGate) -> Option<Vec<String>> {
+pub(crate) fn yes_refusal(yes: bool, gate: &ReviewGate) -> Option<Vec<String>> {
     if !yes || (gate.needing.is_empty() && gate.unreadable.is_empty()) {
         return None;
     }

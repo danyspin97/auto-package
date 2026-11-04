@@ -179,7 +179,7 @@ pub(super) fn confirm(question: &str, ctx: &Ctx<'_>) -> bool {
 }
 
 /// [`confirm`] with the warning going to `warn`.
-pub(super) fn confirm_with(question: &str, warn: &dyn Fn(&str)) -> bool {
+pub(crate) fn confirm_with(question: &str, warn: &dyn Fn(&str)) -> bool {
     matches!(
         ask_line(&format!("{question} [y/N] "), warn)
             .as_deref()

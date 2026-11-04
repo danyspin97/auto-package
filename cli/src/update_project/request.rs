@@ -8,7 +8,7 @@ use ap_build::arch_check::GateVerdict;
 /// `--submit` and the TUI's submit keys, so both ask exactly the same.
 /// `superseding` is the open request a new one replaces (see
 /// [`first_open_request`]); `None` for every other caller.
-pub(super) fn prepare_request(
+pub(crate) fn prepare_request(
     branch: &str,
     distro: Option<&str>,
     arch: &str,

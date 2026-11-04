@@ -7,7 +7,12 @@
 //! fix as its task.
 
 mod args;
+mod findings;
 mod plan;
+mod request;
+#[cfg(test)]
+mod request_tests;
+mod resubmit;
 #[cfg(test)]
 mod tests;
 
@@ -44,7 +49,8 @@ pub(crate) fn update_args(
     branch_project: String,
     task: Option<FixTask>,
 ) -> UpdateProjectArgs {
-    let argv = ["auto-package", "update", "--project", a.project.as_str()];
+    let project = a.project.as_deref().unwrap_or_default();
+    let argv = ["auto-package", "update", "--project", project];
     let mut u = match crate::Cli::try_parse_from(argv).map(|c| c.command) {
         Ok(crate::Commands::Update(u)) => u,
         _ => unreachable!("`update --project P` always parses"),
@@ -71,8 +77,29 @@ pub(crate) fn update_args(
     u
 }
 
+/// The directory of a branch's build state, as the update run keeps it.
+pub(crate) fn state_root(
+    work_dir: &std::path::Path,
+    branch: &str,
+    arch: &str,
+) -> std::path::PathBuf {
+    work_dir
+        .join(format!(
+            "{}-{}",
+            ap_core::run::sanitize_name(branch),
+            ap_core::run::sanitize_name(arch)
+        ))
+        .join("state")
+}
+
 /// `fix`: the whole command.
 pub fn run(mut a: FixArgs, summary: &mut Option<String>) -> color_eyre::Result<()> {
+    if let Some(id) = a.request.clone() {
+        return request::run(&a, &id, summary);
+    }
+    let Some(project) = a.project.clone() else {
+        return Err(eyre!("fix needs --project and --only, or --request"));
+    };
     let [pkg] = a.only.as_slice() else {
         return Err(eyre!(
             "fix takes exactly one package: --only PACKAGE (got {})",
@@ -80,8 +107,8 @@ pub fn run(mut a: FixArgs, summary: &mut Option<String>) -> color_eyre::Result<(
         ));
     };
     let pkg = pkg.clone();
-    if is_maintenance_project(&a.project) {
-        return Err(eyre!(maintenance_refusal(&a.project, &pkg)));
+    if is_maintenance_project(&project) {
+        return Err(eyre!(maintenance_refusal(&project, &pkg)));
     }
     let input = bugfix::parse_bug_input(
         &a.bug,
@@ -99,19 +126,14 @@ pub fn run(mut a: FixArgs, summary: &mut Option<String>) -> color_eyre::Result<(
         Some(b) => b.clone(),
         None => {
             let user = ap_build::osc::current_user(Emit::quiet()).map_err(|e| eyre!("{e}"))?;
-            ap_build::osc::default_branch_project(&user, &a.project)
+            ap_build::osc::default_branch_project(&user, &project)
         }
     };
-    let spec = ap_build::update::spec_for_package(&a.project, &pkg, Emit::quiet())
-        .map_err(|e| eyre!("{pkg} in {}: {e}", a.project))?;
+    let spec = ap_build::update::spec_for_package(&project, &pkg, Emit::quiet())
+        .map_err(|e| eyre!("{pkg} in {project}: {e}"))?;
     let version = ap_build::spec::parse_header(&spec)
         .map(|h| h.version)
-        .ok_or_else(|| {
-            eyre!(
-                "the spec of {pkg} in {} has no Name: and Version:",
-                a.project
-            )
-        })?;
+        .ok_or_else(|| eyre!("the spec of {pkg} in {project} has no Name: and Version:"))?;
     let declared: Vec<String> = ap_build::patch_check::declared_patches(&spec)
         .into_iter()
         .map(|(_, n)| n)
@@ -133,7 +155,7 @@ pub fn run(mut a: FixArgs, summary: &mut Option<String>) -> color_eyre::Result<(
     // Several upstream fixes and none chosen: a guess between commits is a
     // maintainer's call, so nothing is branched.
     if !job.candidates.is_empty() {
-        for line in bugfix::dry_run_lines(&job, &version, &branch_project, &a.project, a.submit) {
+        for line in bugfix::dry_run_lines(&job, &version, &branch_project, &project, a.submit) {
             println!("{line}");
         }
         return Err(FixExit {
@@ -144,14 +166,7 @@ pub fn run(mut a: FixArgs, summary: &mut Option<String>) -> color_eyre::Result<(
         .into());
     }
     let nonce = job.nonce.clone();
-    let state_root = a
-        .work_dir
-        .join(format!(
-            "{}-{}",
-            ap_core::run::sanitize_name(&branch_project),
-            ap_core::run::sanitize_name(&a.arch)
-        ))
-        .join("state");
+    let state_root = state_root(&a.work_dir, &branch_project, &a.arch);
     let dry_run = a.dry_run;
     let update = update_args(&a, branch_project, Some(FixTask::Bug(job)));
     let result = crate::update_project::run(update, summary);

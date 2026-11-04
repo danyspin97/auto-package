@@ -67,7 +67,7 @@ fn a_fix_with_nothing_to_fix_or_two_packages_or_a_maintenance_project_is_refused
     .unwrap_err();
     assert!(e.to_string().contains("exactly one package"), "{e}");
     let mut a = fix(&["--only", "curl", "--bug", "bsc#1234567"]);
-    a.project = "SUSE:SLE-15-SP7:Update".into();
+    a.project = Some("SUSE:SLE-15-SP7:Update".into());
     let e = run(a, &mut summary).unwrap_err().to_string();
     assert!(
         e.contains("maintenance backport")

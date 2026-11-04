@@ -1,56 +1,106 @@
 use std::path::PathBuf;
 
-/// `auto-package fix`: the bug and where to build the fix.
+/// A request id is digits only, checked before anything is read.
+fn parse_request_id(id: &str) -> Result<String, String> {
+    if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
+        Ok(id.to_string())
+    } else {
+        Err(format!("{id:?} is not a request id: digits only"))
+    }
+}
+
+/// `auto-package fix`: the bug and where to build the fix, or with `--request`
+/// the findings of a submit request.
 #[derive(clap::Args, Clone)]
 pub struct FixArgs {
     /// OBS project the package lives in. Only read: the fix is built in a
     /// branch project. A maintenance or update project is refused.
-    #[arg(long, value_name = "PROJECT")]
-    pub project: String,
+    #[arg(
+        long,
+        value_name = "PROJECT",
+        required_unless_present = "request",
+        conflicts_with = "request"
+    )]
+    pub project: Option<String>,
 
     /// The package to fix (exactly one).
-    #[arg(long, value_delimiter = ',', required = true, value_name = "PACKAGE")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "PACKAGE",
+        required_unless_present = "request",
+        conflicts_with = "request"
+    )]
     pub only: Vec<String>,
+
+    /// Fix the findings of a review of this submit request (digits) in its
+    /// branch project, instead of a bug. The request names the project and
+    /// package; the findings come from a fresh review, or `--findings`.
+    #[arg(
+        long,
+        value_name = "ID",
+        value_parser = parse_request_id,
+        conflicts_with_all = [
+            "project", "only", "bug", "cve", "description", "bug_file",
+            "commit_url", "commit_repo", "branch_project", "follow_devel", "tui",
+        ]
+    )]
+    pub request: Option<String>,
+
+    /// With `--request`: the saved `review.json` of the request to fix instead
+    /// of a fresh review. It must be a review of the request's current revision.
+    #[arg(long, value_name = "FILE", requires = "request")]
+    pub findings: Option<PathBuf>,
 
     /// A bug reference: `bsc#1234567` (also `boo#`, `bnc#`), `jsc#SLE-12345` or
     /// a CVE. Repeatable or comma separated. A public bsc# bug is read from
     /// bugzilla.suse.com once the host is allowed.
-    #[arg(long = "bug", value_name = "REF", value_delimiter = ',')]
+    #[arg(
+        long = "bug",
+        value_name = "REF",
+        value_delimiter = ',',
+        conflicts_with = "request"
+    )]
     pub bug: Vec<String>,
 
     /// A CVE (`CVE-2025-1234`), repeatable. Read from api.osv.dev and
     /// cveawg.mitre.org once the user allows them.
-    #[arg(long, value_name = "CVE", value_delimiter = ',')]
+    #[arg(
+        long,
+        value_name = "CVE",
+        value_delimiter = ',',
+        conflicts_with = "request"
+    )]
     pub cve: Vec<String>,
 
     /// The bug in words (at most 4 KiB), for a bug with no tracker entry or to
     /// add to one.
-    #[arg(long, value_name = "TEXT")]
+    #[arg(long, value_name = "TEXT", conflicts_with = "request")]
     pub description: Option<String>,
 
     /// A text file with the bug report (a paste of the bugzilla page, an
     /// advisory), at most 64 KiB. Read instead of fetched.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", conflicts_with = "request")]
     pub bug_file: Option<PathBuf>,
 
     /// The upstream fix: a commit, pull request or `.patch`/`.diff` URL, a
     /// patch file, or a commit id with `--commit-repo`. Repeatable for a fix in
     /// several commits. Without it the tool looks for one.
-    #[arg(long, value_name = "URL")]
+    #[arg(long, value_name = "URL", conflicts_with = "request")]
     pub commit_url: Vec<String>,
 
     /// The https repository of a bare commit id in `--commit-url`.
-    #[arg(long, value_name = "URL")]
+    #[arg(long, value_name = "URL", conflicts_with = "request")]
     pub commit_repo: Option<String>,
 
     /// Project to branch the package into and build the fix in. Defaults to
     /// `home:<osc user>:branches:<PROJECT>`. There is no in-place fix.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "request")]
     pub branch_project: Option<String>,
 
     /// Branch from the package's devel project when it has one; a request goes
     /// to it.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, conflicts_with = "request")]
     pub follow_devel: bool,
 
     #[arg(long, default_value = "ap-work")]
@@ -101,7 +151,7 @@ pub struct FixArgs {
     pub dry_run: bool,
 
     /// Enable the interactive TUI for the build.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, conflicts_with = "request")]
     pub tui: bool,
 
     /// Log level: error, warn, info, debug, trace.

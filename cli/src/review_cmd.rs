@@ -123,7 +123,7 @@ pub(super) fn main(args: &ReviewArgs) -> i32 {
 }
 
 /// The target repository's `%ldconfig_scriptlets` support, read from OBS.
-fn ldconfig_macro(target_project: &str) -> bool {
+pub(crate) fn ldconfig_macro(target_project: &str) -> bool {
     let (repo, _) = ap_build::osc::choose_repository(target_project, None, "x86_64");
     ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&repo)
 }
