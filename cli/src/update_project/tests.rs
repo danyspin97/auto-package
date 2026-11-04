@@ -436,3 +436,28 @@ fn the_ports_follow_the_flag_and_the_arches_named() {
     let err = arch::wanted_arches(&a).unwrap_err();
     assert!(err.contains("no Tumbleweed armv7l in OBS"), "{err}");
 }
+
+#[test]
+fn a_404_stops_the_package_only_when_its_origin_is_confirmed_missing() {
+    let not_found = osc::Error::OscFailed {
+        cmd: "api -X POST /source/home:x:branches:Base:System/dtc?cmd=rebase".into(),
+        code: 1,
+        stderr: "Error: HTTP Error 404: Not Found".into(),
+    };
+    // A present origin (or no confirmed answer) is a warning: built as it is.
+    assert!(missing_in_origin("dtc", &not_found, None).is_none());
+    // OBS confirms the origin has no such package: the package stops.
+    let why = missing_in_origin("dtc", &not_found, Some("Base:System")).expect("stops");
+    assert!(why.contains("dtc is not on OBS in Base:System"), "{why}");
+    // A link to another project names that project, not the plan's origin.
+    let devel = missing_in_origin("dtc", &not_found, Some("home:x:devel")).expect("stops");
+    assert!(devel.contains("not on OBS in home:x:devel"), "{devel}");
+    assert!(!devel.contains("Base:System"), "{devel}");
+    // Another failure never stops a package, even with a missing origin.
+    let server = osc::Error::OscFailed {
+        cmd: "api -X POST /source/x/dtc?cmd=rebase".into(),
+        code: 1,
+        stderr: "HTTP Error 500: Internal Server Error".into(),
+    };
+    assert!(missing_in_origin("dtc", &server, Some("Base:System")).is_none());
+}

@@ -142,10 +142,22 @@ pub(super) fn branch_item(
                         item.pkg
                     ));
                 }
-                Err(e) => ctx.warn(format!(
-                    "could not rebase {branch}/{} onto its origin, building it as it is: {e}",
-                    item.pkg
-                )),
+                Err(e) => {
+                    // Only a 404 that OBS confirms for the link's own origin
+                    // (which may not be the plan's origin) stops the package.
+                    let gone = if e.is_not_found() {
+                        osc::missing_origin(branch, &item.pkg, emit)
+                    } else {
+                        None
+                    };
+                    match missing_in_origin(&item.pkg, &e, gone.as_ref().map(|o| o.project.as_str())) {
+                        Some(why) => return Err(why),
+                        None => ctx.warn(format!(
+                            "could not rebase {branch}/{} onto its origin, building it as it is: {e}",
+                            item.pkg
+                        )),
+                    }
+                }
             }
             // The flags come from the project the branch is linked from, which
             // is not always the plan's origin (a branch made from a devel
@@ -173,6 +185,21 @@ pub(super) fn branch_item(
         }
     }
     Ok(())
+}
+
+/// Why a package whose rebase got a 404 is not built: the 404 stops it only
+/// when `origin_missing` names the link's origin, which OBS confirmed as
+/// missing. Otherwise the 404 is a warning and the package is built as it is.
+pub(super) fn missing_in_origin(
+    pkg: &str,
+    e: &osc::Error,
+    origin_missing: Option<&str>,
+) -> Option<String> {
+    let origin = origin_missing.filter(|_| e.is_not_found())?;
+    Some(format!(
+        "{pkg} is not on OBS in {origin}: its rebase got a 404 and OBS confirms that \
+         {origin} has no such package; it is not built or submitted, create it in {origin} first"
+    ))
 }
 
 /// The result of `rebase` when the branch is to be rebased onto its origin;

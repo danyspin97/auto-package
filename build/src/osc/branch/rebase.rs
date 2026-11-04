@@ -76,6 +76,32 @@ pub struct LinkOrigin {
     pub package: String,
 }
 
+/// The origin `project/pkg` links to, when OBS positively names that origin as
+/// missing: a read of the origin package answers `unknown_package` or
+/// `unknown_project`. A read that succeeds, fails any other way, or a package
+/// that is not a link gives `None`. Read only.
+pub fn missing_origin(project: &str, pkg: &str, emit: Emit<'_>) -> Option<LinkOrigin> {
+    let origin = link_origin(project, pkg, emit).ok().flatten()?;
+    check_obs_name("project", &origin.project).ok()?;
+    check_obs_name("package", &origin.package).ok()?;
+    let path = format!("/source/{}/{}", origin.project, enc(&origin.package));
+    let out = api_call(None, &path, None, emit).ok()?;
+    let text = format!("{}{}", out.stdout, out.stderr);
+    (!out.success() && names_missing(&text)).then_some(origin)
+}
+
+/// Whether OBS's answer names a package or a project as missing.
+pub(super) fn names_missing(text: &str) -> bool {
+    [
+        "unknown_package",
+        "unknown_project",
+        "Package not found",
+        "Project not found",
+    ]
+    .iter()
+    .any(|m| text.contains(m))
+}
+
 /// The project `project/pkg` is linked from (the `project` of its `_link`), or
 /// `None` when it is not a link.
 pub fn link_project(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Option<String>, Error> {
@@ -260,5 +286,23 @@ pub(super) fn parse_branch_response(
             .unwrap_or_else(|| target_project.to_string()),
         target_package: xml_data_value(xml, "targetpackage").unwrap_or_else(|| pkg.to_string()),
         origin_project: xml_data_value(xml, "sourceproject").unwrap_or_else(|| source.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod missing_origin_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_positive_missing_answer_names_the_origin_as_missing() {
+        assert!(names_missing(
+            r#"<status code="unknown_package"><summary>Package not found: Base:System/dtc</summary></status>"#
+        ));
+        assert!(names_missing("<status code=\"unknown_project\"/>"));
+        // A proxy or a web server's own 404 page is not OBS's answer.
+        assert!(!names_missing(
+            "<html><h1>404 Not Found</h1><hr>nginx</html>"
+        ));
+        assert!(!names_missing(""));
     }
 }

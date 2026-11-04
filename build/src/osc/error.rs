@@ -220,6 +220,15 @@ pub fn lookup_says_absent(text: &str, path_project: bool) -> bool {
 pub(super) const DOWNLOAD_FAILED: &str = "succeeded but downloading the built RPMs failed";
 
 impl Error {
+    /// Whether OBS answered 404 to the request: the package or project asked
+    /// for is not there.
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            Error::OscFailed { stderr, .. } => super::names::is_not_found(stderr),
+            _ => false,
+        }
+    }
+
     /// Whether the failure is a full disk: the OS reported `ENOSPC`, or the
     /// output of the osc child says so (its Python traceback, a tool's error
     /// line). The OS case is typed; the child case has only its text.
