@@ -18,6 +18,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod applied;
+#[cfg(test)]
+mod applied_tests;
 mod present;
 mod quilt;
 mod rounds;
@@ -26,6 +29,7 @@ mod series;
 #[cfg(test)]
 mod tests;
 
+pub use applied::*;
 pub use present::*;
 use quilt::*;
 pub use rounds::*;

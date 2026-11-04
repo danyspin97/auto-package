@@ -17,14 +17,51 @@ struct Frame {
     /// `Some(true)` taken, `Some(false)` skipped, `None` cannot be evaluated.
     state: Option<bool>,
     prior: Taken,
+    /// The `%if` directive, whitespace collapsed.
+    text: String,
+    /// The `%elif` directives read so far, whitespace collapsed.
+    elifs: Vec<String>,
+    /// The macros the conditions name, with the values the spec gives them, so
+    /// a guard changes when its input does (`[use_patches=1]`).
+    inputs: Vec<String>,
+    /// The branch the frame is in.
+    branch: Branch,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Branch {
+    Then,
+    Elif,
+    Else,
 }
 
 impl Frame {
-    fn new(state: Option<bool>) -> Self {
+    fn new(state: Option<bool>, line: &str, macros: &HashMap<String, String>) -> Self {
         Frame {
+            inputs: macro_inputs(line, macros),
             state,
             prior: Taken::No,
+            text: collapse(line),
+            elifs: Vec::new(),
+            branch: Branch::Then,
         }
+    }
+
+    /// The branch as a guard names it: `%if X [then]`, `%if X [elif 1: %elif Y]`
+    /// or `%if X [else after %elif Y]`.
+    fn guard(&self) -> String {
+        let branch = match self.branch {
+            Branch::Then => "then".to_string(),
+            Branch::Elif => format!(
+                "elif {}: {}",
+                self.elifs.len(),
+                self.elifs.last().map_or("", String::as_str)
+            ),
+            Branch::Else if self.elifs.is_empty() => "else".to_string(),
+            Branch::Else => format!("else after {}", self.elifs.join(", ")),
+        };
+        let inputs: String = self.inputs.iter().map(|i| format!(" {{{i}}}")).collect();
+        format!("{} [{branch}]{inputs}", self.text)
     }
 
     /// Fold the branch just left into `prior` before moving to the next one.
@@ -56,12 +93,21 @@ impl CondStack {
         match word {
             "%if" => {
                 let state = eval_condition(rest, macros);
-                self.frames.push(Frame::new(state));
+                self.frames.push(Frame::new(state, trimmed, macros));
             }
-            "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos" => self.frames.push(Frame::new(None)),
+            "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos" => {
+                self.frames.push(Frame::new(None, trimmed, macros))
+            }
             "%elif" | "%elifarch" | "%elifnarch" | "%elifos" | "%elifnos" => {
                 if let Some(frame) = self.frames.last_mut() {
                     frame.advance();
+                    frame.branch = Branch::Elif;
+                    frame.elifs.push(collapse(trimmed));
+                    for input in macro_inputs(trimmed, macros) {
+                        if !frame.inputs.contains(&input) {
+                            frame.inputs.push(input);
+                        }
+                    }
                     frame.state = match frame.prior {
                         Taken::No if word == "%elif" => eval_condition(rest, macros),
                         Taken::Yes => Some(false),
@@ -72,6 +118,7 @@ impl CondStack {
             "%else" => {
                 if let Some(frame) = self.frames.last_mut() {
                     frame.advance();
+                    frame.branch = Branch::Else;
                     frame.state = match frame.prior {
                         Taken::Yes => Some(false),
                         Taken::Maybe => None,
@@ -98,6 +145,52 @@ impl CondStack {
             Some(true)
         }
     }
+
+    /// The open frames that are not known to be taken, outermost first, each
+    /// as `%if X [then]`, `%if X [elif 1: %elif Y]` or `%if X [else after
+    /// %elif Y]` (whitespace collapsed).
+    pub(crate) fn guards(&self) -> Vec<String> {
+        self.frames
+            .iter()
+            .filter(|f| f.state != Some(true))
+            .map(Frame::guard)
+            .collect()
+    }
+}
+
+/// `text` with each run of whitespace made one space.
+pub(crate) fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `name=value` for each macro a condition line names (`%{x}`, `%x`, `%{?x}`,
+/// `%{!?x:..}`), the value as the spec defines it or `undefined`. The `with`
+/// and `without` bcond tests name no macro.
+fn macro_inputs(line: &str, macros: &HashMap<String, String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    // The directive itself (`%if`, `%elifarch`) names no macro.
+    let mut rest = line
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .map_or("", |(_, r)| r);
+    while let Some(pos) = rest.find('%') {
+        let after = rest[pos + 1..].trim_start_matches('{');
+        let after = after.trim_start_matches(['!', '?']);
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let bcond = matches!(name.as_str(), "with" | "without");
+        if !name.is_empty() && !bcond {
+            let value = macros.get(&name).map_or("undefined", String::as_str);
+            let input = format!("{name}={value}");
+            if !out.contains(&input) {
+                out.push(input);
+            }
+        }
+        rest = &rest[pos + 1..];
+    }
+    out
 }
 
 /// Evaluate the simple `%if` shapes: an integer literal, optionally with a

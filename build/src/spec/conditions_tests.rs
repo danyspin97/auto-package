@@ -157,3 +157,84 @@ fn a_define_after_an_endif_with_a_comment_is_read() {
     assert_eq!(defines.get("a"), None);
     assert_eq!(defines.get("b").map(String::as_str), Some("2"));
 }
+
+fn guards_after(text: &str, m: &HashMap<String, String>) -> Vec<String> {
+    let mut stack = CondStack::new();
+    for l in text.lines() {
+        stack.feed(l, m);
+    }
+    stack.guards()
+}
+
+#[test]
+fn guards_name_the_frames_not_known_to_be_taken() {
+    let m = macros(&[]);
+    assert_eq!(guards_after("%if 0", &m), ["%if 0 [then]"]);
+    assert!(guards_after("%if 1", &m).is_empty());
+    assert_eq!(guards_after("%if %{with x}", &m), ["%if %{with x} [then]"]);
+    assert_eq!(
+        guards_after("%if %{with x}\n%else", &m),
+        ["%if %{with x} [else]"]
+    );
+    assert_eq!(
+        guards_after("%if %{with x}\n%elif 0%{?y}", &m),
+        ["%if %{with x} [elif 1: %elif 0%{?y}] {y=undefined}"]
+    );
+    assert_eq!(
+        guards_after("%if 0\n%elif 0%{?y}\n%else", &m),
+        ["%if 0 [else after %elif 0%{?y}] {y=undefined}"]
+    );
+    assert_eq!(
+        guards_after("%ifarch x86_64", &m),
+        ["%ifarch x86_64 [then]"]
+    );
+}
+
+#[test]
+fn guards_list_nested_frames_outermost_first_and_skip_taken_ones() {
+    let m = macros(&[]);
+    assert_eq!(
+        guards_after("%if %{with x}\n%if 1\n%if 0", &m),
+        ["%if %{with x} [then]", "%if 0 [then]"]
+    );
+}
+
+#[test]
+fn whitespace_in_a_guard_is_collapsed() {
+    let m = macros(&[]);
+    assert_eq!(
+        guards_after("  %if  %{with   x}", &m),
+        guards_after("%if %{with x}", &m)
+    );
+}
+
+#[test]
+fn a_guard_carries_the_values_of_the_macros_it_names() {
+    let one = macros(&[("use_patches", "1"), ("pyver", "310")]);
+    let zero = macros(&[("use_patches", "0"), ("pyver", "311")]);
+    for cond in [
+        "%if %{use_patches}",
+        "%if 0%{use_patches}",
+        "%if %{pyver} > 310",
+    ] {
+        assert_ne!(
+            guards_after(cond, &one),
+            guards_after(cond, &zero),
+            "{cond}"
+        );
+    }
+    assert_eq!(
+        guards_after("%if %{use_patches}", &one),
+        ["%if %{use_patches} [then] {use_patches=1}"]
+    );
+    // A macro the spec does not define is named as such, and an unrelated one is not.
+    let other = macros(&[("use_patches", "1"), ("pyver", "999"), ("unrelated", "x")]);
+    assert_eq!(
+        guards_after("%if %{use_patches}", &one),
+        guards_after("%if %{use_patches}", &other)
+    );
+    assert_eq!(
+        guards_after("%if 0%{?suse_version} > 1500", &macros(&[])),
+        ["%if 0%{?suse_version} > 1500 [then] {suse_version=undefined}"]
+    );
+}
