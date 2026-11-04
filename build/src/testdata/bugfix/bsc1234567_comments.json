@@ -1,0 +1,10 @@
+{"bugs":{"1234567":{"comments":[
+{"id":1,"count":0,"is_private":false,"text":"A heap overflow in parse_token() of foo.\nFixed upstream in https://github.com/o/r/commit/0123456789abcdef0123456789abcdef01234567"},
+{"id":2,"count":1,"is_private":true,"text":"internal note, never shown"},
+{"id":3,"count":2,"is_private":false,"text":"c2"},
+{"id":4,"count":3,"is_private":false,"text":"c3"},
+{"id":5,"count":4,"is_private":false,"text":"c4"},
+{"id":6,"count":5,"is_private":false,"text":"c5"},
+{"id":7,"count":6,"is_private":false,"text":"c6 see https://example.org/advisory"},
+{"id":8,"count":7,"is_private":false,"text":"c7"}
+]}}}

@@ -5,6 +5,9 @@
 //! The functions are pure except where a module says it reads a file or the
 //! network.
 
+mod bugzilla;
+#[cfg(test)]
+mod bugzilla_tests;
 mod input;
 #[cfg(test)]
 mod input_tests;
@@ -12,5 +15,6 @@ mod patch;
 #[cfg(test)]
 mod patch_tests;
 
+pub use bugzilla::*;
 pub use input::*;
 pub use patch::*;
