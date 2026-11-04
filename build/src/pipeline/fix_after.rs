@@ -5,6 +5,7 @@ use crate::pipeline::agent::*;
 use crate::pipeline::apply_turn::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::classify::*;
+use crate::pipeline::diagnostic_edit::*;
 use crate::pipeline::ladder::*;
 use crate::pipeline::logs::*;
 use crate::pipeline::network_fetch::*;
@@ -441,15 +442,59 @@ pub(super) fn fix_after_build(
     }
     persist_build_rounds(ws, &config.run_id, st.build_rounds.given);
 
+    // A round that only printed diagnostics is told so; a second one in a row is
+    // rolled back, since its build would fail the same way (see `diagnostic_edit`).
+    let diagnostic_before = last_round_diagnostic(ws.dir(), &config.run_id);
+    let diagnostic_note = diagnostic_before.then(|| diagnostic_round_note().to_string());
+    let turn_context: Option<String> = match (context, diagnostic_note) {
+        (Some(c), Some(n)) => Some(format!("{c}\n\n{n}")),
+        (Some(c), None) => Some(c.to_string()),
+        (None, n) => n,
+    };
+    let checkout_snapshot = CheckoutSnapshot::take(&ctx.checkout_dir);
+    let spec_before = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
     fix_turn(
         ctx,
         st,
         attempts,
         crate::agent::Task::FixAfterBuild,
         Some(&extract),
-        context,
+        turn_context.as_deref(),
         Some(build_log),
     )?;
+    // The whole turn is judged: the spec may only print, and no other file of
+    // the checkout may have changed. A turn that changed anything else, or
+    // nothing, is not diagnostic, so it clears the marker.
+    let spec_after = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
+    let spec_name = ctx
+        .spec_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let spec_changed = spec_after != spec_before;
+    let verdict = round_verdict(
+        spec_changed,
+        spec_changed && diagnostic_only(&spec_before, &spec_after),
+        other_files_changed(&ctx.checkout_dir, &checkout_snapshot, &spec_name),
+        diagnostic_before,
+    );
+    match verdict {
+        RoundVerdict::Clear => set_last_round_diagnostic(ws.dir(), &config.run_id, false),
+        RoundVerdict::Mark => set_last_round_diagnostic(ws.dir(), &config.run_id, true),
+        RoundVerdict::Refuse => {
+            // The turn is put back as a whole: the spec and every file it touched.
+            checkout_snapshot.restore(reporter, Some(build_step));
+            reporter.report(&Event::Warning {
+                step: Some(build_step.id),
+                message: format!(
+                    "{}: edit rolled back: a second diagnostic-only round in a row \
+                     (the spec only printed more output)",
+                    ctx.rpm_name
+                ),
+            });
+        }
+    }
     Ok(RoundEnd::Retry)
 }
 

@@ -1,46 +1,112 @@
 use super::*;
+use crate::pipeline::snapshot::CheckoutSnapshot;
+use std::fs;
 
-/// The build-time print lines are exempt; a flag and a print elsewhere are not.
+const SPEC: &str = "Name: x\nVersion: 1\nBuildRequires: gcc\n\n%build\nmake\n\n%check\nmake check\n\n%install\nmake install\n";
+
+/// Printing the test log in %check is diagnostic: nothing else changed.
 #[test]
-fn a_build_print_is_exempt_from_the_bullet_rule() {
-    assert!(is_build_print("%check", "cat test-suite.log"));
-    assert!(!is_build_print("%check", "make check"));
-    assert!(!is_build_print("%prep", "echo hi"));
+fn a_print_in_check_is_a_diagnostic_only_edit() {
+    let after = SPEC.replace("make check\n", "make check\necho ---\ncat test-suite.log\n");
+    assert!(diagnostic_only(SPEC, &after));
 }
 
-/// Each line that only looks like a print, and does more, is not one.
+/// A flag or a dependency is a real change, even with a print beside it.
 #[test]
-fn a_print_that_writes_deletes_or_sets_is_not_a_print() {
-    for line in [
-        "cat x > %{buildroot}/usr/share/foo",
-        "echo 'x' >> %{buildroot}/etc/foo.conf",
-        "find %{buildroot} -name '*.la' -delete",
-        "find . -name '*.o' -exec rm {} ;",
-        "ls test/x.c | grep -q foo || rm test/x.c",
-        "env CFLAGS=-O0 make -C sub",
-        "set -x; ./configure --prefix=/usr",
-        "set -xe",
-        "VAR=1 cat test-suite.log",
-        "echo $(rm -f x)",
-        "cat `which foo`",
-        "echo hi && make install",
-    ] {
-        assert!(!is_build_print("%check", line), "{line}");
-    }
+fn a_print_with_a_real_change_is_not_diagnostic_only() {
+    let after = SPEC
+        .replace("make check\n", "make check\ncat test-suite.log\n")
+        .replace(
+            "BuildRequires: gcc\n",
+            "BuildRequires: gcc\nBuildRequires: libfoo\n",
+        );
+    assert!(!diagnostic_only(SPEC, &after));
 }
 
-/// The plain prints stay prints, and `env` and `set -x` alone are too.
+/// A print outside the build sections (in %prep) is not a build diagnostic.
 #[test]
-fn plain_prints_are_prints() {
-    for line in [
-        "echo ---",
-        "cat test-suite.log",
-        "ls -la",
-        "set -x",
-        "set +x",
-        "env",
-        "find . -name x",
+fn a_print_outside_the_build_sections_is_not_diagnostic_only() {
+    let with_prep = SPEC.replace("%build\n", "%prep\necho hi\n\n%build\n");
+    let after = with_prep.replace("echo hi\n", "echo hello\n");
+    assert!(!diagnostic_only(&with_prep, &after));
+}
+
+/// No change at all is not a diagnostic round.
+#[test]
+fn an_unchanged_spec_is_not_diagnostic_only() {
+    assert!(!diagnostic_only(SPEC, SPEC));
+}
+
+/// A removed print counts as a diagnostic edit too.
+#[test]
+fn removing_a_print_is_diagnostic_only() {
+    let before = SPEC.replace("make check\n", "make check\necho ---\n");
+    assert!(diagnostic_only(&before, SPEC));
+}
+
+/// The marker belongs to one run: another run's marker is no marker.
+#[test]
+fn the_marker_is_read_for_its_own_run_only() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!last_round_diagnostic(dir.path(), "run-a"));
+    set_last_round_diagnostic(dir.path(), "run-a", true);
+    assert!(last_round_diagnostic(dir.path(), "run-a"));
+    assert!(!last_round_diagnostic(dir.path(), "run-b"));
+    set_last_round_diagnostic(dir.path(), "run-a", false);
+    assert!(!last_round_diagnostic(dir.path(), "run-a"));
+}
+
+/// A round that changed no file clears the marker, and a real change does too.
+#[test]
+fn only_a_second_print_round_is_refused() {
+    assert_eq!(
+        round_verdict(false, false, false, true),
+        RoundVerdict::Clear
+    );
+    assert_eq!(round_verdict(true, false, false, true), RoundVerdict::Clear);
+    assert_eq!(round_verdict(true, true, true, true), RoundVerdict::Clear);
+    assert_eq!(round_verdict(true, true, false, false), RoundVerdict::Mark);
+    assert_eq!(round_verdict(true, true, false, true), RoundVerdict::Refuse);
+}
+
+/// A real round between two print rounds means the next print round is first.
+#[test]
+fn a_real_round_between_prints_resets_the_count() {
+    let mut marked = false;
+    let mut verdicts = Vec::new();
+    for (spec_changed, diag, other) in [
+        (true, true, false),
+        (false, false, true),
+        (true, true, false),
     ] {
-        assert!(is_build_print("%check", line), "{line}");
+        let v = round_verdict(spec_changed, diag, other, marked);
+        marked = v == RoundVerdict::Mark;
+        verdicts.push(v);
     }
+    assert_eq!(
+        verdicts,
+        [RoundVerdict::Mark, RoundVerdict::Clear, RoundVerdict::Mark]
+    );
+}
+
+/// A patch edited in the same turn as a print makes the turn a real change.
+#[test]
+fn a_patch_changed_in_the_same_turn_is_seen() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("x.spec"), "Name: x\n").unwrap();
+    fs::write(dir.path().join("fix.patch"), "old\n").unwrap();
+    let snap = CheckoutSnapshot::take(dir.path());
+    assert!(!other_files_changed(dir.path(), &snap, "x.spec"));
+    fs::write(dir.path().join("fix.patch"), "new\n").unwrap();
+    assert!(other_files_changed(dir.path(), &snap, "x.spec"));
+}
+
+/// A new top-level file in the turn is a change too.
+#[test]
+fn a_new_file_in_the_turn_is_seen() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("x.spec"), "Name: x\n").unwrap();
+    let snap = CheckoutSnapshot::take(dir.path());
+    fs::write(dir.path().join("new.changes"), "").unwrap();
+    assert!(other_files_changed(dir.path(), &snap, "x.spec"));
 }
