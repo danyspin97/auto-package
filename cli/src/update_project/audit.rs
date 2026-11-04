@@ -19,10 +19,17 @@ pub(super) struct AuditEnd {
 }
 
 impl Audit {
-    pub(super) fn start(a: &UpdateProjectArgs, reporter: Arc<dyn Reporter + Send + Sync>) -> Self {
+    /// `branch` is the branch project the run builds in: the rpmlintrc files
+    /// are read from it when `lint` continues from it.
+    pub(super) fn start(
+        a: &UpdateProjectArgs,
+        branch: &str,
+        reporter: Arc<dyn Reporter + Send + Sync>,
+    ) -> Self {
         let (tx, items) = std::sync::mpsc::channel();
         let (source, distro, arch) = (a.source.clone(), a.distro.clone(), a.arch.clone());
         let (only, exclude) = (a.only.clone(), a.exclude.clone());
+        let (branch, continues) = (branch.to_string(), super::existing_lint::applies(a));
         let handle = std::thread::spawn(move || {
             let say = |message: String| {
                 reporter.report(&Event::Progress {
@@ -68,6 +75,21 @@ impl Audit {
                     };
                     ldconfig_left |= ap_build::spec_tidy::hygiene::ldconfig_left(&spec, ldconfig);
                     let mut findings = quality::audit_spec(&spec, ldconfig);
+                    let ecosystem_of = match &c.decision {
+                        update::Decision::Update { ecosystem, .. }
+                        | update::Decision::UpToDate { ecosystem, .. } => Some(ecosystem),
+                        update::Decision::Skipped(_) => None,
+                    };
+                    findings.extend(super::rpmlint_audit::findings(
+                        &source,
+                        Some(branch.as_str()),
+                        continues,
+                        pkg,
+                        ecosystem_of,
+                        &spec,
+                        emit,
+                        &|m| warn(m),
+                    ));
                     let status = statuses.get(&c.rpm_name).or_else(|| statuses.get(pkg));
                     if let Some(status) = status {
                         findings.extend(quality::audit_status(status));
@@ -92,7 +114,8 @@ impl Audit {
                         update::Decision::Skipped(_) => (None, String::new()),
                     };
                     let mut go_on = true;
-                    if !findings.is_empty() {
+                    // A report-only finding alone has nothing to fix.
+                    if findings.iter().any(|f| !f.kind.is_report_only()) {
                         match ecosystem {
                             Some(ecosystem) => {
                                 let style_only = !quality::needs_pipeline(&findings);
@@ -104,10 +127,7 @@ impl Audit {
                                     new_version: version,
                                     upstream_tag: None,
                                     dependency_of: None,
-                                    findings: findings
-                                        .iter()
-                                        .map(|f| format!("{}: {}", f.kind.label(), f.detail))
-                                        .collect(),
+                                    findings: fixable_lines(&findings),
                                 };
                                 // A closed channel means the run gave up.
                                 go_on = tx.send((item, style_only)).is_ok();
@@ -148,6 +168,16 @@ impl Audit {
     }
 }
 
+/// The findings an item hands the agent, one line each. Report-only findings
+/// are left out: nothing in the recipe fixes them, so they are only reported.
+fn fixable_lines(findings: &[quality::Finding]) -> Vec<String> {
+    findings
+        .iter()
+        .filter(|f| !f.kind.is_report_only())
+        .map(|f| format!("{}: {}", f.kind.label(), f.detail))
+        .collect()
+}
+
 /// The problem the agent is asked to fix for an `lint` item.
 pub(super) fn improve_problem(item: &Item) -> Option<String> {
     if item.findings.is_empty() {
@@ -163,4 +193,24 @@ pub(super) fn improve_problem(item: &Item) -> Option<String> {
         item.new_version,
         item.findings.join("\n- ")
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ap_build::quality::{Finding, Kind};
+
+    #[test]
+    fn report_only_findings_do_not_reach_the_agent() {
+        let finding = |kind, detail: &str| Finding {
+            kind,
+            detail: detail.to_string(),
+        };
+        let findings = [
+            finding(Kind::RpmlintrcUnnamed, "x-rpmlintrc: not named"),
+            finding(Kind::SpecStyle, "a style slip"),
+            finding(Kind::RpmlintrcName, "y.rpmlintrc"),
+        ];
+        assert_eq!(fixable_lines(&findings), ["style: a style slip"]);
+    }
 }

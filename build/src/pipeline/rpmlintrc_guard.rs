@@ -59,7 +59,7 @@ fn reason_text(line: &str) -> Option<&str> {
 /// leave it. A filter the edit adds needs one to three `# reason: <text>` lines
 /// directly above it, the nearest of them added by the edit too (not borrowed from
 /// the filter above). A filter may span lines: its parentheses must balance.
-pub(super) fn rpmlintrc_problems(old: Option<&str>, text: &str) -> Vec<String> {
+pub fn rpmlintrc_problems(old: Option<&str>, text: &str) -> Vec<String> {
     let old_lines: Vec<&str> = old
         .map(|o| o.lines().map(str::trim).collect())
         .unwrap_or_default();

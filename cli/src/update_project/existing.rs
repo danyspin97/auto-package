@@ -39,7 +39,12 @@ pub(super) fn applies(item: &Item, a: &UpdateProjectArgs) -> bool {
 
 /// The version scheme the item's versions are compared in.
 pub(super) fn scheme_of(item: &Item) -> Scheme {
-    match item.ecosystem {
+    scheme_of_ecosystem(&item.ecosystem)
+}
+
+/// The version scheme of a package of `ecosystem`.
+pub(super) fn scheme_of_ecosystem(ecosystem: &Ecosystem) -> Scheme {
+    match ecosystem {
         Ecosystem::Pypi { .. } => Scheme::Pep440,
         _ => Scheme::Generic,
     }

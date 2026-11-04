@@ -35,6 +35,7 @@ pub mod redist;
 pub mod release_notes;
 pub mod request_review;
 pub mod risk_flags;
+pub mod rpmlintrc_lint;
 mod service_sandbox;
 pub mod ship_condition;
 pub mod sources;

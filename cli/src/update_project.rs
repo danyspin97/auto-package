@@ -49,6 +49,7 @@ mod maintenance;
 mod origin;
 mod request;
 mod requested;
+mod rpmlint_audit;
 mod run;
 mod submit;
 mod tidy;

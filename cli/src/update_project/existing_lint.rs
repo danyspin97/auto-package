@@ -9,6 +9,7 @@
 use super::existing::scheme_of;
 use super::*;
 use ap_build::update_project::{branch_ahead_of_origin, branch_incomparable, branch_version};
+use ap_build::version::Scheme;
 
 /// What the branch project's copy means for a lint of an item.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +25,7 @@ pub(super) enum Continuation {
 
 /// Whether the decision is made for a run at all: a `lint` (`--improve`) in a
 /// branch project, not `--in-place` and not pinned to a revision.
-fn applies(a: &UpdateProjectArgs) -> bool {
+pub(super) fn applies(a: &UpdateProjectArgs) -> bool {
     a.improve && !a.in_place && a.backport_job.is_none() && a.revision.is_none()
 }
 
@@ -42,6 +43,15 @@ pub(super) fn decide(
     if !applies(a) {
         return Continuation::Origin;
     }
+    decide_versions(scheme_of(item), origin, held)
+}
+
+/// [`decide`] for the versions alone, compared in `scheme`.
+pub(super) fn decide_versions(
+    scheme: Scheme,
+    origin: &dyn Fn() -> Result<String, String>,
+    held: &dyn Fn() -> Result<Option<String>, String>,
+) -> Continuation {
     let held = match held() {
         Ok(Some(held)) => held,
         Ok(None) => return Continuation::Origin,
@@ -53,7 +63,6 @@ pub(super) fn decide(
             return Continuation::Skip(format!("the origin's copy could not be read: {why}"));
         }
     };
-    let scheme = scheme_of(item);
     if branch_ahead_of_origin(&origin, &held, scheme) {
         Continuation::Branch { version: held }
     } else if branch_incomparable(&origin, &held, scheme) {
@@ -63,6 +72,17 @@ pub(super) fn decide(
     } else {
         Continuation::Origin
     }
+}
+
+/// The `Version:` of the package `pkg` in `project`, as its spec holds it.
+pub(super) fn origin_version(project: &str, pkg: &str, emit: Emit<'_>) -> Result<String, String> {
+    update::spec_for_package(project, pkg, emit)
+        .map_err(|e| e.to_string())
+        .and_then(|t| {
+            ap_build::spec::parse_header(&t)
+                .map(|h| h.version)
+                .ok_or_else(|| "its spec has no readable Version:".to_string())
+        })
 }
 
 /// [`decide`] against OBS. An item continued from the branch is set to the
@@ -79,15 +99,7 @@ pub(super) fn continue_from_branch(
     let decision = decide(
         item,
         a,
-        &|| {
-            update::spec_for_package(&item.origin, &item.pkg, emit)
-                .map_err(|e| e.to_string())
-                .and_then(|t| {
-                    ap_build::spec::parse_header(&t)
-                        .map(|h| h.version)
-                        .ok_or_else(|| "its spec has no readable Version:".to_string())
-                })
-        },
+        &|| origin_version(&item.origin, &item.pkg, emit),
         &|| branch_version(branch, &item.pkg, emit),
     );
     match decision {

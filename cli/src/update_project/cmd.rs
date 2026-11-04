@@ -55,7 +55,7 @@ pub(super) fn cmd_update_project(
     if backports.is_some() {
         // The items are queued above.
     } else if a.improve {
-        audit = Some(Audit::start(a, ctx.reporter.clone()));
+        audit = Some(Audit::start(a, branch, ctx.reporter.clone()));
     } else if a.revision.is_some() || a.to_version.is_some() {
         sweep = Some(Sweep::start_pinned(
             &a.source,

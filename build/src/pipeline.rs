@@ -424,7 +424,7 @@ mod refusal_callers_tests;
 use changelog_required::*;
 #[cfg(test)]
 mod changelog_required_tests;
-mod rpmlintrc_guard;
+pub mod rpmlintrc_guard;
 #[cfg(test)]
 mod rpmlintrc_guard_tests;
 mod service_edit;

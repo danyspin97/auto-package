@@ -27,6 +27,18 @@ pub enum Kind {
     NoCheck,
     /// Tests were dropped from `%check` to get the package to build.
     DroppedTests,
+    /// An rpmlintrc line that convention 39 does not allow: the
+    /// `from Config import *` line.
+    RpmlintrcStyle,
+    /// An rpmlintrc line that convention 39 does not allow, or a filter
+    /// without its reason.
+    RpmlintrcHygiene,
+    /// An rpmlintrc named `<name>.rpmlintrc`. Only reported: the name is in
+    /// the spec's `Source:` line.
+    RpmlintrcName,
+    /// An rpmlintrc that no `Source:` line of the spec names: the publish
+    /// plan leaves it out at commit. Only reported.
+    RpmlintrcUnnamed,
 }
 
 impl Kind {
@@ -39,12 +51,22 @@ impl Kind {
             Kind::SpecHygiene => "hygiene",
             Kind::NoCheck => "no-check",
             Kind::DroppedTests => "dropped-tests",
+            Kind::RpmlintrcStyle => "rpmlintrc-style",
+            Kind::RpmlintrcHygiene => "rpmlintrc",
+            Kind::RpmlintrcName => "rpmlintrc-name",
+            Kind::RpmlintrcUnnamed => "rpmlintrc-unnamed",
         }
     }
 
     /// Whether [`tidy`] fixes it without a build or a model.
     pub fn is_mechanical(self) -> bool {
         matches!(self, Kind::SpecStyle | Kind::SpecHygiene)
+    }
+
+    /// Whether the finding is only reported: nothing fixes it by itself and
+    /// it does not send the package to the pipeline.
+    pub fn is_report_only(self) -> bool {
+        matches!(self, Kind::RpmlintrcName | Kind::RpmlintrcUnnamed)
     }
 }
 
@@ -206,7 +228,9 @@ pub fn rpmlint_findings(log: &str) -> Vec<Finding> {
 
 /// Whether anything is left for the pipeline once [`tidy`] has run.
 pub fn needs_pipeline(findings: &[Finding]) -> bool {
-    findings.iter().any(|f| !f.kind.is_mechanical())
+    findings
+        .iter()
+        .any(|f| !f.kind.is_mechanical() && !f.kind.is_report_only())
 }
 
 /// One package's findings.
