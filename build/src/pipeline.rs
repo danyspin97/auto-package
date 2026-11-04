@@ -378,6 +378,7 @@ mod network_fetch;
 #[cfg(test)]
 mod network_fetch_tests;
 mod patch_rules;
+pub(crate) use patch_rules::names_in_bullet;
 mod patch_rules_content;
 #[cfg(test)]
 mod patch_rules_content_tests;

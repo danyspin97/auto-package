@@ -23,6 +23,17 @@ ids! {
     SPEC_HYGIENE = "spec.hygiene",
     SPEC_NO_CHECK = "spec.no-check",
     SPEC_DROPPED_TESTS = "spec.dropped-tests",
+    CHANGES_MISSING_ENTRY = "changes.missing-entry",
+    CHANGES_OLD_ENTRIES_EDITED = "changes.old-entries-edited",
+    CHANGES_HEADER_FORMAT = "changes.header-format",
+    CHANGES_DATE_ORDER = "changes.date-order",
+    CHANGES_VERSION_MISMATCH = "changes.version-mismatch",
+    CHANGES_UPDATE_WITHOUT_VERSION_CHANGE = "changes.update-without-version-change",
+    CHANGES_NO_UPSTREAM_NOTES = "changes.no-upstream-notes",
+    CHANGES_DEPENDENCY_BULLET = "changes.dependency-bullet",
+    CHANGES_REFRESH_NOT_GROUPED = "changes.refresh-not-grouped",
+    CHANGES_PATCH_NOT_NAMED = "changes.patch-not-named",
+    CHANGES_FORBIDDEN_TEXT = "changes.forbidden-text",
 }
 
 #[cfg(test)]
@@ -47,6 +58,17 @@ mod tests {
                 "spec.hygiene",
                 "spec.no-check",
                 "spec.dropped-tests",
+                "changes.missing-entry",
+                "changes.old-entries-edited",
+                "changes.header-format",
+                "changes.date-order",
+                "changes.version-mismatch",
+                "changes.update-without-version-change",
+                "changes.no-upstream-notes",
+                "changes.dependency-bullet",
+                "changes.refresh-not-grouped",
+                "changes.patch-not-named",
+                "changes.forbidden-text",
             ]
         );
         let mut sorted = ALL.to_vec();

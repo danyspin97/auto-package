@@ -5,6 +5,9 @@
 
 use serde::Serialize;
 
+pub mod changes_checks;
+#[cfg(test)]
+mod changes_checks_tests;
 pub mod fetch;
 #[cfg(test)]
 mod fetch_fake;
