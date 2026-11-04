@@ -75,6 +75,10 @@ pub struct SdistInfo {
     pub cmake_at_root: bool,
     /// Raw autotools manifest at the archive root; see `cmake_at_root`.
     pub autotools_at_root: bool,
+    /// The CMake, meson or autotools build of the archive, at its root or in
+    /// the one subdirectory that holds a build file, whatever else the
+    /// archive carries.
+    pub native: Option<NativeBuild>,
     /// Every project found alongside the chosen one, when the archive holds
     /// more than one. Empty for an ordinary single-project sdist.
     ///
@@ -144,6 +148,7 @@ mod elf;
 mod extract;
 mod inspect;
 mod manifest;
+mod native;
 mod requirements;
 mod safety;
 mod wheel;
@@ -158,6 +163,7 @@ use elf::*;
 pub use extract::*;
 pub use inspect::*;
 pub use manifest::*;
+pub use native::{NativeBuild, NativeKind};
 pub use requirements::*;
 pub use safety::*;
 pub use wheel::*;

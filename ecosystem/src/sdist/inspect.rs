@@ -429,6 +429,8 @@ fn inspect_from_entries(
         },
     };
 
+    let native = native::find(&files, top_level_dir.as_deref());
+
     Ok(SdistInfo {
         build_system,
         top_level_dir,
@@ -445,6 +447,7 @@ fn inspect_from_entries(
         // has both CMakeLists.txt and pyproject.toml. Python and Cargo win.
         cmake_at_root: cmake_manifest,
         autotools_at_root: autotools_manifest,
+        native,
         cmake_manifest: cmake_manifest && python_depth.is_none() && cargo.is_none(),
         autotools_manifest: autotools_manifest && python_depth.is_none() && cargo.is_none(),
         subprojects,

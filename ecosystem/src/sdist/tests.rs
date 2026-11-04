@@ -431,3 +431,72 @@ fn a_capped_listing_stops_at_the_byte_cap_and_reads_a_small_archive_whole() {
     let err = list_archive_members_capped(&path, 64 << 20, std::time::Duration::ZERO).unwrap_err();
     assert!(err.to_string().contains("time"), "{err}");
 }
+
+fn native_of(entries: &[(&str, &[u8])]) -> Option<NativeBuild> {
+    let dir = tempfile::tempdir().unwrap();
+    let tarball = dir.path().join("src.tar.gz");
+    write_tar(&tarball, entries);
+    inspect(&tarball).unwrap().native
+}
+
+#[test]
+fn a_meson_build_at_the_root_is_detected() {
+    // fwupd-efi: meson.build and no other manifest.
+    let native = native_of(&[
+        (
+            "fwupd-efi-1.8/meson.build",
+            b"project('fwupd-efi')\n".as_slice(),
+        ),
+        ("fwupd-efi-1.8/efi/generate_binary.py", b"".as_slice()),
+    ]);
+    assert_eq!(
+        native,
+        Some(NativeBuild {
+            kind: NativeKind::Meson,
+            dir: None
+        })
+    );
+}
+
+#[test]
+fn a_cmake_build_in_the_one_subdirectory_is_detected() {
+    // fortune-mod: the repository snapshot keeps the project in fortune-mod/.
+    let native = native_of(&[
+        ("fortune-mod-2.10.0/README.md", b"".as_slice()),
+        (
+            "fortune-mod-2.10.0/fortune-mod/CMakeLists.txt",
+            b"project(fortune-mod)\n".as_slice(),
+        ),
+        (
+            "fortune-mod-2.10.0/fortune-mod/src/fortune.c",
+            b"".as_slice(),
+        ),
+        ("fortune-mod-2.10.0/docs/CMakeLists.txt", b"".as_slice()),
+    ]);
+    assert_eq!(
+        native,
+        Some(NativeBuild {
+            kind: NativeKind::Cmake,
+            dir: Some("fortune-mod".into())
+        })
+    );
+}
+
+#[test]
+fn the_root_wins_and_two_candidate_subdirectories_are_not_guessed() {
+    let root = native_of(&[
+        ("x-1/CMakeLists.txt", b"".as_slice()),
+        ("x-1/sub/meson.build", b"".as_slice()),
+    ]);
+    assert_eq!(
+        root.map(|n| (n.kind, n.dir)),
+        Some((NativeKind::Cmake, None))
+    );
+    let two = native_of(&[
+        ("x-1/a/CMakeLists.txt", b"".as_slice()),
+        ("x-1/b/CMakeLists.txt", b"".as_slice()),
+    ]);
+    assert_eq!(two, None);
+    let none = native_of(&[("x-1/main.go", b"".as_slice())]);
+    assert_eq!(none, None);
+}

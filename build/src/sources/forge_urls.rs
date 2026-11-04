@@ -155,6 +155,7 @@ pub(super) fn bare_info() -> ap_ecosystem::sdist::SdistInfo {
         autotools_manifest: false,
         cmake_at_root: false,
         autotools_at_root: false,
+        native: None,
         has_c_extensions: false,
         has_tests: false,
         top_level_tests_dir: None,
