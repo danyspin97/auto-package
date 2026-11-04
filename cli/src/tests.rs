@@ -571,3 +571,9 @@ fn the_help_lists_the_exit_codes_the_run_returns() {
         assert!(help.contains(line), "{line:?} missing from:\n{help}");
     }
 }
+
+#[test]
+fn the_command_definitions_are_consistent() {
+    use clap::CommandFactory;
+    crate::Cli::command().debug_assert();
+}
