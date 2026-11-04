@@ -238,3 +238,65 @@ fn a_guard_carries_the_values_of_the_macros_it_names() {
         ["%if 0%{?suse_version} > 1500 [then] {suse_version=undefined}"]
     );
 }
+
+/// `taken()` after each line of `text`, with the bconds the text declares.
+fn taken_with_bconds(text: &str) -> Vec<Option<bool>> {
+    let m = macros(&[]);
+    let mut stack = CondStack::new();
+    text.lines()
+        .map(|l| {
+            if !stack.feed(l, &m) {
+                stack.declare(l);
+            }
+            stack.taken()
+        })
+        .collect()
+}
+
+#[test]
+fn a_declared_bcond_is_read_at_its_default() {
+    let on = Some(true);
+    let off = Some(false);
+    assert_eq!(
+        taken_with_bconds("%bcond_without x\n%if %{with x}"),
+        [on, on]
+    );
+    assert_eq!(
+        taken_with_bconds("%bcond_without x\n%if %{without x}"),
+        [on, off]
+    );
+    assert_eq!(taken_with_bconds("%bcond_with x\n%if %{with x}"), [on, off]);
+    assert_eq!(taken_with_bconds("%bcond_with x\n%if !%{with x}"), [on, on]);
+    assert_eq!(taken_with_bconds("%bcond x 1\n%if %{with x}"), [on, on]);
+    assert_eq!(taken_with_bconds("%bcond x 0\n%if %{with x}"), [on, off]);
+    assert_eq!(
+        taken_with_bconds("%bcond_with x\n%if %{with x}\n%else"),
+        [on, off, on]
+    );
+}
+
+#[test]
+fn an_undeclared_or_unreadable_bcond_is_unknown() {
+    assert_eq!(taken_with_bconds("%if %{with x}"), [None]);
+    assert_eq!(
+        taken_with_bconds("%bcond x %{?y}\n%if %{with x}"),
+        [Some(true), None]
+    );
+    assert_eq!(
+        taken_with_bconds("%bcond_with x\n%if %{with x} && 1"),
+        [Some(true), None]
+    );
+    assert_eq!(
+        taken_with_bconds("%if %{with y}\n%bcond_without x\n%endif\n%if %{with x}"),
+        [None, None, Some(true), None]
+    );
+}
+
+#[test]
+fn a_spec_that_sets_the_option_itself_is_not_read() {
+    let m = macros(&[("_with_x", "1")]);
+    let mut stack = CondStack::new();
+    stack.declare("%bcond_without x");
+    stack.feed("%if %{with x}", &m);
+    assert_eq!(stack.taken(), None);
+}

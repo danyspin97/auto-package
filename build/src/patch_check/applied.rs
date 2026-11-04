@@ -5,10 +5,17 @@
 //! a disable ([`disabled_patches`]).
 //!
 //! The reader never calls a condition true unless the spec's own text proves
-//! it (see `CondStack`): an unknown guard is kept as text, and the
+//! it (see `CondStack`; a `%{with x}` of a bcond the spec declares is read
+//! at its default): an unknown guard is kept as text, and the
 //! comparison treats a changed or new one as a change. A patch the before
 //! spec applies through a construct the reader does not know (a custom macro
 //! in `%prep`) has no application and is never reported as disabled.
+//!
+//! A line whose first non-blank character is `#` applies nothing, though rpm
+//! expands a macro in a comment. A commented-out application is read as a
+//! disable. A spec that really applies a patch through a macro in a comment
+//! reads as not applying it, in both specs of a comparison, so that patch is
+//! never reported as disabled.
 
 use crate::spec::{CondStack, collapse, section_word};
 use std::collections::{BTreeMap, BTreeSet};
@@ -214,6 +221,7 @@ fn scan(spec: &str) -> Scan {
         if stack.feed(line, &macros) {
             continue;
         }
+        stack.declare(line);
         let skipped = stack.taken() == Some(false);
         if !skipped && let Some(section) = section_word(line) {
             in_prep = section == "prep";

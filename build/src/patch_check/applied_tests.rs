@@ -341,3 +341,47 @@ fn a_changed_define_in_a_comparison_guard_is_a_condition() {
     assert!(!disabled(&guarded("311"), &guarded("310")).is_empty());
     assert!(disabled(&guarded("311"), &guarded("311")).is_empty());
 }
+
+fn guarded(bcond: &str, condition: &str) -> String {
+    spec(&format!(
+        "{bcond}\n%setup -q\n%patch -P 0 -p1\n{condition}\n%patch -P 1 -p1\n%endif\n"
+    ))
+}
+
+#[test]
+fn a_new_guard_that_is_on_by_default_keeps_the_patch_applied() {
+    for (bcond, condition) in [
+        ("%bcond_without x", "%if %{with x}"),
+        ("%bcond x 1", "%if %{with x}"),
+        ("%bcond_with x", "%if %{without x}"),
+        ("%bcond_with x", "%if !%{with x}"),
+    ] {
+        let after = guarded(bcond, condition);
+        assert!(disabled(&s(), &after).is_empty(), "{bcond}: {condition}");
+    }
+}
+
+#[test]
+fn a_new_guard_that_is_off_by_default_disables() {
+    for (bcond, condition) in [
+        ("%bcond_with x", "%if %{with x}"),
+        ("%bcond_without x", "%if %{without x}"),
+        ("%bcond x 0", "%if %{with x}"),
+    ] {
+        let after = guarded(bcond, condition);
+        assert_eq!(
+            disabled(&s(), &after),
+            not_applied(&["b.patch"]),
+            "{bcond}: {condition}"
+        );
+    }
+}
+
+#[test]
+fn a_guard_on_a_bcond_the_spec_does_not_declare_is_a_condition() {
+    let after = guarded("", "%if %{with x}");
+    assert_eq!(
+        disabled(&s(), &after),
+        conditional(&["b.patch"], "%if %{with x} [then]")
+    );
+}

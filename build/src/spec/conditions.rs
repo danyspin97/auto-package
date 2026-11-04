@@ -77,11 +77,17 @@ impl Frame {
 /// The open `%if` frames while a spec is read line by line.
 pub(crate) struct CondStack {
     frames: Vec<Frame>,
+    /// The spec's own `%bcond_with`, `%bcond_without` and `%bcond` defaults
+    /// (`true`: `%{with x}` holds), as [`CondStack::declare`] read them.
+    bconds: HashMap<String, bool>,
 }
 
 impl CondStack {
     pub(crate) fn new() -> Self {
-        CondStack { frames: Vec::new() }
+        CondStack {
+            frames: Vec::new(),
+            bconds: HashMap::new(),
+        }
     }
 
     /// Read one line. True when it was `%if*`, `%elif`, `%else` or `%endif`:
@@ -92,13 +98,16 @@ impl CondStack {
         let rest = trimmed[word.len()..].trim();
         match word {
             "%if" => {
-                let state = eval_condition(rest, macros);
+                let state = self.evaluate(rest, macros);
                 self.frames.push(Frame::new(state, trimmed, macros));
             }
             "%ifarch" | "%ifnarch" | "%ifos" | "%ifnos" => {
                 self.frames.push(Frame::new(None, trimmed, macros))
             }
             "%elif" | "%elifarch" | "%elifnarch" | "%elifos" | "%elifnos" => {
+                let eval = (word == "%elif")
+                    .then(|| self.evaluate(rest, macros))
+                    .flatten();
                 if let Some(frame) = self.frames.last_mut() {
                     frame.advance();
                     frame.branch = Branch::Elif;
@@ -109,7 +118,7 @@ impl CondStack {
                         }
                     }
                     frame.state = match frame.prior {
-                        Taken::No if word == "%elif" => eval_condition(rest, macros),
+                        Taken::No if word == "%elif" => eval,
                         Taken::Yes => Some(false),
                         _ => None,
                     };
@@ -132,6 +141,55 @@ impl CondStack {
             _ => return false,
         }
         true
+    }
+
+    /// Read the bcond a line declares, when every open frame is taken:
+    /// `%bcond_with x` is off by default, `%bcond_without x` on, `%bcond x 0`
+    /// and `%bcond x 1` as given. A project config can still flip a bcond, so
+    /// the caller decides what a default is worth.
+    pub(crate) fn declare(&mut self, line: &str) {
+        if self.taken() != Some(true) {
+            return;
+        }
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let (default, name) = match words.as_slice() {
+            ["%bcond_with", name] => (false, name),
+            ["%bcond_without", name] => (true, name),
+            ["%bcond", name, "0"] => (false, name),
+            ["%bcond", name, "1"] => (true, name),
+            _ => return,
+        };
+        if !name.contains('%') {
+            self.bconds.insert(name.to_string(), default);
+        }
+    }
+
+    /// The value of a condition: `%{with x}` and `%{without x}` (optionally
+    /// negated by `!`) of a declared bcond, else [`eval_condition`].
+    fn evaluate(&self, cond: &str, macros: &HashMap<String, String>) -> Option<bool> {
+        let cond = cond.trim();
+        let (negated, body) = match cond.strip_prefix('!') {
+            Some(rest) => (true, rest.trim_start()),
+            None => (false, cond),
+        };
+        let bcond = body
+            .strip_prefix("%{")
+            .and_then(|b| b.strip_suffix('}'))
+            .and_then(|inner| {
+                let (kind, name) = inner.split_once(char::is_whitespace)?;
+                Some((kind, name.trim()))
+            });
+        let Some((kind @ ("with" | "without"), name)) = bcond else {
+            return eval_condition(cond, macros);
+        };
+        // A spec that sets the option itself is not read.
+        if macros.contains_key(&format!("_with_{name}"))
+            || macros.contains_key(&format!("_without_{name}"))
+        {
+            return None;
+        }
+        let with = *self.bconds.get(name)?;
+        Some((with == (kind == "with")) != negated)
     }
 
     /// `Some(true)`: every open frame is taken. `Some(false)`: one is skipped.
