@@ -29,6 +29,9 @@ mod lookup_tests;
 mod patch;
 #[cfg(test)]
 mod patch_tests;
+mod plan;
+#[cfg(test)]
+mod plan_tests;
 mod prepare;
 #[cfg(test)]
 mod prepare_tests;
@@ -44,5 +47,6 @@ pub use input::*;
 pub use live::*;
 pub use lookup::*;
 pub use patch::*;
+pub use plan::*;
 pub use prepare::*;
 pub use spec_edit::*;

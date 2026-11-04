@@ -28,6 +28,8 @@ pub struct FixJob {
     pub patches: Vec<PreparedPatch>,
     /// Several upstream fixes were found and none chosen: nothing is staged.
     pub candidates: Vec<String>,
+    /// How the upstream fix was found.
+    pub found: Found,
     /// The staged patches nothing shows are merged upstream: a pull or merge
     /// request, or a commit the user did not give and no release contains.
     pub unmerged: Vec<String>,
@@ -43,6 +45,19 @@ pub struct FixJob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FixTask {
     Bug(FixJob),
+}
+
+/// How the upstream fix of a job was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Found {
+    /// The user gave it (`--commit-url`).
+    Given,
+    /// The bug text or the description names it.
+    NamedInBug,
+    /// The repository's commit search found it.
+    Search,
+    /// Nothing was found, or several fixes are candidates.
+    NotFound,
 }
 
 /// The upstream release that contains the fix.
@@ -215,6 +230,7 @@ fn choose_sources(
     job: &mut FixJob,
 ) -> Vec<String> {
     if !req.commit_urls.is_empty() {
+        job.found = Found::Given;
         return req.commit_urls.to_vec();
     }
     let Some(repo) = req.upstream_repo.as_deref() else {
@@ -230,9 +246,11 @@ fn choose_sources(
         }
     });
     let github = ap_ecosystem::forge::parse(repo).filter(|f| f.host == "github.com");
+    let mut searched = false;
     if found.is_empty()
         && let Some(forge) = github
     {
+        searched = true;
         for term in &job.refs {
             match net.github_json(&search_commits_path(&forge.project_path, term)) {
                 Ok(j) => {
@@ -249,6 +267,13 @@ fn choose_sources(
     if found.len() > 1 {
         job.candidates = found;
         return Vec::new();
+    }
+    if !found.is_empty() {
+        job.found = if searched {
+            Found::Search
+        } else {
+            Found::NamedInBug
+        };
     }
     found
 }
@@ -332,6 +357,7 @@ pub fn prepare_fix(
         patches: Vec::new(),
         candidates: Vec::new(),
         unmerged: Vec::new(),
+        found: Found::NotFound,
         fixed_in: FixedIn::NotChecked("no upstream fix found".to_string()),
         fetch_hosts: Vec::new(),
         nonce: new_nonce(req.pkg),
@@ -358,7 +384,7 @@ pub fn prepare_fix(
     }
     // A commit is vouched for by the user (`--commit-url`), or by a release
     // that contains it.
-    let vouched = !req.commit_urls.is_empty() || matches!(job.fixed_in, FixedIn::Tag(_));
+    let vouched = job.found == Found::Given || matches!(job.fixed_in, FixedIn::Tag(_));
     job.unmerged = job
         .patches
         .iter()

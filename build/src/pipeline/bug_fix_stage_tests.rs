@@ -1,6 +1,6 @@
 use super::*;
 use crate::backport::PreparedPatch;
-use crate::bugfix::{FixJob, FixTask, FixedIn, HeaderFacts, UpstreamStatus};
+use crate::bugfix::{FixJob, FixTask, FixedIn, Found, HeaderFacts, UpstreamStatus};
 use crate::patch_check::{CheckReport, PatchResult, PatchStatus, Refresh};
 use crate::pipeline::bug_fix_stage::*;
 
@@ -50,6 +50,7 @@ fn job(patches: Vec<PreparedPatch>) -> FixJob {
         patches,
         candidates: Vec::new(),
         unmerged: Vec::new(),
+        found: Found::NotFound,
         fixed_in: FixedIn::NoneYet,
         fetch_hosts: Vec::new(),
         nonce: NONCE.into(),

@@ -252,6 +252,30 @@ fn a_subject_with_a_macro_cannot_reach_the_spec_comment_or_the_bullet() {
 }
 
 #[test]
+fn the_job_says_how_the_fix_was_found() {
+    let net = Fake {
+        patch: Some(COMMIT.to_string()),
+        search: Some(SEARCH.to_string()),
+        ..Default::default()
+    };
+    let given = [format!("https://github.com/o/r/commit/{SHA}")];
+    let job = run(&net, &input(&["CVE-2025-1234"], None), &given, Some(REPO)).unwrap();
+    assert_eq!(job.found, Found::Given);
+    let named = input(
+        &["CVE-2025-1234"],
+        Some(&format!("https://github.com/o/r/commit/{SHA}")),
+    );
+    assert_eq!(
+        run(&net, &named, &[], Some(REPO)).unwrap().found,
+        Found::NamedInBug
+    );
+    let job = run(&net, &input(&["CVE-2025-1234"], None), &[], Some(REPO)).unwrap();
+    assert_eq!(job.found, Found::Search);
+    let job = run(&Fake::default(), &input(&[], Some("x")), &[], None).unwrap();
+    assert_eq!(job.found, Found::NotFound);
+}
+
+#[test]
 fn a_request_or_an_unvouched_commit_is_unmerged() {
     let net = Fake {
         patch: Some(COMMIT.to_string()),

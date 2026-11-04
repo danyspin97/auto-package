@@ -1,6 +1,6 @@
 use super::bug_fix_prompt::*;
 use crate::backport::PreparedPatch;
-use crate::bugfix::{BugText, FixJob, FixedIn};
+use crate::bugfix::{BugText, FixJob, FixedIn, Found};
 
 fn job() -> FixJob {
     FixJob {
@@ -20,6 +20,7 @@ fn job() -> FixJob {
         patches: Vec::new(),
         candidates: Vec::new(),
         unmerged: Vec::new(),
+        found: Found::NotFound,
         fixed_in: FixedIn::Tag("v1.2.4".into()),
         fetch_hosts: Vec::new(),
         nonce: "n".into(),
