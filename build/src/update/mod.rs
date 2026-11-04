@@ -38,6 +38,8 @@ mod lookup_macro_tests;
 #[cfg(test)]
 mod lookups;
 mod pins;
+mod requested;
+pub use requested::AlreadyRequested;
 mod plan;
 mod read;
 #[cfg(test)]

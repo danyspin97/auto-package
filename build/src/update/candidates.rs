@@ -89,6 +89,8 @@ pub enum SkipReason {
     /// maintainer can decide what happens to it. The text says why.
     NeedsMaintainer(String),
     SpecHeaderMissing,
+    /// An open submit request to the origin already brings the version.
+    AlreadyRequested(AlreadyRequested),
     NoSourceLine,
     /// No ecosystem matched the `Source:` line.
     NotRecognized {
@@ -208,6 +210,7 @@ pub(crate) fn is_dated(version: &str) -> bool {
 impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SkipReason::AlreadyRequested(r) => r.fmt(f),
             SkipReason::NoSpec => write!(f, "the package has no spec file"),
             SkipReason::ReadFailed(why) => write!(f, "the spec could not be read: {why}"),
             SkipReason::NeedsMaintainer(why) => write!(f, "needs the maintainer: {why}"),
