@@ -404,3 +404,30 @@ fn a_forge_archive_gives_its_top_directory_after_a_pax_header() {
         assert!(info.files.iter().any(|f| *f == meson), "{top}");
     }
 }
+
+#[test]
+fn a_capped_listing_stops_at_the_byte_cap_and_reads_a_small_archive_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.tar.gz");
+    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+        std::fs::File::create(&path).unwrap(),
+        flate2::Compression::fast(),
+    ));
+    let mut header = tar::Header::new_gnu();
+    header.set_path("top/zeros").unwrap();
+    header.set_size(8 << 20);
+    header.set_cksum();
+    builder
+        .append(&header, std::io::repeat(0).take(8 << 20))
+        .unwrap();
+    builder.into_inner().unwrap().finish().unwrap();
+    let long = std::time::Duration::from_secs(60);
+    let err = list_archive_members_capped(&path, 1 << 20, long).unwrap_err();
+    assert!(matches!(err, Error::LimitExceeded(_)), "{err}");
+    assert_eq!(
+        list_archive_members_capped(&path, 64 << 20, long).unwrap(),
+        ["top/zeros"]
+    );
+    let err = list_archive_members_capped(&path, 64 << 20, std::time::Duration::ZERO).unwrap_err();
+    assert!(err.to_string().contains("time"), "{err}");
+}

@@ -462,7 +462,11 @@ pub fn list_archive_members(path: &Path) -> Result<Vec<String>, Error> {
             source: std::io::Error::other("not a tar archive"),
         });
     };
-    let mut archive = open_tar(path, kind)?;
+    list_members(&mut open_tar(path, kind)?)
+}
+
+/// The member names of an open tar, as [`list_archive_members`] gives them.
+fn list_members<R: Read>(archive: &mut tar::Archive<R>) -> Result<Vec<String>, Error> {
     let mut out = Vec::new();
     for entry in archive.entries().map_err(Error::Tar)? {
         let entry = entry.map_err(Error::Tar)?;
@@ -492,4 +496,66 @@ pub fn list_archive_members(path: &Path) -> Result<Vec<String>, Error> {
         out.push(name);
     }
     Ok(out)
+}
+
+/// A reader that stops with an error once it has given `left` bytes or the
+/// `deadline` has passed, and says which in `tripped`.
+struct Capped<R> {
+    inner: R,
+    left: u64,
+    deadline: std::time::Instant,
+    tripped: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl<R: Read> Read for Capped<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let why = if self.left == 0 {
+            Some("more decompressed bytes than the cap".to_string())
+        } else if std::time::Instant::now() > self.deadline {
+            Some("more time than the cap".to_string())
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            *self.tripped.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+            return Err(std::io::Error::other("listing cap reached"));
+        }
+        let room = usize::try_from(self.left)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        let n = self.inner.read(&mut buf[..room])?;
+        self.left -= n as u64;
+        Ok(n)
+    }
+}
+
+/// [`list_archive_members`] with the cost bounded: it reads at most
+/// `max_bytes` of decompressed data and runs at most `max_time`. A small
+/// archive of one huge zero-filled entry costs neither without it. Past either
+/// limit the answer is [`Error::LimitExceeded`].
+pub fn list_archive_members_capped(
+    path: &Path,
+    max_bytes: u64,
+    max_time: std::time::Duration,
+) -> Result<Vec<String>, Error> {
+    let kind = classify(path).filter(|k| !matches!(k, ArchiveKind::Zip | ArchiveKind::Wheel));
+    let Some(kind) = kind else {
+        return Err(Error::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("not a tar archive"),
+        });
+    };
+    let tripped = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let reader = Capped {
+        inner: open_reader(path, kind)?,
+        left: max_bytes,
+        deadline: std::time::Instant::now() + max_time,
+        tripped: tripped.clone(),
+    };
+    let result = list_members(&mut tar::Archive::new(reader));
+    let why = tripped.lock().unwrap_or_else(|e| e.into_inner()).take();
+    match (result, why) {
+        (_, Some(why)) => Err(Error::LimitExceeded(format!("listing read {why}"))),
+        (result, None) => result,
+    }
 }

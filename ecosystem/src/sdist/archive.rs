@@ -52,6 +52,11 @@ pub(super) fn open_tar(
     path: &Path,
     kind: ArchiveKind,
 ) -> Result<tar::Archive<Box<dyn Read>>, Error> {
+    Ok(tar::Archive::new(open_reader(path, kind)?))
+}
+
+/// The uncompressed bytes of a compressed tar, as a streaming reader.
+pub(super) fn open_reader(path: &Path, kind: ArchiveKind) -> Result<Box<dyn Read>, Error> {
     let file = std::fs::File::open(path).map_err(|e| Error::Io {
         path: path.to_path_buf(),
         source: e,
@@ -74,5 +79,5 @@ pub(super) fn open_tar(
             });
         }
     };
-    Ok(tar::Archive::new(reader))
+    Ok(reader)
 }
