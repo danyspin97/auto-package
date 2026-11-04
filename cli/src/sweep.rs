@@ -209,7 +209,9 @@ pub(super) fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts
         FailureKind::Exhausted
         | FailureKind::RateLimited
         | FailureKind::Tampered
-        | FailureKind::VersionChanged => false,
+        | FailureKind::VersionChanged
+        | FailureKind::NoFix
+        | FailureKind::FixDoesNotApply => false,
         _ => rounds < max_attempts,
     }
 }

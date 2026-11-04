@@ -194,6 +194,13 @@ pub enum FailureKind {
     /// was changed between turns, or by a turn that may not change it. The
     /// spec is put back and the package stops; no caller downgrades this.
     VersionChanged,
+    /// `auto-package fix` found that the bug needs no fix here (the fix is in
+    /// the source already, or the package is not affected) or found no fix:
+    /// the reason says which. Nothing is retried.
+    NoFix,
+    /// The upstream fix could not be made to apply to this version. Nothing is
+    /// retried.
+    FixDoesNotApply,
 }
 
 #[derive(Debug)]
