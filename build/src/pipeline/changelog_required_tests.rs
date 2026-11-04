@@ -113,3 +113,17 @@ fn a_changed_patch_or_rpmlintrc_or_service_needs_a_bullet_a_new_patch_does_not_h
         ["foo-rpmlintrc", "series"]
     );
 }
+
+/// A print in %check that a fix round adds needs no `.changes` bullet.
+#[test]
+fn a_build_print_added_to_check_needs_no_bullet() {
+    let before = "Name: x\n%check\nmake check\n";
+    let after = "Name: x\n%check\nmake check\ncat test-suite.log\n";
+    assert!(changes_needing_a_bullet(before, after, false).is_empty());
+    let flag = "Name: x\n%check\nmake check CFLAGS=-O0\n";
+    // The replaced line and its new form both need a bullet.
+    assert_eq!(
+        changes_needing_a_bullet(before, flag, false),
+        ["make check", "make check CFLAGS=-O0"]
+    );
+}

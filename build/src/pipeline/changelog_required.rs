@@ -82,7 +82,7 @@ fn needs_no_bullet(line: &str) -> bool {
 
 /// The lines of a spec as `(section, enclosing conditionals, line)`: the same
 /// line in another section, or under another condition, is another entry.
-fn keyed_lines(spec: &str) -> Vec<(String, String, String)> {
+pub(super) fn keyed_lines(spec: &str) -> Vec<(String, String, String)> {
     let mut section = String::from("preamble");
     let mut conds: Vec<String> = Vec::new();
     let mut out = Vec::new();
@@ -137,6 +137,7 @@ pub(super) fn changes_needing_a_bullet(before: &str, after: &str, switch: bool) 
         .filter(|((section, _, line), n)| {
             *n != 0
                 && !needs_no_bullet(line)
+                && !super::diagnostic_edit::is_build_print(section, line)
                 && !(switch
                     && ["%prep", "%build", "%install"]
                         .iter()

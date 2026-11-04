@@ -418,6 +418,7 @@ mod spend_guard;
 pub(crate) use spend_guard::spend_allows_turn;
 use spend_guard::*;
 mod changelog_required;
+mod diagnostic_edit;
 #[cfg(test)]
 mod refusal_callers_tests;
 use changelog_required::*;
