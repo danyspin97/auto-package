@@ -54,6 +54,11 @@ ids! {
     RISK_UNANALYSED = "risk.unanalysed",
     RISK_LARGE_PATCH = "risk.large_patch",
     RISK_LARGE_JUMP = "risk.large_jump",
+    SOURCE_MISSING = "source.missing",
+    SOURCE_UNEXPANDED = "source.unexpanded",
+    SOURCE_OLD_ARCHIVE_KEPT = "source.old-archive-kept",
+    FILES_LEFTOVER = "files.leftover",
+    FILES_UNREFERENCED = "files.unreferenced",
 }
 
 #[cfg(test)]
@@ -109,6 +114,11 @@ mod tests {
                 "risk.unanalysed",
                 "risk.large_patch",
                 "risk.large_jump",
+                "source.missing",
+                "source.unexpanded",
+                "source.old-archive-kept",
+                "files.leftover",
+                "files.unreferenced",
             ]
         );
         let mut sorted = ALL.to_vec();

@@ -20,6 +20,9 @@ pub mod patch_checks;
 mod patch_checks_tests;
 pub mod request;
 pub mod risk;
+pub mod source_checks;
+#[cfg(test)]
+mod source_checks_tests;
 pub mod spec_checks;
 
 /// How much a finding matters. `Note < Warning < Blocker`.
