@@ -1,0 +1,27 @@
+From 0123456789abcdef0123456789abcdef01234567 Mon Sep 17 00:00:00 2001
+From: Jane Maintainer <jane@example.org>
+Date: Tue, 4 Mar 2025 10:11:12 +0100
+Subject: [PATCH] parser: check the length before copying the token, so a long
+ token cannot overflow the buffer
+
+The copy in parse_token() trusted the length the input gave.
+---
+ src/parse.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/parse.c b/src/parse.c
+index 1111111..2222222 100644
+--- a/src/parse.c
++++ b/src/parse.c
+@@ -10,7 +10,9 @@ int parse_token(const char *in, size_t len)
+ {
+     char buf[16];
+-    memcpy(buf, in, len);
++    if (len > sizeof(buf))
++        return -1;
++    memcpy(buf, in, len);
+     return 0;
+ }
+--
+2.45.0
+

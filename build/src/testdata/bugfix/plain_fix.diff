@@ -1,0 +1,11 @@
+--- a/src/parse.c
++++ b/src/parse.c
+@@ -10,7 +10,9 @@ int parse_token(const char *in, size_t len)
+ {
+     char buf[16];
+-    memcpy(buf, in, len);
++    if (len > sizeof(buf))
++        return -1;
++    memcpy(buf, in, len);
+     return 0;
+ }

@@ -8,5 +8,9 @@
 mod input;
 #[cfg(test)]
 mod input_tests;
+mod patch;
+#[cfg(test)]
+mod patch_tests;
 
 pub use input::*;
+pub use patch::*;
