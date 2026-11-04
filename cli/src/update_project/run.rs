@@ -8,6 +8,7 @@ pub fn run(a: UpdateProjectArgs, summary: &mut Option<String>) -> color_eyre::Re
         ));
     }
     a.local_opts.apply(a.local)?;
+    a.limits.apply(&a.work_dir)?;
     if a.maintenance.is_some() || a.maintenance_list {
         return run_maintenance(a, summary);
     }
