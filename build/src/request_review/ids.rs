@@ -16,6 +16,13 @@ ids! {
     REQUEST_ACTION_MALFORMED = "request.action-malformed",
     REQUEST_COMPETING = "request.competing",
     REVIEW_INCOMPLETE = "review.incomplete",
+    SPEC_UNPARSABLE = "spec.unparsable",
+    SPEC_UNFINISHED = "spec.unfinished",
+    SPEC_VERSION_MACRO_UNEXPANDED = "spec.version-macro-unexpanded",
+    SPEC_STYLE = "spec.style",
+    SPEC_HYGIENE = "spec.hygiene",
+    SPEC_NO_CHECK = "spec.no-check",
+    SPEC_DROPPED_TESTS = "spec.dropped-tests",
 }
 
 #[cfg(test)]
@@ -33,6 +40,13 @@ mod tests {
                 "request.action-malformed",
                 "request.competing",
                 "review.incomplete",
+                "spec.unparsable",
+                "spec.unfinished",
+                "spec.version-macro-unexpanded",
+                "spec.style",
+                "spec.hygiene",
+                "spec.no-check",
+                "spec.dropped-tests",
             ]
         );
         let mut sorted = ALL.to_vec();

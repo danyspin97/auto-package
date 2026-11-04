@@ -13,6 +13,7 @@ pub mod gather;
 mod gather_tests;
 pub mod ids;
 pub mod request;
+pub mod spec_checks;
 
 /// How much a finding matters. `Note < Warning < Blocker`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
