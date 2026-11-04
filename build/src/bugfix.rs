@@ -20,6 +20,9 @@ mod end;
 #[cfg(test)]
 mod end_tests;
 mod findings;
+mod findings_fix;
+#[cfg(test)]
+mod findings_fix_tests;
 #[cfg(test)]
 mod findings_tests;
 mod input;
@@ -47,6 +50,7 @@ pub use bullet::*;
 pub use cve::*;
 pub use end::*;
 pub use findings::*;
+pub use findings_fix::*;
 pub use input::*;
 pub use live::*;
 pub use lookup::*;

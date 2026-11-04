@@ -136,7 +136,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// The time of an entry header, in seconds since the epoch.
-fn header_time(header: &str) -> Option<i64> {
+pub(crate) fn header_time(header: &str) -> Option<i64> {
     let c = Regex::new(DATE_PATTERN).ok()?.captures(header)?;
     let n = |i: usize| c[i].parse::<i64>().ok();
     let month = MONTHS.iter().position(|m| *m == &c[2])? as i64 + 1;

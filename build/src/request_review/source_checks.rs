@@ -20,6 +20,13 @@ const LEFTOVER_SUFFIXES: [&str; 6] = [".orig", ".rej", "~", ".swp", ".bak", ".sp
 /// Files the tool's own runs leave in a checkout.
 const TOOL_ARTIFACTS: [&str; 4] = ["series-rebase", "state.json", "notes.md", "prompt.md"];
 
+/// Whether a file the request adds looks like a leftover of a tool or an
+/// editor. `had_series` is whether the target has a `series` file.
+pub(crate) fn is_leftover_name(name: &str, had_series: bool) -> bool {
+    let artifact = TOOL_ARTIFACTS.contains(&name) || (name == "series" && !had_series);
+    artifact || name.starts_with(".#") || LEFTOVER_SUFFIXES.iter().any(|s| name.ends_with(s))
+}
+
 fn is_archive(name: &str) -> bool {
     ARCHIVE_SUFFIXES.iter().any(|s| name.ends_with(s))
 }
@@ -110,9 +117,7 @@ pub fn source_findings(
     }
     let had_series = base.lists("series");
     for name in added {
-        let artifact = TOOL_ARTIFACTS.contains(&name.as_str()) || (name == "series" && !had_series);
-        if artifact || name.starts_with(".#") || LEFTOVER_SUFFIXES.iter().any(|s| name.ends_with(s))
-        {
+        if is_leftover_name(name, had_series) {
             out.push(mk(
                 ids::FILES_LEFTOVER,
                 Severity::Warning,
