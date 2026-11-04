@@ -122,7 +122,7 @@ pub fn source_findings(
         }
     }
     for (name, files) in archives {
-        let vendor = name.starts_with("vendor.tar") || name.ends_with(".obscpio");
+        let vendor = super::downloads::is_vendor(name);
         if vendor && files.iter().any(|f| f.starts_with("target/")) {
             out.push(mk(
                 ids::FILES_LEFTOVER,

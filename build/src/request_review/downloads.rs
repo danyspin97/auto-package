@@ -29,6 +29,11 @@ pub struct Downloads {
     pub required_failure: Option<String>,
 }
 
+/// Whether `name` is a vendor archive of a Rust, Go or Node package.
+pub fn is_vendor(name: &str) -> bool {
+    name.starts_with("vendor.tar") || name.ends_with(".obscpio")
+}
+
 fn is_signature(name: &str) -> bool {
     SIGNATURE_SUFFIXES.iter().any(|s| name.ends_with(s))
 }
