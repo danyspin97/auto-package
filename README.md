@@ -574,8 +574,8 @@ patch is applied already, or the agent quotes the code that shows it is fixed or
 not affected) or none was found, and `4` when a maintainer must decide: an ABI
 or behaviour change, a fix that does not apply, several upstream candidates, or
 `--no-agent` with the agent needed. Edits made stay in the branch; nothing is
-submitted. `1` is any other failure, `2` the agent is unavailable, `130`
-interrupted.
+submitted. `1` is any other failure, `2` a usage error, `75` the agent is
+unavailable, `130` interrupted.
 
 Limits:
 
@@ -592,8 +592,12 @@ Limits:
 ### Exit codes
 
 - `0`: success.
-- `1`: the run failed (a package failed to build, bad arguments, ...).
-- `2`: the agent is unavailable: the `claude` CLI is not logged in. The whole
+- `1`: the run failed (a package failed to build, a check of the arguments
+  the run makes, ...).
+- `2`: a usage error (clap rejects the command line).
+- `5`: nothing was submitted: `--submit` or `--maintenance` had no terminal to
+  confirm on, or `--yes` refused a change that needs a review.
+- `75`: the agent is unavailable: the `claude` CLI is not logged in. The whole
   run stops at once (running children are killed, queued packages are not
   started, in-flight packages are recorded as interrupted) instead of retrying
   every package. Run `claude` and `/login`, then re-run. `build` and
