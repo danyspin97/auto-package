@@ -362,6 +362,10 @@ use agent_response::*;
 mod bug_fix_check;
 #[cfg(test)]
 mod bug_fix_check_tests;
+mod bug_fix_prompt;
+#[cfg(test)]
+mod bug_fix_prompt_tests;
+mod bug_fix_rounds;
 mod bug_fix_stage;
 #[cfg(test)]
 mod bug_fix_stage_tests;

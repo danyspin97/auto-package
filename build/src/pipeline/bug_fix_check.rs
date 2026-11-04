@@ -5,6 +5,7 @@
 use super::*;
 use crate::pipeline::patch_rules::*;
 use crate::pipeline::patch_rules_content::*;
+use crate::pipeline::snapshot::CheckoutSnapshot;
 
 /// The patch that carries the fix, or why the checkout does not hold a fix.
 /// `expected` is the staged patch's file name, when there is one; without it
@@ -92,4 +93,47 @@ pub(super) fn check_fix(
         ));
     }
     Ok(name)
+}
+
+/// What the edit changed besides the fix: a patch the spec declares that is
+/// neither in `expected` nor in `baseline` (the patches before the stage), a
+/// baseline patch whose bytes differ from `snapshot`'s, and a top-level file the
+/// snapshot did not have that is not an expected patch (the `.changes` and the
+/// quilt `series` files are the pipeline's and the tool's, not counted).
+pub(super) fn unexpected_edits(
+    spec: &str,
+    checkout: &Path,
+    expected: &[&str],
+    baseline: &[String],
+    snapshot: &CheckoutSnapshot,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (_, _, name) in declared_patches(spec) {
+        if !baseline.contains(&name) && !expected.contains(&name.as_str()) {
+            out.push(format!("a second patch {name}"));
+        }
+    }
+    for name in baseline {
+        if let Some(old) = snapshot.content_of(name)
+            && std::fs::read(checkout.join(name)).ok().as_deref() != Some(old.as_slice())
+        {
+            out.push(format!("the patch {name}"));
+        }
+    }
+    for entry in std::fs::read_dir(checkout).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let own = name == "series"
+            || name == crate::agent::REFRESH_SERIES
+            || name.ends_with(".changes")
+            || expected.contains(&name.as_str());
+        if entry.file_type().is_ok_and(|t| t.is_file())
+            && !own
+            && snapshot.entry_of(&name).is_none()
+        {
+            out.push(format!("the new file {name}"));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }

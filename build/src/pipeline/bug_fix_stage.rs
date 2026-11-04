@@ -1,12 +1,14 @@
 //! The bug fix stage of `auto-package fix`: the pre-build stage of a fix run,
 //! in place of the review. It stages the upstream patch the job found, adds it
 //! to the spec without a model, checks it with quilt, has it reviewed, and
-//! writes the `.changes` bullet before the first commit.
+//! writes the `.changes` bullet before the first commit. What the mechanical
+//! path cannot do goes to the turn rounds (`bug_fix_rounds`).
 
 use super::*;
 use crate::bugfix::*;
 use crate::patch_check::{PatchStatus, Refresh, declared_patches};
-use crate::pipeline::bug_fix_check::check_fix;
+use crate::pipeline::bug_fix_check::{check_fix, unexpected_edits};
+use crate::pipeline::bug_fix_rounds::*;
 use crate::pipeline::patch_check::obs_tracked_names;
 use crate::pipeline::patch_review::*;
 use crate::pipeline::rejection::*;
@@ -19,11 +21,12 @@ use sha2::{Digest, Sha256};
 /// message has no leading `- `.
 pub(super) type AddEntry<'a> = dyn Fn(&Path, &str) -> Result<(), String> + 'a;
 
-/// What the stage calls out to: the quilt check, the patch review turn and the
-/// `.changes` entry. The real ones run quilt, a model and `osc vc`; a test's
-/// answer from the checkout.
+/// What the stage calls out to: the quilt check, the fix turn, the patch review
+/// turn and the `.changes` entry. The real ones run quilt, a model and
+/// `osc vc`; a test's answer from the checkout.
 pub(super) struct FixSeams<'a> {
     pub(super) check: &'a mut PatchCheckFn<'a>,
+    pub(super) turn: &'a mut FixTurn<'a>,
     pub(super) review: &'a mut ReviewTurn<'a>,
     pub(super) add_entry: &'a AddEntry<'a>,
 }
@@ -43,6 +46,7 @@ pub(super) fn bug_fix_stage(
         task,
         FixSeams {
             check: &mut run_patch_check,
+            turn: &mut agent_fix_turn,
             review: &mut agent_review_turn,
             add_entry: &add_entry,
         },
@@ -66,13 +70,16 @@ pub(super) fn bug_fix_stage_with(
 }
 
 /// What the stage knows while it runs.
-struct Fix<'a> {
-    ctx: &'a RunCtx<'a>,
-    job: &'a FixJob,
-    step: StepGuard<'a>,
+pub(super) struct Fix<'a> {
+    pub(super) ctx: &'a RunCtx<'a>,
+    pub(super) job: &'a FixJob,
+    pub(super) step: StepGuard<'a>,
     /// The checkout as it was before anything was staged.
-    snapshot: CheckoutSnapshot,
-    spec_before: String,
+    pub(super) snapshot: CheckoutSnapshot,
+    pub(super) spec_before: String,
+    /// The patches the spec declared, and the newest `.changes` text, before the stage.
+    pub(super) baseline: Vec<String>,
+    pub(super) baseline_changes: String,
 }
 
 impl Fix<'_> {
@@ -81,10 +88,6 @@ impl Fix<'_> {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect()
-    }
-
-    fn record(&self, event: ap_core::fix_event::BugFixEvent) {
-        self.ctx.reporter.report(&Event::BugFix(event));
     }
 
     fn event(&self, stage: ap_core::fix_event::BugFixStage) -> ap_core::fix_event::BugFixEvent {
@@ -105,7 +108,13 @@ impl Fix<'_> {
     }
 
     /// The end record: `fix-end.json`, the event and the notes.
-    fn end(&self, verdict: &str, patch: Option<&str>, applied: Option<&str>, reason: &str) {
+    pub(super) fn end(
+        &self,
+        verdict: &str,
+        patch: Option<&str>,
+        applied: Option<&str>,
+        reason: &str,
+    ) {
         let end = FixEnd {
             nonce: self.job.nonce.clone(),
             verdict: verdict.to_string(),
@@ -121,7 +130,7 @@ impl Fix<'_> {
         event.verdict = Some(verdict.to_string());
         event.applied = end.applied.clone();
         event.reason = reason.to_string();
-        self.record(event);
+        self.ctx.reporter.report(&Event::BugFix(event));
         append_notes(
             self.ctx.ws.notes(),
             &format!(
@@ -132,7 +141,7 @@ impl Fix<'_> {
     }
 
     /// Put the checkout back as it was before the stage and end the package.
-    fn stop(self, verdict: &str, kind: FailureKind, reason: String) -> PipelineResult {
+    pub(super) fn stop(&self, verdict: &str, kind: FailureKind, reason: String) -> PipelineResult {
         self.snapshot.restore(self.ctx.reporter, Some(&self.step));
         restore_spec(
             &self.ctx.spec_path,
@@ -141,9 +150,7 @@ impl Fix<'_> {
             self.ctx.reporter,
         );
         self.end(verdict, None, None, &reason);
-        let result = self.ctx.failed_as(kind, reason);
-        self.step.finish(StepOutcome::Failed);
-        result
+        self.ctx.failed_as(kind, reason)
     }
 }
 
@@ -151,7 +158,7 @@ fn fix_inner(
     ctx: &RunCtx,
     st: &mut RunState,
     task: &FixTask,
-    seams: FixSeams<'_>,
+    mut seams: FixSeams<'_>,
 ) -> Result<(), PipelineResult> {
     let FixTask::Bug(job) = task;
     let RunCtx {
@@ -181,12 +188,20 @@ fn fix_inner(
         &mut st.step_attempts,
         rpm_name.clone()
     );
+    let baseline: Vec<String> = declared_patches(&spec_before)
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect();
     let fix = Fix {
         ctx,
         job,
         step,
         snapshot: CheckoutSnapshot::take(checkout_dir),
         spec_before: spec_before.clone(),
+        baseline,
+        baseline_changes: osc::newest_changes_file(checkout_dir)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default(),
     };
     let mut input = fix.event(ap_core::fix_event::BugFixStage::Input);
     if let [first, ..] = job.patches.as_slice() {
@@ -194,69 +209,92 @@ fn fix_inner(
         input.patch_sha256 = Some(Fix::hex(&first.bytes));
         input.origin = Some(first.origin.clone());
     }
-    fix.record(input);
+    ctx.reporter.report(&Event::BugFix(input));
     append_notes(ctx.ws.notes(), &input_notes(job));
-    let baseline: Vec<String> = declared_patches(&spec_before)
-        .into_iter()
-        .map(|(_, n)| n)
-        .collect();
-    // The fix of an earlier run is in the package already.
-    if let Some(p) = job.patches.iter().find(|p| baseline.contains(&p.file_name)) {
-        let why = format!(
-            "{} is declared by the spec already: an earlier run added this fix",
-            p.file_name
-        );
-        return Err(fix.stop("already_fixed", FailureKind::NoFix, why));
+    // A name the spec declares already: the same fix, added by an earlier run, or
+    // another patch of that name, which is not ours to judge.
+    if let Some(p) = job
+        .patches
+        .iter()
+        .find(|p| fix.baseline.contains(&p.file_name))
+    {
+        let have = std::fs::read(ctx.checkout_dir.join(&p.file_name)).ok();
+        let same = have.as_deref().is_some_and(|b| {
+            let (mut a, mut c) = (
+                crate::bugfix::code_lines(&String::from_utf8_lossy(&p.bytes)),
+                crate::bugfix::code_lines(&String::from_utf8_lossy(b)),
+            );
+            a.sort();
+            c.sort();
+            !a.is_empty() && a == c
+        });
+        return Err(if same {
+            let why = format!(
+                "{} is declared by the spec already with this fix's code: an earlier run added it",
+                p.file_name
+            );
+            fix.stop("already_fixed", FailureKind::NoFix, why)
+        } else {
+            let why = format!(
+                "the spec already declares a {} whose code is not this fix's: a maintainer \
+                 looks at it",
+                p.file_name
+            );
+            fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why)
+        });
     }
-    if job.patches.is_empty() {
-        return Err(fix.stop(
-            "no_fix",
-            FailureKind::NeedsMaintainer,
-            "the fix has no upstream patch to add, and the turn that finds or writes one is not \
-             available"
-                .to_string(),
-        ));
+    if ctx.config.no_agent && job.patches.is_empty() {
+        let why = "the fix has no upstream patch to add, which takes the agent (--no-agent is set)";
+        return Err(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why.into()));
     }
-    stage_mechanically(fix, st, seams, &baseline)
+    // What the mechanical path could not do goes to the turn.
+    let retry = match stage_mechanically(&fix, st, &mut seams)? {
+        Mechanical::Done => {
+            fix.step.finish(StepOutcome::Ok);
+            return Ok(());
+        }
+        Mechanical::NeedsTurn(retry) => retry,
+    };
+    if ctx.config.no_agent {
+        let why = format!("{}; the agent is needed (--no-agent is set)", retry.why());
+        return Err(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why));
+    }
+    fix_rounds(fix, st, seams, retry)
+}
+
+/// How the mechanical path ended.
+enum Mechanical {
+    /// The staged patches are in, checked, reviewed and named in the `.changes`.
+    Done,
+    /// The turn must do it: why, and what quilt rejected.
+    NeedsTurn(Retry),
 }
 
 /// The staged upstream patches, added without a model.
 fn stage_mechanically(
-    fix: Fix<'_>,
+    fix: &Fix<'_>,
     st: &mut RunState,
-    seams: FixSeams<'_>,
-    baseline: &[String],
-) -> Result<(), PipelineResult> {
+    seams: &mut FixSeams<'_>,
+) -> Result<Mechanical, PipelineResult> {
     let (ctx, job) = (fix.ctx, fix.job);
-    let FixSeams {
-        check,
-        review,
-        add_entry,
-    } = seams;
-    let baseline_changes = osc::newest_changes_file(&ctx.checkout_dir)
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .unwrap_or_default();
-    let patches = crate::backport::Job {
-        patches: job.patches.clone(),
-        refs: job.refs.clone(),
-    };
-    let tracked = obs_tracked_names(&ctx.checkout_dir);
-    let staged = match crate::backport::backport_patches(&ctx.checkout_dir, &patches, &tracked) {
-        Ok(notes) => notes,
-        Err(why) => return Err(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why)),
-    };
+    if job.patches.is_empty() {
+        return Ok(Mechanical::NeedsTurn(Retry::none()));
+    }
+    if let Err(why) = stage_files(fix) {
+        return Err(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why));
+    }
     let mut spec = fix.spec_before.clone();
     for p in &job.patches {
         let comment = crate::backport::spec_comment(p, &job.refs);
         spec = match spec_adding_patch(&spec, &comment, &p.file_name) {
             Ok(s) => s,
-            Err(why) => return Err(fix.stop("does_not_apply", FailureKind::FixDoesNotApply, why)),
+            Err(why) => return Ok(Mechanical::NeedsTurn(Retry::spec(why))),
         };
     }
     write_or_warn(&ctx.spec_path, &spec);
     let names: Vec<&str> = job.patches.iter().map(|p| p.file_name.as_str()).collect();
     // What quilt says about each staged patch on this version's sources.
-    let report = check(ctx, Refresh::No);
+    let report = (seams.check)(ctx, Refresh::No);
     let mut applied = "clean";
     for p in &job.patches {
         let Some(result) = report.patches.iter().find(|r| r.name == p.file_name) else {
@@ -266,7 +304,7 @@ fn stage_mechanically(
         match &result.status {
             PatchStatus::Applies | PatchStatus::AppliesWithOffsetOrFuzz { fuzz: false, .. } => {}
             PatchStatus::AppliesWithOffsetOrFuzz { fuzz: true, .. } => {
-                let offsets = check(ctx, Refresh::Fuzz);
+                let offsets = (seams.check)(ctx, Refresh::Fuzz);
                 for r in offsets
                     .patches
                     .iter()
@@ -286,13 +324,18 @@ fn stage_mechanically(
                 return Err(fix.stop("already_fixed", FailureKind::NoFix, why));
             }
             status @ (PatchStatus::Fails { .. } | PatchStatus::NotChecked { .. }) => {
-                let why = format!(
-                    "{} does not apply to the {} sources: {}",
-                    p.file_name,
-                    ctx.config.version,
-                    crate::pipeline::patch_refresh::status_reason(status)
-                );
-                return Err(fix.stop("does_not_apply", FailureKind::FixDoesNotApply, why));
+                let (reason, rejects) = match status {
+                    PatchStatus::Fails { output, rejects } => (output.clone(), rejects.clone()),
+                    other => (
+                        crate::pipeline::patch_refresh::status_reason(other),
+                        String::new(),
+                    ),
+                };
+                return Ok(Mechanical::NeedsTurn(Retry::quilt(
+                    &p.file_name,
+                    reason,
+                    rejects,
+                )));
             }
         }
     }
@@ -309,55 +352,161 @@ fn stage_mechanically(
         &[],
         &ctx.config.rpm_name,
     ) {
-        return Err(fix.stop("does_not_apply", FailureKind::FixDoesNotApply, why));
+        // The gate put the checkout back, the staged files with it.
+        if let Err(e) = stage_files(fix) {
+            return Err(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, e));
+        }
+        return Ok(Mechanical::NeedsTurn(Retry::spec(why)));
+    }
+    let done = Done {
+        patches: job
+            .patches
+            .iter()
+            .map(|p| {
+                Fixed::staged(
+                    p,
+                    None,
+                    format!("the upstream fix {}, staged by the tool", p.origin),
+                )
+            })
+            .collect(),
+        applied,
+    };
+    match settle(fix, st, seams, &done, false) {
+        Ok(()) => Ok(Mechanical::Done),
+        Err(Settle::Retry(why)) => {
+            Err(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why))
+        }
+        Err(Settle::Stop(result)) => Err(result),
+    }
+}
+
+/// Put the staged files into the checkout. A name the package tracks with other
+/// bytes is a conflict.
+pub(super) fn stage_files(fix: &Fix<'_>) -> Result<(), String> {
+    let patches = crate::backport::Job {
+        patches: fix.job.patches.clone(),
+        refs: fix.job.refs.clone(),
+    };
+    let tracked = obs_tracked_names(&fix.ctx.checkout_dir);
+    crate::backport::backport_patches(&fix.ctx.checkout_dir, &patches, &tracked).map(|_| ())
+}
+
+/// A patch that carries the fix, as the end of the stage needs to know it.
+pub(super) struct Fixed {
+    pub(super) patch: crate::backport::PreparedPatch,
+    /// The bytes of the staged patch it came from, for the reviewer.
+    pub(super) original: Option<Vec<u8>>,
+    /// What the review is told changed it.
+    pub(super) cause: String,
+}
+
+impl Fixed {
+    pub(super) fn staged(
+        p: &crate::backport::PreparedPatch,
+        original: Option<Vec<u8>>,
+        cause: String,
+    ) -> Fixed {
+        Fixed {
+            patch: p.clone(),
+            original,
+            cause,
+        }
+    }
+}
+
+/// The patches that carry the fix, and how they went in.
+pub(super) struct Done {
+    pub(super) patches: Vec<Fixed>,
+    pub(super) applied: &'static str,
+}
+
+/// Why the end of the stage did not settle the fix.
+pub(super) enum Settle {
+    /// A turn can do better: the reason.
+    Retry(String),
+    /// The package ends.
+    Stop(PipelineResult),
+}
+
+/// The end of the stage once the patches are in the spec: the patch review,
+/// `check_fix`, the `.changes` bullets and the end record. `expected` names the
+/// patches that must be the fix; a turn's patch is found as the new one.
+pub(super) fn settle(
+    fix: &Fix<'_>,
+    st: &mut RunState,
+    seams: &mut FixSeams<'_>,
+    done: &Done,
+    from_turn: bool,
+) -> Result<(), Settle> {
+    let ctx = fix.ctx;
+    // The edit may add the fix patch and nothing else: no other patch, no change
+    // to another, no other file. What is not the fix is not reviewed either.
+    let expected: Vec<&str> = done
+        .patches
+        .iter()
+        .map(|f| f.patch.file_name.as_str())
+        .collect();
+    let spec_edited = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
+    let stray = unexpected_edits(
+        &spec_edited,
+        &ctx.checkout_dir,
+        &expected,
+        &fix.baseline,
+        &fix.snapshot,
+    );
+    if !stray.is_empty() {
+        return Err(Settle::Retry(format!(
+            "the edit may only add the fix patch to the spec; it also changed {}",
+            stray.join(", ")
+        )));
     }
     let mut lines: Vec<String> = Vec::new();
     if !ctx.config.no_agent {
-        for p in &job.patches {
-            let cause = format!(
-                "a bug fix: the upstream fix {}, staged by the tool{}",
-                p.origin,
-                if applied == "refreshed" {
-                    " and refreshed for this version"
-                } else {
-                    ""
-                }
-            );
+        for f in &done.patches {
+            let name = &f.patch.file_name;
+            let cause = if done.applied == "refreshed" && !from_turn {
+                format!("{} and refreshed for this version", f.cause)
+            } else {
+                f.cause.clone()
+            };
             let end = review_patch_rounds(
                 ctx,
                 st,
                 fix.step.id,
-                &p.file_name,
-                None,
+                name,
+                f.original.as_deref(),
                 &cause,
-                &mut |ctx, n| stage_applies(ctx, check, n),
-                review,
+                &mut |ctx, n| stage_applies(ctx, seams.check, n),
+                seams.review,
                 &mut lines,
             );
+            let stop = |why: String| {
+                Settle::Stop(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why))
+            };
             match end {
                 Ok(PatchReviewEnd::Accepted { rewrote }) => {
                     if rewrote
-                        && let Err(why) =
-                            mark_reviewer_rewrite(&ctx.ws, &ctx.checkout_dir, &p.file_name)
+                        && let Err(why) = mark_reviewer_rewrite(&ctx.ws, &ctx.checkout_dir, name)
                     {
-                        return Err(fix.stop(
-                            "needs_maintainer",
-                            FailureKind::NeedsMaintainer,
-                            why,
-                        ));
+                        return Err(stop(why));
                     }
                 }
                 Ok(PatchReviewEnd::Rejected(why)) => {
-                    let why = format!("the patch review rejected {}: {why}", p.file_name);
-                    return Err(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why));
+                    let why = format!("the patch review rejected {name}: {why}");
+                    return Err(if from_turn {
+                        Settle::Retry(why)
+                    } else {
+                        stop(why)
+                    });
                 }
                 Ok(PatchReviewEnd::GaveUp(why)) => {
-                    let why = format!("the patch review gave up on {}: {why}", p.file_name);
-                    return Err(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why));
+                    return Err(stop(format!("the patch review gave up on {name}: {why}")));
                 }
                 Ok(PatchReviewEnd::Unsettled(why)) => {
-                    let why = format!("the patch review did not settle {}: {why}", p.file_name);
-                    return Err(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why));
+                    return Err(stop(format!(
+                        "the patch review did not settle {name}: {why}"
+                    )));
                 }
                 Err(result) => {
                     fix.snapshot.restore(ctx.reporter, Some(&fix.step));
@@ -367,48 +516,55 @@ fn stage_mechanically(
                         Some(&fix.step),
                         ctx.reporter,
                     );
-                    fix.end("needs_maintainer", None, None, &format!("{result:?}"));
-                    fix.step.finish(StepOutcome::Failed);
-                    return Err(result);
+                    fix.end("needs_maintainer", None, None, "the patch review stopped");
+                    return Err(Settle::Stop(result));
                 }
             }
         }
     }
     let spec_now = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
-    for p in &job.patches {
+    for f in &done.patches {
+        let name = &f.patch.file_name;
+        let staged = (!from_turn || fix.job.patches.iter().any(|p| &p.file_name == name))
+            .then_some(name.as_str());
         if let Err(why) = check_fix(
             &spec_now,
             &ctx.checkout_dir,
-            &job.refs,
-            Some(&p.file_name),
-            baseline,
+            &fix.job.refs,
+            staged,
+            &fix.baseline,
         ) {
-            return Err(fix.stop("does_not_apply", FailureKind::FixDoesNotApply, why));
+            return Err(Settle::Retry(why));
         }
     }
-    for p in &job.patches {
-        let bullet = crate::backport::changes_bullet(p, &job.refs);
+    for f in &done.patches {
+        let name = &f.patch.file_name;
+        let bullet = crate::backport::changes_bullet(&f.patch, &fix.job.refs);
         if let Err(why) = set_fix_bullet(
             &ctx.checkout_dir,
-            &baseline_changes,
-            &p.file_name,
+            &fix.baseline_changes,
+            name,
             &bullet,
-            add_entry,
+            seams.add_entry,
         ) {
-            let why = format!("cannot write the .changes entry: {why}");
-            return Err(fix.stop("needs_maintainer", FailureKind::NeedsMaintainer, why));
+            return Err(Settle::Stop(fix.stop(
+                "needs_maintainer",
+                FailureKind::NeedsMaintainer,
+                format!("cannot write the .changes entry: {why}"),
+            )));
         }
     }
-    for n in staged.iter().chain(lines.iter()) {
-        ap_core::diag!("  {}: {n}", ctx.rpm_name);
-    }
+    let names: Vec<&str> = done
+        .patches
+        .iter()
+        .map(|f| f.patch.file_name.as_str())
+        .collect();
     fix.end(
         "fixed",
         names.first().copied(),
-        Some(applied),
-        &format!("{} added as the fix ({applied})", names.join(", ")),
+        Some(done.applied),
+        &format!("{} carries the fix ({})", names.join(", "), done.applied),
     );
-    fix.step.finish(StepOutcome::Ok);
     Ok(())
 }
 

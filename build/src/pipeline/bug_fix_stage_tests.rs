@@ -4,6 +4,8 @@ use crate::bugfix::{FixJob, FixTask, FixedIn, HeaderFacts, UpstreamStatus};
 use crate::patch_check::{CheckReport, PatchResult, PatchStatus, Refresh};
 use crate::pipeline::bug_fix_stage::*;
 
+mod rounds;
+
 const NAME: &str = "foo-CVE-2025-1234.patch";
 /// Applies to the sources of `source_tarball`: `f.txt` is `a B c d`.
 const FIX_DIFF: &str = "--- a/f.txt\n+++ b/f.txt\n@@ -1,4 +1,4 @@\n a\n B\n-c\n+C\n d\n";
@@ -82,6 +84,7 @@ impl Reporter for Log {
 }
 
 type Check = dyn FnMut(&RunCtx, Refresh) -> CheckReport;
+type Turn = dyn FnMut(&RunCtx, &str) -> Result<crate::agent::TurnOutcome, (String, FailureKind)>;
 type Review = dyn FnMut(&RunCtx, &str) -> Result<crate::agent::TurnOutcome, (String, FailureKind)>;
 
 /// A check that gives every declared patch `status`; fuzzy ones refresh to `refreshed`.
@@ -136,6 +139,8 @@ struct Case {
     result: Result<(), PipelineResult>,
     events: Vec<ap_core::fix_event::BugFixEvent>,
     reviews: Vec<String>,
+    /// The context of each fix turn.
+    contexts: Vec<String>,
     spec: String,
     changes: String,
     checkout: PathBuf,
@@ -146,9 +151,10 @@ struct Case {
 struct Rig {
     no_agent: bool,
     spec: String,
+    spent: f64,
     tracked: Option<Vec<&'static str>>,
     /// A file `NAME` the package has already.
-    existing: Option<&'static str>,
+    existing: Option<String>,
     prior_end: Option<crate::bugfix::FixEnd>,
 }
 
@@ -157,6 +163,7 @@ impl Rig {
         Rig {
             no_agent: false,
             spec: "Name: foo\nVersion: 1.0\nRelease: 0\nSummary: test\nLicense: MIT\nSource0: foo-1.0.tar.gz\n\n%prep\n%autosetup -p1\n".into(),
+            spent: 0.0,
             tracked: None,
             existing: None,
             prior_end: None,
@@ -164,6 +171,16 @@ impl Rig {
     }
 
     fn run(&self, job: FixJob, check: &mut Check, review: &mut Review) -> Case {
+        self.run_turns(job, check, &mut |_, _| panic!("no fix turn"), review)
+    }
+
+    fn run_turns(
+        &self,
+        job: FixJob,
+        check: &mut Check,
+        fix_turn: &mut Turn,
+        review: &mut Review,
+    ) -> Case {
         let root = tempfile::tempdir().unwrap();
         let work = root.path().join("work");
         let state_root = work.join("state");
@@ -190,7 +207,7 @@ impl Rig {
             )
             .unwrap();
         }
-        if let Some(body) = self.existing {
+        if let Some(body) = &self.existing {
             std::fs::write(checkout.join(NAME), body).unwrap();
         }
         let spec_path = checkout.join("foo.spec");
@@ -220,7 +237,7 @@ impl Rig {
             sdist_top_level: String::new(),
             from_repo_archive: false,
             attempts: 0,
-            spent_usd: 0.0,
+            spent_usd: self.spent,
             session_id: None,
             last_log_digest: None,
             identical_logs: 0,
@@ -236,6 +253,7 @@ impl Rig {
         let step_path = root.path().join("step");
         std::fs::create_dir_all(&step_path).unwrap();
         let mut reviews = Vec::new();
+        let mut contexts: Vec<String> = Vec::new();
         let task = FixTask::Bug(job);
         // The new entry `osc vc` would write.
         let add = |dir: &Path, message: &str| {
@@ -244,6 +262,17 @@ impl Rig {
             let sep = "-".repeat(67);
             let text = format!("{sep}\nTue Jan  2 00:00:00 UTC 2026 - x@y\n\n- {message}\n\n{old}");
             std::fs::write(&file, text).map_err(|e| e.to_string())
+        };
+        let mut run_turn = |ctx: &RunCtx, _: &mut RunState, _: usize, context: &str| {
+            contexts.push(context.to_string());
+            let out = fix_turn(ctx, context)?;
+            Ok((
+                StepDir {
+                    path: step_path.clone(),
+                    id: ap_core::event::StepId(2),
+                },
+                out,
+            ))
         };
         let mut turn = |ctx: &RunCtx, _: &mut RunState, _: &str, context: &str| {
             reviews.push(context.to_string());
@@ -262,6 +291,7 @@ impl Rig {
             &task,
             FixSeams {
                 check,
+                turn: &mut run_turn,
                 review: &mut turn,
                 add_entry: &add,
             },
@@ -271,6 +301,7 @@ impl Rig {
             result,
             events: log.0.lock().unwrap().clone(),
             reviews,
+            contexts,
             spec: std::fs::read_to_string(&spec_path).unwrap(),
             changes: std::fs::read_to_string(checkout.join("foo.changes")).unwrap(),
             notes: std::fs::read_to_string(ctx.ws.notes()).unwrap_or_default(),
@@ -415,27 +446,6 @@ fn a_patch_quilt_can_reverse_apply_means_the_bug_is_fixed_already() {
 }
 
 #[test]
-fn a_patch_that_does_not_apply_is_a_fix_that_does_not_apply_and_the_checkout_is_as_it_was() {
-    let case = Rig::new().run(
-        good_job(),
-        &mut *check_all(
-            PatchStatus::Fails {
-                output: "does not apply".into(),
-                rejects: "-x\n+y\n".into(),
-            },
-            None,
-        ),
-        &mut |_, _| panic!("no review"),
-    );
-    let (kind, reason) = failed(&case);
-    assert_eq!(*kind, FailureKind::FixDoesNotApply);
-    assert!(reason.contains(NAME), "{reason}");
-    assert_eq!(case.spec, Rig::new().spec);
-    assert!(!case.checkout.join(NAME).exists());
-    assert!(!case.changes.contains("Add foo-CVE"));
-}
-
-#[test]
 fn a_rejected_review_needs_a_maintainer_and_puts_the_checkout_back() {
     let case = Rig::new().run(
         good_job(),
@@ -465,7 +475,7 @@ fn a_rejected_review_needs_a_maintainer_and_puts_the_checkout_back() {
 fn a_different_file_of_that_name_in_the_package_needs_a_maintainer() {
     let mut rig = Rig::new();
     rig.tracked = Some(vec![NAME]);
-    rig.existing = Some("something else");
+    rig.existing = Some("something else".into());
     let case = rig.run(
         good_job(),
         &mut *check_all(PatchStatus::Applies, None),
@@ -500,6 +510,7 @@ fn a_fix_that_was_settled_by_this_run_is_not_done_again() {
 fn a_fix_added_by_an_earlier_run_is_no_fix() {
     let mut rig = Rig::new();
     rig.spec.push_str(&format!("Patch0: {NAME}\n"));
+    rig.existing = Some(String::from_utf8(patch_bytes(FIX_DIFF)).unwrap());
     rig.prior_end = Some(crate::bugfix::FixEnd {
         nonce: "an-older-run".into(),
         verdict: "fixed".into(),
@@ -516,17 +527,27 @@ fn a_fix_added_by_an_earlier_run_is_no_fix() {
 }
 
 #[test]
-fn a_spec_that_needs_the_agent_for_its_patch_line_does_not_apply_yet() {
+fn a_spec_that_needs_the_agent_for_its_patch_line_gives_the_turn_the_staged_patch() {
     let mut rig = Rig::new();
     rig.spec = "Name: foo\nVersion: 1.0\nSource0: foo-1.0.tar.gz\nPatch0: a.patch\n\n%prep\n%setup -q\n%patch -P 0 -p1\n".into();
-    let case = rig.run(
+    let case = rig.run_turns(
         good_job(),
         &mut *check_all(PatchStatus::Applies, None),
+        &mut |_, _| {
+            let mut out = pipeline_wheel_outcome("x");
+            out.action = crate::agent::Action::Blocked { why: "stop".into() };
+            Ok(out)
+        },
         &mut *accept(),
     );
-    let (kind, reason) = failed(&case);
-    assert_eq!(*kind, FailureKind::FixDoesNotApply);
-    assert!(reason.contains("%patch"), "{reason}");
+    assert_eq!(*failed(&case).0, FailureKind::NeedsMaintainer);
+    assert_eq!(case.contexts.len(), 1);
+    let context = &case.contexts[0];
+    assert!(
+        context.contains(&format!("Staged upstream patch: {NAME}\n")),
+        "{context}"
+    );
+    assert!(context.contains("%patch"), "{context}");
 }
 
 #[test]
@@ -552,4 +573,26 @@ fn quilt_reverse_applies_a_patch_whose_change_is_in_the_sources() {
     let case = Rig::new().run(job, &mut run_patch_check, &mut |_, _| panic!("no review"));
     let (kind, _) = failed(&case);
     assert_eq!(*kind, FailureKind::NoFix);
+}
+
+#[test]
+fn another_patch_of_the_same_name_is_not_taken_for_this_fix() {
+    let mut rig = Rig::new();
+    rig.spec.push_str(&format!("Patch0: {NAME}\n"));
+    // Declared and present, with other code (or none): a maintainer's, not ours.
+    for body in ["--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n", "not a patch"] {
+        rig.existing = Some(body.into());
+        let case = rig.run(good_job(), &mut |_, _| panic!("no check"), &mut |_, _| {
+            panic!("no review")
+        });
+        let (kind, reason) = failed(&case);
+        assert_eq!(*kind, FailureKind::NeedsMaintainer, "{reason}");
+        assert!(reason.contains("not this fix's"), "{reason}");
+    }
+    // Declared but not in the checkout at all.
+    rig.existing = None;
+    let case = rig.run(good_job(), &mut |_, _| panic!("no check"), &mut |_, _| {
+        panic!("no review")
+    });
+    assert_eq!(*failed(&case).0, FailureKind::NeedsMaintainer);
 }
