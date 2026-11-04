@@ -56,6 +56,7 @@ impl SubmitBackend {
             self.allow_arch,
             self.arch_checked_for(&item.pkg),
             self.reporter.as_ref(),
+            None,
         ) {
             Ok(sr) => Ok((item, sr)),
             Err(outcome) => Err(submit_failure(outcome)),
@@ -188,6 +189,7 @@ pub(super) fn submit_requests(
                 .unwrap_or_else(|p| p.into_inner())
                 .contains(&r.item.pkg),
             ctx.reporter.as_ref(),
+            None,
         ) {
             Ok(sr) => pending.push((idx, sr)),
             Err(sr) => r.sr = sr,

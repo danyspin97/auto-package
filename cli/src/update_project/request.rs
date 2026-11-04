@@ -6,6 +6,8 @@ use ap_build::arch_check::GateVerdict;
 /// at the new version, and no request from the branch is open already. The
 /// reason it may not be made comes back as the `SrOutcome` to record. Shared by
 /// `--submit` and the TUI's submit keys, so both ask exactly the same.
+/// `superseding` is the open request a new one replaces (see
+/// [`first_open_request`]); `None` for every other caller.
 pub(super) fn prepare_request(
     branch: &str,
     distro: Option<&str>,
@@ -16,6 +18,7 @@ pub(super) fn prepare_request(
     allow_arch: bool,
     arch_waited: bool,
     reporter: &(dyn Reporter + Send + Sync),
+    superseding: Option<&str>,
 ) -> Result<osc::SubmitRequest, SrOutcome> {
     let emit = Emit::run(reporter);
     let say = |m: String| {
@@ -127,7 +130,7 @@ pub(super) fn prepare_request(
     }
     match osc::open_submit_requests(branch, &item.pkg, &item.origin, emit) {
         Ok(open) => {
-            if let Some(first) = open.first() {
+            if let Some(first) = first_open_request(&open, superseding) {
                 say(format!(
                     "no request for {}: request {} from {branch} to {} is already open",
                     item.pkg, first.id, item.origin
@@ -158,6 +161,16 @@ pub(super) fn prepare_request(
         ),
         source_rev,
     })
+}
+
+/// The first open request from the branch that a new request does not
+/// replace. `superseding` is the request the new one supersedes: it stays open
+/// until OBS is told, so it is not a duplicate.
+pub(super) fn first_open_request<'a>(
+    open: &'a [osc::OpenRequest],
+    superseding: Option<&str>,
+) -> Option<&'a osc::OpenRequest> {
+    open.iter().find(|r| Some(r.id.as_str()) != superseding)
 }
 
 /// How long `osc rdiff` may take.

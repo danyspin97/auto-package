@@ -574,3 +574,27 @@ fn a_lint_improvement_keeps_the_recipe_of_the_package() {
     assert!(branch_build(true, None).keeps_recipe());
     assert!(!branch_build(false, None).keeps_recipe());
 }
+
+#[test]
+fn a_request_a_new_one_supersedes_is_not_a_duplicate() {
+    let open = |id: &str| osc::OpenRequest {
+        id: id.to_string(),
+        source_project: "home:u:branches:P".into(),
+        source_package: "p".into(),
+        target_project: "P".into(),
+        target_package: "p".into(),
+        state: "review".into(),
+        creator: "u".into(),
+        source_rev: None,
+    };
+    let both = [open("1394662"), open("1394999")];
+    assert_eq!(
+        request::first_open_request(&both, None).map(|r| r.id.as_str()),
+        Some("1394662")
+    );
+    assert_eq!(
+        request::first_open_request(&both, Some("1394662")).map(|r| r.id.as_str()),
+        Some("1394999")
+    );
+    assert!(request::first_open_request(&both[..1], Some("1394662")).is_none());
+}
