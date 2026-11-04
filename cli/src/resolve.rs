@@ -178,6 +178,7 @@ pub(super) fn resolve_dependency_config(
                     // The root package's findings are not a dependency's.
                     patch_request: None,
                     patch_condition: None,
+                    bug_fix: None,
                     update: false,
                     branch_version: None,
                     unknown_build_system: false,
@@ -219,6 +220,7 @@ pub(super) fn resolve_dependency_config(
                 // The root package's findings are not a dependency's.
                 patch_request: None,
                 patch_condition: None,
+                bug_fix: None,
                 update: false,
                 branch_version: None,
                 unknown_build_system: false,
@@ -340,6 +342,7 @@ pub(super) fn resolve_dependency_config(
                 // The root package's findings are not a dependency's.
                 patch_request: None,
                 patch_condition: None,
+                bug_fix: None,
                 update: false,
                 branch_version: None,
                 unknown_build_system: false,

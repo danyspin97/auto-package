@@ -328,6 +328,7 @@ pub(super) fn package_config(
         // The root package's findings are not a dependency's.
         patch_request: None,
         patch_condition: None,
+        bug_fix: None,
         update: config.update && is_root,
         branch_version: config.branch_version.clone().filter(|_| is_root),
         unknown_build_system: config.unknown_build_system && is_root,
@@ -369,6 +370,7 @@ mod tests {
             python_flavors: Default::default(),
             patch_request: None,
             patch_condition: None,
+            bug_fix: None,
         }
     }
 

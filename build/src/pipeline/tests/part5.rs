@@ -398,6 +398,7 @@ fn a_failed_checkout_still_finishes_its_step() {
         python_flavors: Default::default(),
         patch_request: None,
         patch_condition: None,
+        bug_fix: None,
     };
     let run = ap_core::run::RunDir::allocate(&work_dir).unwrap();
     let pkg_run = run.pkg("python-foo");
@@ -448,6 +449,7 @@ fn no_agent_reports_the_agent_skip_only_once() {
         python_flavors: Default::default(),
         patch_request: None,
         patch_condition: None,
+        bug_fix: None,
     };
     config.no_agent = true;
     let recorder = Recorder::default();

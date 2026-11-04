@@ -87,6 +87,7 @@ fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {
         python_flavors: Default::default(),
         patch_request: None,
         patch_condition: None,
+        bug_fix: None,
     }
 }
 

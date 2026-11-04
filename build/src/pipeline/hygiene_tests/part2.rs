@@ -166,6 +166,7 @@ pub(crate) fn config(pkg: &str, state_root: &Path) -> PipelineConfig {
         python_flavors: Default::default(),
         patch_request: None,
         patch_condition: None,
+        bug_fix: None,
     }
 }
 

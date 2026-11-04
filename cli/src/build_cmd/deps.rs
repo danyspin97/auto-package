@@ -47,6 +47,7 @@ pub(crate) fn branch_for_patch(
             regen: false,
             patch_request: Some(request.problem.clone()),
             patch_condition: request.condition.clone(),
+            bug_fix: None,
             update: false,
             unknown_build_system: false,
             ..config.clone()
@@ -106,6 +107,7 @@ pub(crate) fn branch_for_patch(
         regen: false,
         patch_request: Some(request.problem.clone()),
         patch_condition: request.condition.clone(),
+        bug_fix: None,
         update: false,
         unknown_build_system: false,
         ..config.clone()
@@ -272,6 +274,7 @@ pub(crate) fn update_config_for_outdated(
         regen: false,
         patch_request: None,
         patch_condition: None,
+        bug_fix: None,
         update: false,
         unknown_build_system: false,
         ..config.clone()

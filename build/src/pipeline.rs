@@ -110,6 +110,10 @@ pub struct PipelineConfig {
     pub patch_request: Option<String>,
     /// The machine-checkable part of `patch_request`, when the dependent gave one.
     pub patch_condition: Option<crate::ship_condition::FilesCondition>,
+    /// Set by `auto-package fix`: the bug to fix in the package at the version
+    /// it has. The pre-build turn then adds the fix as a patch instead of
+    /// reviewing the recipe.
+    pub bug_fix: Option<std::sync::Arc<crate::bugfix::FixTask>>,
     /// The release archive is built by a build system auto-package does not
     /// know (meson, Go, Zig, a plain Makefile): see `sources::probe`. Only the
     /// recipe the checkout holds can build it, so no spec is generated for it,
