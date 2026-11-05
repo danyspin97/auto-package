@@ -149,6 +149,15 @@ pub(super) fn request_refusal(
             ));
         }
     }
+    if doc.creator != user {
+        return Err(refuse(
+            EXIT_NEEDS_MAINTAINER,
+            format!(
+                "request {id} is {}'s: only its creator can fix it",
+                doc.creator
+            ),
+        ));
+    }
     let (Some(source), Some(target)) = (action.source.clone(), action.target.clone()) else {
         return Err(refuse(
             EXIT_NEEDS_MAINTAINER,

@@ -125,6 +125,21 @@ fn a_home_project_that_is_not_a_branch_is_refused() {
 }
 
 #[test]
+fn a_request_by_someone_else_is_refused_even_from_the_users_branch() {
+    // The branch is alice's, the request was made by bob.
+    let by_bob = request_xml("review", "submit", "home:alice:branches:openSUSE:Factory")
+        .replace("creator=\"alice\"", "creator=\"bob\"");
+    let doc = parse_request(&by_bob).unwrap();
+    let refusal = request_refusal(&doc, "alice").unwrap_err();
+    assert_eq!(refusal.code, 4);
+    assert!(
+        refusal.message.contains("only its creator"),
+        "{}",
+        refusal.message
+    );
+}
+
+#[test]
 fn a_source_must_be_a_named_branch_of_the_user_and_not_the_target() {
     let refused = |xml: String| {
         let doc = parse_request(&xml).unwrap();
