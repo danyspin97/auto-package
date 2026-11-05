@@ -66,6 +66,8 @@ mod suse_tests;
 mod versions;
 
 pub use candidates::*;
+mod skip;
 use pins::*;
 pub use plan::*;
 pub use read::*;
+pub use skip::SkipReason;
