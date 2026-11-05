@@ -98,6 +98,49 @@ pub fn with_header(text: &str, claim: &Claim<'_>) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
+    insert_lines(text, lines)
+}
+
+/// The header fields a revision keeps from the carried file (convention 111,
+/// plan 4.3 step 2): what the maintainer wrote and the revision lacks. A
+/// `Git-commit:` is not kept: it names the carried commit, and a revision
+/// that moved has another one.
+const CARRIED: &[&str] = &["references", "upstream", "description", "patch-mainline"];
+
+/// `new` with the lines of `old`'s header that `new` lacks, for the fields in
+/// [`CARRIED`] (folded lines with them), placed as the header writer places
+/// its lines. `new` itself when nothing is carried or the insertion is refused.
+pub fn carried_into(old: &str, new: &str) -> String {
+    let old_lines = crate::pipeline::header_lines(old);
+    let new_bytes: Vec<&[u8]> = new.split_inclusive('\n').map(str::as_bytes).collect();
+    let new_header = &new_bytes[..header_len(&new_bytes)];
+    let mut carried: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < old_lines.len() {
+        let line = old_lines[i];
+        i += 1;
+        let Some((key, _)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        if !CARRIED.contains(&key.as_str()) || has_key(new_header, &key) {
+            continue;
+        }
+        carried.push(line.to_string());
+        while i < old_lines.len() && old_lines[i].starts_with(char::is_whitespace) {
+            carried.push(old_lines[i].to_string());
+            i += 1;
+        }
+    }
+    if carried.is_empty() {
+        return new.to_string();
+    }
+    insert_lines(new, carried).unwrap_or_else(|| new.to_string())
+}
+
+/// `text` with `lines` after its `Subject:` block (or at the top, then a blank
+/// line, for a plain file), if the insertion passes [`checked_insert`].
+fn insert_lines(text: &str, lines: Vec<String>) -> Option<String> {
     let old: Vec<&[u8]> = text.split_inclusive('\n').map(str::as_bytes).collect();
     let head = header_len(&old);
     let (at, block) = match subject_end(&old, head) {

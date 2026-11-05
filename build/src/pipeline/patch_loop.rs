@@ -92,6 +92,32 @@ fn patch_stage_inner(
         refreshed.extend(write_refreshed_patches(ctx, &offsets, &mut lines));
         report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
     }
+    // The upstream revisions of moved requests, before any rebase turn (plan 4.6).
+    let failing: Vec<String> = report.failing().map(|p| p.name.clone()).collect();
+    if super::patch_provenance::upstream_revisions_wanted(config, &failing) {
+        let hosts = crate::allowed_hosts::load_default();
+        let forge = crate::patch_provenance::LiveForge {
+            package: rpm_name,
+            hosts: &hosts,
+        };
+        // A revision taken before a stop keeps its refresh bullet.
+        if let Err(stop) = super::patch_provenance::try_upstream_revisions(
+            ctx,
+            st,
+            step_id,
+            check,
+            review,
+            &forge,
+            &failing,
+            &mut accepted,
+            &mut refreshed,
+            &mut lines,
+        ) {
+            write_refresh_bullets(ctx, step_id, &refreshed);
+            return Err(stop);
+        }
+        report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
+    }
     if report.patches.is_empty() || report.not_run.is_some() || report.is_clean() {
         write_refresh_bullets(ctx, step_id, &refreshed);
         if report.not_run.is_some() {

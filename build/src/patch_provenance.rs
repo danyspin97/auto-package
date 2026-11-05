@@ -25,7 +25,7 @@ mod verdict_tests;
 pub use budget::reset as reset_budget;
 pub use cache::{containment_cached, state_cached};
 pub use detect::{OriginInputs, OriginRead, classify_url, read_origin};
-pub use header::{Claim, spec_with_comment, with_header};
+pub use header::{Claim, carried_into, spec_with_comment, with_header};
 pub use lint::{header_due, lint_findings};
 pub use live::LiveForge;
 pub use reason::{cut, fold_field, reason_from_changes, reason_of, sanitize};

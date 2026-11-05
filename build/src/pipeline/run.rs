@@ -488,7 +488,7 @@ fn run_stages(
     patch_stage(&ctx, &mut st, &spec)?;
     // The lint stage only: an update checks its carried patches in the patch loop.
     if spec.carried_from.is_none() && !ctx.config.update {
-        provenance_stage(&ctx, &mut st)?;
+        provenance_stage(&ctx);
     }
 
     let build_log_nonempty = checkout.has_failed_build_log(
