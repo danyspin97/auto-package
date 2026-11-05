@@ -124,7 +124,12 @@ pub(super) fn lookup_hint(error: &str) -> &'static str {
         " [Repology knows the project but marks no release as newest; check upstream by hand]"
     } else if e.contains("429") || e.contains("rate limit") {
         " [rate limited; retry later]"
-    } else if e.contains("timed out") || e.contains("dns") || e.contains("connection") {
+    } else if e.contains("timed out")
+        || e.contains("dns")
+        || e.contains("connection")
+        || e.contains("name or service not known")
+        || e.contains("no address associated")
+    {
         " [the host could not be reached; retry later]"
     } else {
         ""
@@ -427,5 +432,20 @@ mod tests {
         // A dash beside a dot is a distro revision of 1.5, not 1.5.1.
         assert_eq!(dashes_as_dots("1.5-1", "1.5.1"), None);
         assert_eq!(dashes_as_dots("1.4.2", "1.4.2"), None);
+    }
+
+    #[test]
+    fn a_resolver_failure_is_a_host_that_could_not_be_reached() {
+        for error in [
+            "dns error: failed to lookup address information: Name or service not known",
+            "error trying to connect: No address associated with hostname",
+            "Connection refused",
+        ] {
+            assert!(
+                lookup_hint(error).contains("could not be reached"),
+                "{error}"
+            );
+        }
+        assert_eq!(lookup_hint("invalid JSON"), "");
     }
 }
