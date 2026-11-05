@@ -11,6 +11,9 @@ pub enum ReadError {
     /// The package is a `_link` whose target is gone: the text is the report
     /// for the maintainer (see `osc::broken_link_report`).
     NeedsMaintainer(String),
+    /// OBS answered 404: the package is not there. A permanent answer, not a
+    /// failed read of one that is.
+    Absent(String),
 }
 
 impl std::fmt::Display for ReadError {
@@ -19,6 +22,7 @@ impl std::fmt::Display for ReadError {
             ReadError::NoSpec => write!(f, "the package has no spec file"),
             ReadError::Failed(why) => write!(f, "the spec could not be read: {why}"),
             ReadError::NeedsMaintainer(why) => write!(f, "needs the maintainer: {why}"),
+            ReadError::Absent(why) => write!(f, "the package is not on OBS: {why}"),
         }
     }
 }
@@ -31,6 +35,7 @@ impl From<ReadError> for SkipReason {
             ReadError::NoSpec => SkipReason::NoSpec,
             ReadError::Failed(why) => SkipReason::ReadFailed(why),
             ReadError::NeedsMaintainer(why) => SkipReason::NeedsMaintainer(why),
+            ReadError::Absent(why) => SkipReason::ReadFailed(why),
         }
     }
 }
@@ -71,13 +76,35 @@ pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Stri
 }
 
 /// The error a permanent failure of an osc read is: a `_link` that cannot be
-/// expanded goes to the maintainer, the rest is a failed read.
+/// expanded goes to the maintainer, a package OBS says is not there is
+/// [`ReadError::Absent`], and the rest is a failed read.
 fn permanent_error(osc_says: &str, reason: String) -> ReadError {
     if osc_says.contains("cannot be expanded") {
         ReadError::NeedsMaintainer(reason)
+    } else if is_absent(osc_says) {
+        ReadError::Absent(reason)
     } else {
         ReadError::Failed(reason)
     }
+}
+
+/// Whether osc's error text says the package or project is not there: a 404
+/// with the `unknown_package`/`unknown_project` code or osc's own `Package not
+/// found` line. A bare 404 is not (a failing backend answers the same way).
+fn is_absent(osc_says: &str) -> bool {
+    // osc 1.x prints `HTTP Error 404: Not Found` and, on the next line, `Package
+    // not found: P/pkg` or `Project not found: P`; the raw OBS codes are what an
+    // `osc api` call shows.
+    let lower = osc_says.to_lowercase();
+    let missing = [
+        "unknown_package",
+        "unknown_project",
+        "package not found:",
+        "project not found:",
+    ]
+    .iter()
+    .any(|m| lower.contains(m));
+    osc_says.contains("HTTP Error 404") && missing
 }
 
 /// How often a read is tried, and the wait before attempt `n` (2, 3, ...).
@@ -133,19 +160,7 @@ pub(super) fn permanent_listing_failure(pkg: &str, osc_says: &str) -> Option<Str
             "OBS refused access to {pkg} (HTTP {status}): the package may be read-protected or your credentials may not allow it; not retried"
         ));
     }
-    let lower = osc_says.to_lowercase();
-    // osc 1.x prints `HTTP Error 404: Not Found` and, on the next line, `Package
-    // not found: P/pkg` or `Project not found: P`; the raw OBS codes are what an
-    // `osc api` call shows.
-    let missing = [
-        "unknown_package",
-        "unknown_project",
-        "package not found:",
-        "project not found:",
-    ]
-    .iter()
-    .any(|m| lower.contains(m));
-    if osc_says.contains("HTTP Error 404") && missing {
+    if is_absent(osc_says) {
         return Some(format!(
             "{pkg} does not exist on OBS ({first}); not retried"
         ));
@@ -257,4 +272,29 @@ pub fn pick_spec_filename(pkg: &str, files: &[String]) -> Option<String> {
         return Some((*s).clone());
     }
     specs.first().map(|s| (*s).clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_404_text_osc_prints_for_a_missing_package_or_project_is_absent() {
+        // Text that OBS answered with (`osc ls` on a package and a project that do
+        // not exist), on stderr.
+        assert!(is_absent(
+            "Server returned an error: HTTP Error 404: Not Found\nPackage not found: Base:System/definitely-not-a-package-xyz"
+        ));
+        assert!(is_absent(
+            "Server returned an error: HTTP Error 404: Not Found\nProject not found: definitely-not-a-project-xyz"
+        ));
+    }
+
+    #[test]
+    fn a_missing_file_of_a_package_is_not_an_absent_package() {
+        // OBS's answer for `osc cat` of a file the package does not hold.
+        assert!(!is_absent(
+            "Server returned an error: HTTP Error 404: nonexistent-file.txt  no such file"
+        ));
+    }
 }

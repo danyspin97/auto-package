@@ -16,6 +16,9 @@ pub(super) struct AuditEnd {
     pub(super) packages: usize,
     /// The packages handed on to be improved.
     pub(super) items: usize,
+    /// The packages whose spec could not be read, each with the reason: OBS
+    /// failed the read, so these were not checked.
+    pub(super) unreadable: Vec<String>,
 }
 
 impl Audit {
@@ -58,6 +61,7 @@ impl Audit {
             let mut seen: HashSet<String> = HashSet::new();
             let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&distro);
             let mut ldconfig_left = false;
+            let mut unreadable: Vec<String> = Vec::new();
             update::plan_each(
                 &source,
                 &|n| wanted_by(&only, &exclude, n),
@@ -67,11 +71,25 @@ impl Audit {
                     if !seen.insert(pkg.to_string()) {
                         return true;
                     }
-                    let Ok(spec) = update::planned_spec(&source, pkg, emit) else {
-                        warn(format!(
-                            "could not read the spec of {pkg}, so it is not checked"
-                        ));
-                        return true;
+                    let spec = match update::planned_spec(&source, pkg, emit) {
+                        Ok(spec) => spec,
+                        Err(e) => {
+                            // The reason alone: a failed read's Display already says
+                            // "the spec could not be read", which the warning says too.
+                            let why = match &e {
+                                update::ReadError::Failed(why) => why.clone(),
+                                other => other.to_string(),
+                            };
+                            warn(format!(
+                                "could not read the spec of {pkg}, so it is not checked: {why}"
+                            ));
+                            // A failed read is not a package that is not there (a 404,
+                            // or no spec at all): the run is incomplete.
+                            if let update::ReadError::Failed(why) = &e {
+                                unreadable.push(format!("{pkg}: {why}"));
+                            }
+                            return true;
+                        }
                     };
                     ldconfig_left |= ap_build::spec_tidy::hygiene::ldconfig_left(&spec, ldconfig);
                     let mut findings = quality::audit_spec(&spec, ldconfig);
@@ -154,6 +172,7 @@ impl Audit {
             Ok(AuditEnd {
                 packages: audits.len(),
                 items: sent,
+                unreadable,
             })
         });
         Self { items, handle }

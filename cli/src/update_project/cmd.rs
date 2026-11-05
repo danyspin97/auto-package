@@ -398,6 +398,13 @@ pub(super) fn cmd_update_project(
                 return Err(eyre!("{e}"));
             }
         };
+        if !end.unreadable.is_empty() {
+            // Packages already branched and prepared are still built before the error is returned.
+            if !a.dry_run {
+                build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
+            }
+            return Err(obs_unavailable(&end.unreadable, &a.source));
+        }
         if end.packages == 0 {
             ctx.say(format!("no matching packages in {}", a.source));
             return Ok(());
@@ -507,4 +514,31 @@ pub(super) fn cmd_update_project(
         submit_requests(a, branch, &mut report.results, ctx)?;
     }
     Ok(())
+}
+
+/// The error of a run whose spec reads OBS failed to answer: `unreadable` holds
+/// each package with the reason.
+fn obs_unavailable(unreadable: &[String], source: &str) -> color_eyre::Report {
+    eyre!(
+        "OBS is unavailable: the spec of {} package(s) in {source} could not be read, so they \
+         were not checked: {}",
+        unreadable.len(),
+        unreadable.join("; ")
+    )
+}
+
+#[cfg(test)]
+mod obs_unavailable_tests {
+    use super::obs_unavailable;
+
+    #[test]
+    fn the_unreadable_packages_are_named_under_the_obs_message() {
+        let err = obs_unavailable(&["foo: listing failed".to_string()], "Base:System");
+        let text = err.to_string();
+        assert!(
+            text.starts_with("OBS is unavailable: the spec of 1 package(s) in Base:System"),
+            "{text}"
+        );
+        assert!(text.ends_with("foo: listing failed"), "{text}");
+    }
 }

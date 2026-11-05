@@ -166,8 +166,8 @@ mod reading {
             None,
             true,
         );
-        let Err(ReadError::Failed(why)) = out else {
-            panic!("expected a failed read, got {out:?}");
+        let Err(ReadError::Absent(why)) = out else {
+            panic!("expected an absent package, got {out:?}");
         };
         assert!(why.contains("does not exist on OBS"), "{why}");
         assert_eq!(r.lists.get(), 1);
@@ -180,8 +180,8 @@ mod reading {
             "Server returned an error: HTTP Error 404: Not Found\nProject not found: home:u:branches:Base:System",
         ] {
             let (out, r) = run_with(&[Err(said.to_string())], &[Err("unused")], None, true);
-            let Err(ReadError::Failed(why)) = out else {
-                panic!("expected a failed read, got {out:?}");
+            let Err(ReadError::Absent(why)) = out else {
+                panic!("expected an absent package, got {out:?}");
             };
             assert!(why.contains("does not exist on OBS"), "{said}: {why}");
             assert_eq!(r.lists.get(), 1, "{said}");
@@ -307,6 +307,30 @@ mod reading {
             assert_eq!(r.lists.get(), 1);
             assert!(r.waits.borrow().is_empty());
         }
+    }
+
+    #[test]
+    fn a_package_osc_says_is_not_there_is_absent_and_a_gateway_error_is_a_failed_read() {
+        let (out, r) = run_with(
+            &[Err(
+                "HTTP Error 404: Not Found\nPackage not found: P/pkg".into()
+            )],
+            &[Ok("")],
+            None,
+            true,
+        );
+        assert!(matches!(out, Err(ReadError::Absent(_))), "{out:?}");
+        assert_eq!(r.lists.get(), 1);
+        assert!(r.waits.borrow().is_empty());
+
+        let (out, r) = run_with(
+            &[Err("HTTP Error 503: Service Unavailable".into())],
+            &[Ok("")],
+            None,
+            true,
+        );
+        assert!(matches!(out, Err(ReadError::Failed(_))), "{out:?}");
+        assert_eq!(r.lists.get(), 3);
     }
 
     #[test]
