@@ -87,7 +87,8 @@ pub(super) fn tidy_item(
             }
         }
         osc::note_attempt(&baseline, &commit_files).map_err(|e| e.to_string())?;
-        osc::commit(
+        osc::commit_attempt(
+            &baseline,
             &dir,
             commit_message(tidy_changed || !rpm_fixes.is_empty(), provenance_changed),
             &commit_files,

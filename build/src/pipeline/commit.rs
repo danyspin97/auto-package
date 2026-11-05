@@ -258,7 +258,8 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         commit_step.finish(StepOutcome::Failed);
         return Err(ctx.failed(format!("not committed: the attempt cannot be noted: {e}")));
     }
-    if let Err(e) = osc::commit(
+    if let Err(e) = osc::commit_attempt(
+        &baseline,
         &ctx.checkout_dir,
         &commit_message(&ctx.checkout_dir, &baseline),
         &files,

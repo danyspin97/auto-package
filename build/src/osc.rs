@@ -125,9 +125,13 @@ pub use rpmlint_sources::*;
 mod recipe_files;
 use recipe_files::recipe_file_unused;
 mod baseline;
+pub use baseline::*;
+mod baseline_commits;
+pub use baseline_commits::*;
+#[cfg(test)]
+mod baseline_commits_tests;
 #[cfg(test)]
 mod recipe_files_tests;
-pub use baseline::*;
 
 #[cfg(test)]
 mod baseline_tests;

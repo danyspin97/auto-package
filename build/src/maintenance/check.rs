@@ -130,7 +130,8 @@ pub(super) fn commit_refs(
     .map_err(|e| format!("cannot keep the OBS baseline of {branch}: {e}"))?;
     std::fs::write(&path, amended).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     osc::note_attempt(&baseline, &[name.to_string()]).map_err(|e| e.to_string())?;
-    let committed = osc::commit(
+    let committed = osc::commit_attempt(
+        &baseline,
         &dir,
         &format!(
             "Add the bug references {} (auto-package maintenance)",
