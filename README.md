@@ -619,9 +619,10 @@ the dates of entries are a person's decision and stay listed. Notes and the agen
 are never acted on. A reviewer's comment is shown in the review, never given to
 the agent.
 
-Refused before anything is downloaded or written: a request that is not an open
-submit from a named branch of your own (not the target project), or that renames
-the package. Refused once the review has run (a review run now is kept under
+Refused before anything is downloaded or written: a request that is not a submit
+in the state `new`, `review` or `declined` (`accepted`, `revoked` and `superseded`
+are refused as nothing to fix), that was made by someone else, that is not from a
+named branch of your own (not the target project), or that renames the package. Refused once the review has run (a review run now is kept under
 `ap-work/reviews`): a saved review that is not of the request's current source
 and revision; a request without a pinned revision unless `--submit` is given
 (that request follows its source, and `--submit` pins the new one); a branch that
