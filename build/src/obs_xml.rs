@@ -67,7 +67,7 @@ pub(crate) fn attrs(tag: &str) -> Vec<(String, String)> {
 }
 
 /// Escape text for an attribute value or element text.
-pub(crate) fn escape(s: &str) -> String {
+pub fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

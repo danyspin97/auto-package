@@ -24,7 +24,7 @@ pub mod log;
 pub mod maintenance;
 pub mod nvidia_spec;
 pub mod obs_status;
-pub(crate) mod obs_xml;
+pub mod obs_xml;
 pub mod osc;
 pub mod package_notes;
 pub mod patch_check;

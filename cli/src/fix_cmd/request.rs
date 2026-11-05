@@ -232,24 +232,26 @@ impl RequestObs for Pinned<'_> {
 
 /// A request document with one submit action from `source` (pinned to `rev`)
 /// to `target`, in the state and by the creator of `doc`.
-fn pinned_xml(
+pub(super) fn pinned_xml(
     doc: &ap_build::request_review::request::RequestDoc,
     source: &ActionSource,
     target: &ActionTarget,
     rev: &str,
 ) -> String {
+    use ap_build::obs_xml::escape;
     format!(
-        "<request id=\"{}\" creator=\"{}\"><action type=\"submit\"><source project=\"{}\" package=\"{}\" rev=\"{rev}\"/><target project=\"{}\" package=\"{}\"/></action><state name=\"{}\" who=\"{}\" when=\"{}\" created=\"{}\"/></request>",
-        doc.id,
-        doc.creator,
-        source.project,
-        source.package,
-        target.project,
-        target.package,
-        doc.state.name,
-        doc.state.who,
-        doc.state.when,
-        doc.state.created,
+        "<request id=\"{}\" creator=\"{}\"><action type=\"submit\"><source project=\"{}\" package=\"{}\" rev=\"{}\"/><target project=\"{}\" package=\"{}\"/></action><state name=\"{}\" who=\"{}\" when=\"{}\" created=\"{}\"/></request>",
+        escape(&doc.id),
+        escape(&doc.creator),
+        escape(&source.project),
+        escape(&source.package),
+        escape(rev),
+        escape(&target.project),
+        escape(&target.package),
+        escape(&doc.state.name),
+        escape(&doc.state.who),
+        escape(&doc.state.when),
+        escape(&doc.state.created),
     )
 }
 

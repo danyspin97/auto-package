@@ -140,6 +140,38 @@ fn a_request_by_someone_else_is_refused_even_from_the_users_branch() {
 }
 
 #[test]
+fn a_pinned_request_keeps_markup_in_its_values_as_text() {
+    use ap_build::request_review::request::{ActionSource, ActionTarget};
+
+    use super::request::pinned_xml;
+    let mut doc = parse_request(&request_xml(
+        "review",
+        "submit",
+        "home:alice:branches:openSUSE:Factory",
+    ))
+    .unwrap();
+    doc.creator = "al\"ice&<x>".to_string();
+    let source = ActionSource {
+        project: "home:alice:branches:a&b\"c".to_string(),
+        package: "curl".to_string(),
+        rev: None,
+    };
+    let target = ActionTarget {
+        project: "openSUSE:Factory".to_string(),
+        package: "curl".to_string(),
+    };
+    let back = parse_request(&pinned_xml(&doc, &source, &target, "f&\"1")).unwrap();
+    assert_eq!(back.creator, "al\"ice&<x>");
+    let action = &back.actions[0];
+    let pinned = ActionSource {
+        rev: Some("f&\"1".to_string()),
+        ..source
+    };
+    assert_eq!(action.source.as_ref().unwrap(), &pinned);
+    assert_eq!(action.target.as_ref().unwrap(), &target);
+}
+
+#[test]
 fn a_source_must_be_a_named_branch_of_the_user_and_not_the_target() {
     let refused = |xml: String| {
         let doc = parse_request(&xml).unwrap();
