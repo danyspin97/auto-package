@@ -237,6 +237,15 @@ read failed is skipped with that cause, since the read may pass on a retry.
 The run ends with a summary (updated, failed, skipped, requests, build paths
 added, branch project) and exits non-zero when a package failed.
 
+Carried patches that copy an upstream request are checked on each `update` as
+well, and only when they fail to apply: a failing patch whose open request
+moved takes the request's current revision, after the edit gates, the quilt
+check and a review; a failing patch the packaged release merged is dropped with
+the removal proof. Both happen before any agent rebase turn. A patch that
+applies is not looked up. A header-only change is never submitted. `lint` never
+replaces a patch: it writes the header and reports a moved request as
+`run update`.
+
 ### Improving the quality of a whole project
 
 `lint` checks every package of an OBS project and fixes what it
@@ -261,7 +270,17 @@ What it checks, per package:
   Python package without `BuildArch: noarch`, a literal version where
   `%{version}` belongs, unused Python `BuildRequires` of a wheel install;
 - **no-check**: the spec has no `%check`;
-- **dropped-tests**: tests removed from `%check` to get the package to build.
+- **dropped-tests**: tests removed from `%check` to get the package to build;
+- **provenance**: a carried patch that copies an upstream pull request or
+  commit gets its `References:`, `Upstream:` and `Git-commit:` lines and its
+  `PATCH-FIX-UPSTREAM` spec comment (written by the tidy commit, no bullet).
+  Its request is read from the forge, read only: a request merged in the
+  packaged release has its patch dropped with the removal proof; a request that
+  moved with different code is reported (`update` takes its current revision);
+  a request merged in a later release, closed, or not readable is only reported.
+  The forge calls of this check are counted per invocation (40 without a token
+  or `gh` login, 1000 with one); a rate limit stops the rest of the invocation's
+  calls.
 
 Style slips are fixed deterministically and committed without a build. Every
 other finding sends the package through the ordinary pipeline at its current
@@ -363,6 +382,9 @@ runs checks on what the request *changes*, not on what was already there:
   skeleton, a lost `%check`, dropped tests;
 - the newest `.changes` entry: header, date, `Update to <version>` against the
   `Version:`, notes, patches named, dependency bullets;
+- the upstream request of each patch: a missing upstream header on a patch the
+  request adds or changes, and a request merged, released later, moved or
+  closed (notes only; a state that cannot be read is skipped);
 - patches and `rpmlintrc` files, with the rules the pipeline applies to its own
   edits;
 - the risk flags of the submit summary (new scriptlets, hosts, services, large
@@ -770,6 +792,17 @@ tool assumes these may be hostile and limits what they can reach:
   search; its edits pass the gates of every turn's edit, its patch is reviewed,
   and a fix that no upstream commit stands behind, or an upstream fix that was
   changed, is flagged so `--yes` never submits it.
+
+- **Upstream requests (`lint`, `update`, `review`)**: the title, body, head and
+  diff of a pull or merge request are written by its author. The tool reads only
+  its state (open, merged, closed), its commit ids (checked as commit ids) and
+  its title, which is cut and used only as the reason of a header when the
+  `.changes` has none. The request's diff is fetched as a patch: it is read to
+  check whether the carried file is the same request (commits, subject, code)
+  and, for an update, a revision is taken only through the gates of every edit
+  (escape, patch rules, quilt, a review), and a revision taken from an open
+  request is flagged as an unmerged upstream fix. A file name alone (`106.patch`) is believed only when
+  the request's patch matches the file.
 
 - **Archives**: links are refused if they can reach outside the unpacked tree
   (including through a chain of earlier links), zip symlinks are never
