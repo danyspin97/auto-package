@@ -387,3 +387,22 @@ fn listing_md5s_reads_names_and_md5s_sorted() {
         ]
     );
 }
+
+/// A link's unexpanded listing (`/source/<p>/<pkg>`): its directory srcmd5 is
+/// the link's own revision, its `xsrcmd5` the expanded one osc records.
+const LINK_LISTING: &str = r#"<directory name="duckdb" rev="7" srcmd5="64fe82a2">
+  <linkinfo project="server:database" package="duckdb" srcmd5="f584" baserev="f584" xsrcmd5="706cd735" lsrcmd5="64fe82a2"/>
+  <entry name="duckdb.spec" md5="a"/>
+</directory>"#;
+
+#[test]
+fn a_links_expanded_revision_is_its_xsrcmd5() {
+    assert_eq!(expanded_revision(LINK_LISTING).as_deref(), Some("706cd735"));
+}
+
+#[test]
+fn a_plain_packages_revision_is_its_directory_srcmd5() {
+    let xml = r#"<directory name="foo" rev="3" srcmd5="abc123"><entry name="foo.spec" md5="a"/></directory>"#;
+    assert_eq!(expanded_revision(xml).as_deref(), Some("abc123"));
+    assert_eq!(expanded_revision("<directory/>"), None);
+}

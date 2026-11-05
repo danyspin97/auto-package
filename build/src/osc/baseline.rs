@@ -254,6 +254,22 @@ fn checkout_project_package(checkout: &Path) -> Result<(String, String), String>
     Ok((read("_project")?, read("_package")?))
 }
 
+/// The revision of a package listing (`/source/<project>/<package>`) in the
+/// form osc records in `.osc/_files`: a link's expanded `xsrcmd5`, or the
+/// directory srcmd5 otherwise. The unexpanded directory of a link carries the
+/// link's own revision (`lsrcmd5`), which osc never records, so comparing that
+/// with `.osc/_files` reports a move that never happened.
+pub fn expanded_revision(listing_xml: &str) -> Option<String> {
+    let linkinfo = listing_xml.find("<linkinfo").map(|i| {
+        let rest = &listing_xml[i..];
+        &rest[..rest.find('>').unwrap_or(rest.len())]
+    });
+    linkinfo
+        .and_then(|tag| crate::obs_xml::attr(tag, "xsrcmd5"))
+        .filter(|r| !r.is_empty())
+        .or_else(|| parse_directory_srcmd5(listing_xml))
+}
+
 /// The revision OBS holds for the checkout's package must be the one the
 /// checkout holds (`.osc/_files`, which osc updates when a commit lands). When
 /// it is not, someone committed after the attempt, or the attempt landed but
@@ -265,8 +281,10 @@ pub fn obs_still_at_checkout(checkout: &Path) -> Result<(), String> {
         .ok()
         .and_then(|xml| parse_directory_srcmd5(&xml))
         .ok_or_else(|| format!("the checkout of {project}/{package} records no revision"))?;
-    let head = source_srcmd5(&project, &package, Emit::quiet())
+    let xml = source_listing_xml(&project, &package, Emit::quiet())
         .map_err(|e| format!("cannot read the OBS revision of {project}/{package}: {e}"))?;
+    let head = expanded_revision(&xml)
+        .ok_or_else(|| format!("OBS returned no revision for {project}/{package}"))?;
     if head == local {
         return Ok(());
     }
@@ -346,7 +364,8 @@ pub fn restore_baseline_outcome(
         expected,
         |checkout| {
             let (project, package) = checkout_project_package(checkout)?;
-            source_listing_xml(&project, &package, Emit::quiet()).map_err(|e| e.to_string())
+            source_listing_expanded_xml(&project, &package, Emit::quiet())
+                .map_err(|e| e.to_string())
         },
         obs_still_at_checkout,
         |checkout, message, files| commit(checkout, message, files, None, emit),

@@ -73,6 +73,22 @@ pub fn source_listing_xml(project: &str, package: &str, emit: Emit<'_>) -> Resul
     api_get(&format!("/source/{project}/{}", enc(package)), emit)
 }
 
+/// The `/source` listing of `project/package` with its links expanded: the
+/// files osc keeps in `.osc/_files`, which a link's unexpanded listing does not
+/// have (it lists `_link` and the link's own files instead).
+pub fn source_listing_expanded_xml(
+    project: &str,
+    package: &str,
+    emit: Emit<'_>,
+) -> Result<String, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", package)?;
+    api_get(
+        &format!("/source/{project}/{}?expand=1", enc(package)),
+        emit,
+    )
+}
+
 /// Refuse a request whose source package is no longer at the revision it was
 /// prepared for. `current` reads the revision now.
 pub fn verify_source_rev(
