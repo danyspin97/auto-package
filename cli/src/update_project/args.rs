@@ -134,6 +134,12 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false)]
     pub refresh: bool,
 
+    /// How many packages are checked for a newer version at once (1 checks
+    /// them one at a time). Each check runs `osc` against OBS, so N is up to
+    /// N `osc` processes at once. Defaults to 8, or AUTO_PACKAGE_CHECK_JOBS.
+    #[arg(long, value_name = "N", value_parser = parse_check_jobs)]
+    pub check_jobs: Option<usize>,
+
     /// Resolve dependencies without the sandbox: pip runs on the host and
     /// may build sdists, running their build backends as you. Without
     /// this, pip runs in bubblewrap, or resolves wheels only when
@@ -333,5 +339,13 @@ impl BranchBuild {
     /// archive to hold a build system auto-package can generate a spec for.
     pub fn keeps_recipe(&self) -> bool {
         self.update || self.improve.is_some() || self.bug_fix.is_some()
+    }
+}
+
+/// `--check-jobs`: a whole number of packages, at least 1.
+fn parse_check_jobs(text: &str) -> Result<usize, String> {
+    match text.parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!("{text:?} is not a number of packages, 1 or more")),
     }
 }

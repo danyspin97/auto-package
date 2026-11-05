@@ -61,6 +61,9 @@ pub(super) fn run_on(
     std::fs::create_dir_all(&a.work_dir)?;
     ap_build::upstream_cache::set_dir(std::path::absolute(&a.work_dir)?);
     ap_build::upstream_cache::set_refresh(a.refresh);
+    if let Some(n) = a.check_jobs {
+        ap_build::update::set_check_jobs(n);
+    }
     if a.in_place && !a.improve {
         return crate::update_in_place(a, summary);
     }

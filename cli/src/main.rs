@@ -325,6 +325,8 @@ mod allow_host;
 #[cfg(test)]
 mod allow_host_tests;
 mod baseline;
+#[cfg(test)]
+mod check_jobs_tests;
 use baseline::*;
 mod resolve;
 use resolve::*;
