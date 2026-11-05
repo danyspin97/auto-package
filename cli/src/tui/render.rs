@@ -14,8 +14,9 @@ pub(super) fn render(
         return RenderFeedback::default();
     }
     let visible = state.visible_order();
-    let heights = stacked_heights(area.height, table_wanted(visible.len()));
-    let [summary, table, detail, footer] = Layout::default()
+    let has_run = !state.run_log.is_empty();
+    let heights = stacked_heights(area.height, table_wanted(visible.len()), has_run);
+    let [summary, table, detail, run, footer] = Layout::default()
         .direction(Direction::Vertical)
         .constraints(heights.map(Constraint::Length))
         .areas(area);
@@ -31,8 +32,7 @@ pub(super) fn render(
     );
     // The run's own log has a pane of its own below the package panes, so it
     // never shares one with a package's log.
-    let (detail, run) = split_run_pane(detail, !state.run_log.is_empty());
-    if let Some(run) = run {
+    if has_run {
         render_run_log(f, state, run);
     }
     let feedback = render_detail(f, state, &visible, detail, table_state.selected(), browse);
@@ -56,23 +56,12 @@ pub(super) fn render(
 
 /// Rows of the run log pane at most, borders included.
 pub(super) const RUN_PANE_MAX_HEIGHT: u16 = 7;
-/// Rows of the detail area below which the run log gets no pane, so the
-/// package panes are never squeezed for it.
-pub(super) const RUN_PANE_MIN_DETAIL: u16 = 14;
-
-/// Carves the run log pane off the bottom of the detail `area`, when there is
-/// something to show and room for it beside the package panes.
-pub(super) fn split_run_pane(area: Rect, has_log: bool) -> (Rect, Option<Rect>) {
-    if !has_log || area.height < RUN_PANE_MIN_DETAIL {
-        return (area, None);
-    }
-    let height = (area.height / 4).clamp(4, RUN_PANE_MAX_HEIGHT);
-    let [detail, run] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(height)])
-        .areas(area);
-    (detail, Some(run))
-}
+/// Rows of the run log pane at least, borders included: a title and two lines.
+pub(super) const RUN_PANE_MIN_HEIGHT: u16 = 4;
+/// Body rows from which the run log pane sits beside a package table with at
+/// least its border, header and one package row; shorter bodies give the run
+/// log pane the first rows.
+const RUN_BESIDE_TABLE_MIN_BODY: u16 = 8;
 
 /// The newest run-level messages: the sweep that plans an `update` or audits
 /// a project, which goes on while packages are being built.
@@ -91,7 +80,7 @@ const MIN_WIDTH: u16 = 20;
 const MIN_HEIGHT: u16 = 6;
 /// Rows from which the summary and footer keep their bordered three-row
 /// boxes; shorter terminals get them as one bare line each.
-const FULL_CHROME_MIN_HEIGHT: u16 = 20;
+pub(super) const FULL_CHROME_MIN_HEIGHT: u16 = 20;
 /// Width from which two panes sit side by side; narrower ones are stacked.
 pub(super) const SIDE_BY_SIDE_MIN_WIDTH: u16 = 60;
 /// Rows of detail area below which stacked panes are shown one at a time.
@@ -134,26 +123,54 @@ fn table_wanted(rows: usize) -> u16 {
         .clamp(4, 12)
 }
 
-/// Heights of the summary, package table, detail pane and footer, top to
-/// bottom, for a terminal `height` rows tall. The summary and footer shrink
-/// to a single bare line when the terminal is short. The table takes what it
-/// wants up to half of the body — a third on a short one, where the logs are
-/// the point, but never less than its header and one row — and the detail
-/// pane keeps the rest, so neither is squeezed out by the other.
-pub(super) fn stacked_heights(height: u16, table_wanted: u16) -> [u16; 4] {
+/// Heights of the summary, package table, detail pane, run log pane and
+/// footer, top to bottom, for a terminal `height` rows tall. The summary and
+/// footer shrink to a single bare line when the terminal is short.
+///
+/// Without a run log the table takes what it wants up to `table_cap` of the
+/// body and the detail pane keeps the rest. With a log, and a body of at least
+/// `RUN_BESIDE_TABLE_MIN_BODY` rows, the table keeps its border, header and one
+/// package row (or its full want, up to the cap), the run log pane takes a
+/// third of what is left (4 to 7 rows), and the detail pane keeps the remainder,
+/// which can be 0 rows. Shorter bodies give the run log pane a quarter first.
+pub(super) fn stacked_heights(height: u16, table_wanted: u16, has_run: bool) -> [u16; 5] {
     let chrome = if height >= FULL_CHROME_MIN_HEIGHT {
         3
     } else {
         1
     };
     let body = height.saturating_sub(2 * chrome);
-    let cap = if body >= 24 {
+    if !has_run {
+        let table = table_wanted.min(table_cap(body));
+        return [chrome, table, body - table, 0, chrome];
+    }
+    if body >= RUN_BESIDE_TABLE_MIN_BODY {
+        let floor = table_wanted.min(4);
+        let table = table_wanted.min(table_cap(body)).max(floor);
+        let rest = body - table;
+        let run = (rest / 3)
+            .clamp(RUN_PANE_MIN_HEIGHT, RUN_PANE_MAX_HEIGHT)
+            .min(rest);
+        [chrome, table, rest - run, run, chrome]
+    } else {
+        let run = (body / 4)
+            .clamp(RUN_PANE_MIN_HEIGHT, RUN_PANE_MAX_HEIGHT)
+            .min(body);
+        let rest = body - run;
+        let table = table_wanted.min(table_cap(rest));
+        [chrome, table, rest - table, run, chrome]
+    }
+}
+
+/// Most rows the package table takes of a body of `body` rows: half of a body
+/// of 24 rows or more, otherwise a third, and at least 4 rows (or half the body,
+/// if that is less).
+fn table_cap(body: u16) -> u16 {
+    if body >= 24 {
         body / 2
     } else {
         (body / 3).max(4.min(body / 2))
-    };
-    let table = table_wanted.min(cap);
-    [chrome, table, body - table, chrome]
+    }
 }
 
 /// Splits `area` into two panes: side by side when the width allows, stacked

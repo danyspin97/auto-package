@@ -162,19 +162,21 @@ fn too_small_is_width_under_20_or_height_under_6() {
 
 #[test]
 fn short_terminals_get_bare_summary_and_footer_lines() {
-    assert_eq!(stacked_heights(30, 5), [3, 5, 19, 3]);
-    assert_eq!(stacked_heights(19, 5), [1, 5, 12, 1]);
-    assert_eq!(stacked_heights(6, 5), [1, 2, 2, 1]);
+    assert_eq!(stacked_heights(30, 5, false), [3, 5, 19, 0, 3]);
+    assert_eq!(stacked_heights(19, 5, false), [1, 5, 12, 0, 1]);
+    assert_eq!(stacked_heights(6, 5, false), [1, 2, 2, 0, 1]);
 }
 
 #[test]
 fn stacked_heights_always_fill_the_terminal() {
     for height in 6..=80u16 {
         for wanted in 5..=12u16 {
-            let [summary, table, detail, footer] = stacked_heights(height, wanted);
-            assert_eq!(summary + table + detail + footer, height);
-            assert!(table <= wanted);
-            assert!(table <= detail + table, "table never outgrows the body");
+            for has_run in [false, true] {
+                let [summary, table, detail, run, footer] =
+                    stacked_heights(height, wanted, has_run);
+                assert_eq!(summary + table + detail + run + footer, height);
+                assert!(table <= wanted);
+            }
         }
     }
 }
@@ -199,16 +201,41 @@ fn a_narrow_table_drops_cost_and_keeps_the_package_name() {
 }
 
 #[test]
-fn the_run_pane_is_carved_off_only_with_a_log_and_room() {
-    let area = Rect::new(0, 0, 80, 20);
-    assert_eq!(split_run_pane(area, false), (area, None));
-    let small = Rect::new(0, 0, 80, RUN_PANE_MIN_DETAIL - 1);
-    assert_eq!(split_run_pane(small, true), (small, None));
-    let (detail, run) = split_run_pane(area, true);
-    let run = run.expect("a log and room give a pane");
-    assert_eq!(detail.height + run.height, area.height);
-    assert!((4..=RUN_PANE_MAX_HEIGHT).contains(&run.height));
-    assert_eq!(run.y, detail.y + detail.height);
+fn the_run_pane_is_sized_only_with_a_log() {
+    assert_eq!(stacked_heights(40, 5, false)[3], 0);
+    let [_, _, _, run, _] = stacked_heights(40, 5, true);
+    assert!((RUN_PANE_MIN_HEIGHT..=RUN_PANE_MAX_HEIGHT).contains(&run));
+    assert_eq!(stacked_heights(24, 5, true), [3, 5, 9, 4, 3]);
+}
+
+#[test]
+fn without_a_log_the_table_is_sized_as_before() {
+    for height in 6..=80u16 {
+        for wanted in 4..=12u16 {
+            let chrome = if height >= FULL_CHROME_MIN_HEIGHT {
+                3
+            } else {
+                1
+            };
+            let body = height - 2 * chrome;
+            let cap = if body >= 24 {
+                body / 2
+            } else {
+                (body / 3).max(4.min(body / 2))
+            };
+            assert_eq!(stacked_heights(height, wanted, false)[1], wanted.min(cap));
+        }
+    }
+}
+
+#[test]
+fn a_run_log_keeps_a_package_row_from_14_rows_down() {
+    for height in 14..=80u16 {
+        for wanted in 4..=12u16 {
+            let [_, table, _, _, _] = stacked_heights(height, wanted, true);
+            assert!(table >= 4.min(wanted), "{height} rows, {wanted} wanted");
+        }
+    }
 }
 
 #[test]
