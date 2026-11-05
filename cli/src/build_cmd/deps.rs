@@ -37,6 +37,7 @@ pub(crate) fn branch_for_patch(
             .ok_or_else(|| format!("cannot read the Version of {project}/{real}"))?;
         ap_core::diag!("  fixing {real} {version} in {project} for another package");
         return Ok(PipelineConfig {
+            patch_provenance: false,
             pkg_name: dep.to_string(),
             rpm_name: real.to_lowercase(),
             version,
@@ -96,6 +97,7 @@ pub(crate) fn branch_for_patch(
         .ok_or_else(|| format!("cannot read the Version of {project}/{real} after branching it"))?;
     ap_core::diag!("  patching {real} {version} (branched from {origin}) for another package");
     Ok(PipelineConfig {
+        patch_provenance: false,
         pkg_name: dep.to_string(),
         rpm_name: real.to_lowercase(),
         version,
@@ -264,6 +266,7 @@ pub(crate) fn update_config_for_outdated(
         current.as_deref().unwrap_or("the distro's version")
     );
     Ok(PipelineConfig {
+        patch_provenance: false,
         pkg_name: dep.to_string(),
         rpm_name: real.to_lowercase(),
         version: newest,

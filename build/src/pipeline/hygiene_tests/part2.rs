@@ -139,6 +139,7 @@ fn a_stale_failure_is_reconciled_only_when_the_rpms_download() {
 
 pub(crate) fn config(pkg: &str, state_root: &Path) -> PipelineConfig {
     PipelineConfig {
+        patch_provenance: false,
         pkg_name: pkg.into(),
         rpm_name: osc::rpm_name(pkg),
         version: "1.0".into(),

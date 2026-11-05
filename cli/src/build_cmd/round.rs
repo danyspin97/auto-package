@@ -322,6 +322,7 @@ pub(super) fn package_config(
 ) -> PipelineConfig {
     let is_root = rpm_name == config.rpm_name;
     PipelineConfig {
+        patch_provenance: false,
         pkg_name: pkg_name.to_string(),
         rpm_name: rpm_name.to_string(),
         version: version.to_string(),
@@ -344,6 +345,7 @@ mod tests {
     /// The root of an update of an unknown build system, as `build_cmd` makes it.
     fn root() -> PipelineConfig {
         PipelineConfig {
+            patch_provenance: false,
             pkg_name: "cagebreak".into(),
             rpm_name: "cagebreak".into(),
             version: "3.2.1".into(),
@@ -410,6 +412,7 @@ mod tests {
             nonce: "n".into(),
         }));
         let config = PipelineConfig {
+            patch_provenance: false,
             bug_fix: Some(task),
             ..root()
         };

@@ -56,6 +56,9 @@ pub struct PipelineConfig {
     /// package the update command builds only, never for a dependency, a
     /// `build`, or a `lint`.
     pub update: bool,
+    /// Set by `lint` and `update`: check the upstream state of the carried
+    /// patches that are upstream requests, and act on it (`patch_provenance`).
+    pub patch_provenance: bool,
     /// For an update of the package (`update`): the `Version:` the OBS branch
     /// was at when the update was planned. The checkout's spec must be at it
     /// before the first agent turn. `None` for every other run.
