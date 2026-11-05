@@ -20,7 +20,10 @@ pub(super) fn render_detail(
         Some((pkg, reason)) => {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(4), Constraint::Min(0)])
+                .constraints([
+                    Constraint::Length(reason_rows(reason, area.width, area.height)),
+                    Constraint::Min(0),
+                ])
                 .split(area);
             let mut title = match pkg.step.as_ref() {
                 Some(step) if step.round > 1 => {
@@ -434,4 +437,45 @@ pub(super) fn render_footer(
     )
     .unwrap_or_default();
     f.render_widget(framed(area, Paragraph::new(line)), area);
+}
+
+/// Rows the failure strip takes for `reason` at `width`: the reason wrapped to
+/// the strip's inner width, plus its border. At least the old four rows, and
+/// at most half of `height`, so the logs keep room.
+fn reason_rows(reason: &str, width: u16, height: u16) -> u16 {
+    let inner = usize::from(width.saturating_sub(2).max(1));
+    let text = ap_build::allowed_hosts::printable(reason);
+    let lines: usize = text
+        .lines()
+        .map(|line| line.chars().count().div_ceil(inner).max(1))
+        .sum();
+    let rows = u16::try_from(lines.max(1))
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    rows.clamp(4, (height / 2).max(4))
+}
+
+#[cfg(test)]
+mod reason_rows_tests {
+    use super::reason_rows;
+
+    #[test]
+    fn a_short_reason_keeps_the_old_four_rows() {
+        assert_eq!(reason_rows("build failed", 80, 40), 4);
+    }
+
+    #[test]
+    fn the_strip_never_takes_more_than_half_of_a_short_detail_area() {
+        let long = "x".repeat(3000);
+        assert_eq!(reason_rows(&long, 80, 10), 5);
+        assert_eq!(reason_rows(&long, 80, 0), 4);
+    }
+
+    #[test]
+    fn a_long_reason_takes_a_row_per_wrapped_line_up_to_half_the_area() {
+        let long = "x".repeat(300);
+        // 300 characters at 78 columns is four lines, plus the border.
+        assert_eq!(reason_rows(&long, 80, 40), 6);
+        assert_eq!(reason_rows(&"x".repeat(3000), 80, 40), 20);
+    }
 }
