@@ -38,6 +38,27 @@ pub enum Kind {
     /// An rpmlintrc that no `Source:` line of the spec names: the publish
     /// plan leaves it out at commit. Only reported.
     RpmlintrcUnnamed,
+    /// An upstream patch whose header or spec comment lacks its provenance
+    /// (convention 111). Lint writes the header and reports the status; tidy
+    /// commits it with no build and no `.changes` bullet.
+    PatchProvenance,
+    /// A carried patch whose upstream request is merged and in the packaged
+    /// release: lint removes it only with the removal proof (the pipeline
+    /// checks it); without the proof it stays with a warning.
+    PatchUpstreamMerged,
+    /// A carried patch whose open upstream request moved with different code.
+    /// Only reported: lint never replaces a patch; `update` takes the request's
+    /// revision for a patch that fails to apply.
+    PatchUpstreamMoved,
+    /// A carried patch whose upstream request is merged in a newer release.
+    /// Only reported: the fix is a newer version.
+    PatchUpstreamReleased,
+    /// A carried patch whose upstream request was closed without a merge.
+    /// Only reported: a maintainer decides.
+    PatchUpstreamClosed,
+    /// A carried patch whose upstream state could not be read, or cannot be
+    /// compared. Only reported.
+    PatchUpstreamNotChecked,
 }
 
 impl Kind {
@@ -54,6 +75,12 @@ impl Kind {
             Kind::RpmlintrcHygiene => "rpmlintrc",
             Kind::RpmlintrcName => "rpmlintrc-name",
             Kind::RpmlintrcUnnamed => "rpmlintrc-unnamed",
+            Kind::PatchProvenance => "patch-provenance",
+            Kind::PatchUpstreamMerged => "patch-upstream-merged",
+            Kind::PatchUpstreamMoved => "patch-upstream-moved",
+            Kind::PatchUpstreamReleased => "patch-upstream-released",
+            Kind::PatchUpstreamClosed => "patch-upstream-closed",
+            Kind::PatchUpstreamNotChecked => "patch-upstream-not-checked",
         }
     }
 
@@ -61,14 +88,22 @@ impl Kind {
     pub fn is_mechanical(self) -> bool {
         matches!(
             self,
-            Kind::SpecStyle | Kind::SpecHygiene | Kind::RpmlintrcStyle
+            Kind::SpecStyle | Kind::SpecHygiene | Kind::RpmlintrcStyle | Kind::PatchProvenance
         )
     }
 
     /// Whether the finding is only reported: nothing fixes it by itself and
     /// it does not send the package to the pipeline.
     pub fn is_report_only(self) -> bool {
-        matches!(self, Kind::RpmlintrcName | Kind::RpmlintrcUnnamed)
+        matches!(
+            self,
+            Kind::RpmlintrcName
+                | Kind::RpmlintrcUnnamed
+                | Kind::PatchUpstreamMoved
+                | Kind::PatchUpstreamReleased
+                | Kind::PatchUpstreamClosed
+                | Kind::PatchUpstreamNotChecked
+        )
     }
 }
 

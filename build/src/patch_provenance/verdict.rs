@@ -55,6 +55,8 @@ pub struct Provenance {
     pub verdict: Verdict,
     /// The header this patch gets, when it has one (Open, merged, commit).
     pub header: Option<HeaderPlan>,
+    /// The spec comment above the patch line is due (see [`spec_comment_for`]).
+    pub spec_comment_due: bool,
 }
 
 /// What `assess` reads: the package and its declared patches.
@@ -75,7 +77,11 @@ pub fn assess(inputs: &Inputs<'_>, net: &dyn ForgeNet, refresh: bool) -> Vec<Pro
     inputs
         .patches
         .iter()
-        .map(|(name, text)| assess_one(inputs, name, text, net, refresh))
+        .map(|(name, text)| {
+            let mut p = assess_one(inputs, name, text, net, refresh);
+            p.spec_comment_due = spec_comment_for(&p, inputs.spec).is_some();
+            p
+        })
         .collect()
 }
 
@@ -91,6 +97,7 @@ fn plain(name: &str, text: &str, verdict: Verdict) -> Provenance {
         containment: None,
         verdict,
         header: None,
+        spec_comment_due: false,
     }
 }
 
