@@ -100,6 +100,8 @@ mod row_names_tests;
 #[cfg(test)]
 mod run_end_tests;
 #[cfg(test)]
+mod run_pane_tests;
+#[cfg(test)]
 mod seq_tests;
 #[cfg(test)]
 mod step_state_tests;
