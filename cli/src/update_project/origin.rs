@@ -15,6 +15,21 @@ pub(super) fn unreadable_origin(
         .map(|e| update::SkipReason::from(e.clone()))
 }
 
+/// The skip an origin's read gives when the origin is not broken, or `None`.
+/// OBS's 404 for the origin: the package is not on OBS. An `_aggregate` and a
+/// package with no files each have their own text.
+pub(super) fn own_skip(origin: &str, read: &Result<String, update::ReadError>) -> Option<String> {
+    match read {
+        Err(update::ReadError::Absent(why)) => {
+            Some(format!("the origin {origin} is not on OBS: {why}"))
+        }
+        Err(e @ (update::ReadError::Aggregate(_) | update::ReadError::NoFiles)) => {
+            Some(e.to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Whether a failed read may pass on a retry: OBS did not answer, rather than
 /// the origin being broken or absent.
 pub(super) fn is_transient(read: &Result<String, update::ReadError>) -> bool {
@@ -34,14 +49,9 @@ pub(super) fn settled_as_broken_origin(item: &Item, ctx: &Ctx<'_>, report: &mut 
     let Some(reason) = unreadable_origin(&read) else {
         return false;
     };
-    // OBS's 404 for the origin: the package is not on OBS, which is a skip
-    // with that cause, not a broken origin for the maintainer.
-    let absent = match &read {
-        Err(update::ReadError::Absent(why)) => Some(why),
-        _ => None,
-    };
-    if let Some(why) = absent {
-        let why = format!("the origin {} is not on OBS: {why}", item.origin);
+    // An origin OBS says is not there, an _aggregate, or one with no files is
+    // not broken: it is skipped with its own reason.
+    if let Some(why) = own_skip(&item.origin, &read) {
         ctx.warn(format!("{}: {why}", item.pkg));
         report.results.push(ItemResult {
             item: item.clone(),

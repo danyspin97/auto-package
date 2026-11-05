@@ -63,3 +63,17 @@ fn an_origin_obs_says_is_not_there_is_skipped_as_not_on_obs() {
     );
     assert!(!is_transient(&read));
 }
+
+#[test]
+fn an_aggregate_or_an_empty_origin_is_skipped_with_its_own_text() {
+    let report = "aggregate of Base:X/foo: nothing to update here; update it in openSUSE:Factory";
+    let read = Err(update::ReadError::Aggregate(report.to_string()));
+    assert_eq!(own_skip("Base:X", &read), Some(report.to_string()));
+    assert!(!is_transient(&read));
+    let read = Err(update::ReadError::NoFiles);
+    assert_eq!(
+        own_skip("Base:X", &read),
+        Some("the package has no files on OBS".to_string())
+    );
+    assert_eq!(own_skip("Base:X", &Ok("Name: foo\n".to_string())), None);
+}
