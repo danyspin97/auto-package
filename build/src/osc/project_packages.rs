@@ -177,8 +177,7 @@ fn osc_ls(project: &str, emit: Emit<'_>) -> Result<String, Error> {
             "refusing to use project {project:?}: not a valid OBS name"
         )));
     }
-    let out = proc::capture_with_timeout(
-        "osc",
+    let out = capture_query(
         &["ls", project],
         &anywhere(),
         emit,

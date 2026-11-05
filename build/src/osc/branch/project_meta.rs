@@ -160,8 +160,7 @@ pub fn parse_project_info(xml: &str) -> ProjectInfo {
 pub fn get_project_meta(project: &str, emit: Emit<'_>) -> Result<Option<String>, Error> {
     check_obs_name("project", project)?;
     let cmd = format!("meta prj {project}");
-    let out = proc::capture_with_timeout(
-        "osc",
+    let out = capture_query(
         &["meta", "prj", project],
         &anywhere(),
         emit,

@@ -20,6 +20,8 @@ pub use error::*;
 
 mod failure;
 #[cfg(test)]
+mod query_retry_tests;
+#[cfg(test)]
 mod transient_text_tests;
 pub use failure::*;
 

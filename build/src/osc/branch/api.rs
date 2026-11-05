@@ -32,8 +32,14 @@ pub(super) fn api_call_within(
         args.extend(["-d".into(), d.into()]);
     }
     args.push(path.into());
-    proc::capture_with_timeout("osc", &args, &anywhere(), emit, timeout)
-        .map_err(during(format!("api {path}")))
+    let run = |args: &[String]| {
+        if api_is_retried(method, data) {
+            capture_query(args, &anywhere(), emit, timeout)
+        } else {
+            proc::capture_with_timeout("osc", args, &anywhere(), emit, timeout)
+        }
+    };
+    run(&args).map_err(during(format!("api {path}")))
 }
 
 /// `GET path` through `osc api`, with a failure reported as an error.

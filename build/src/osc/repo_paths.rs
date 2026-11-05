@@ -64,8 +64,7 @@ pub fn get_project_build_paths(project: &str, emit: Emit<'_>) -> Result<Vec<Buil
         if attempt > 0 {
             sleep_interruptible(Duration::from_secs(5 * attempt));
         }
-        match proc::capture_with_timeout(
-            "osc",
+        match capture_query(
             &["meta", "prj", project],
             &anywhere(),
             emit,
@@ -163,8 +162,7 @@ pub(super) fn parse_project_repo_paths(xml: &str) -> Vec<(String, String)> {
 /// `osc meta prj` call itself failed (project doesn't exist, auth broken, ...).
 pub fn project_has_repositories(project: &str, emit: Emit<'_>) -> Result<bool, Error> {
     check_obs_name("project", project)?;
-    let out = proc::capture_with_timeout(
-        "osc",
+    let out = capture_query(
         &["meta", "prj", project],
         &anywhere(),
         emit,

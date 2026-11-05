@@ -207,8 +207,7 @@ pub(super) fn get_build_status_from_results_table(
     check_obs_name("arch", arch)?;
     let cmd = format!("results --verbose -r {repo} -a {arch} {project} {pkg_name}");
     // `--verbose` is what carries a `finished` result's verdict.
-    let out = proc::capture_with_timeout(
-        "osc",
+    let out = capture_query(
         &[
             "results",
             "--verbose",
