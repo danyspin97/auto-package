@@ -1,6 +1,7 @@
+use super::check_pool;
 use super::*;
-use std::cell::RefCell;
-use std::collections::HashSet;
+use std::cell::Cell;
+use std::collections::{BTreeSet, HashSet};
 
 /// Fetch and classify one package. Pure given the injected lookups —
 /// factored out of [`plan`] so it is directly testable without talking to
@@ -421,19 +422,21 @@ pub fn plan_each(
     // not the actual `demo.spec`.
     // A sibling check reads the specs of the other packages too, so a spec is
     // read once for the whole run.
-    let read_specs: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    let read_specs: SpecCells = Mutex::new(HashMap::new());
+    // The packages whose spec this plan read and stashed (see `stash_spec`).
+    let stashed: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
     let fetch_spec = |rpm_name: &str| {
-        if let Some(text) = read_specs.borrow().get(rpm_name) {
-            return Ok(text.clone());
-        }
-        let spec = spec_for_package(project, rpm_name, emit);
-        stash_spec(project, rpm_name, spec.as_ref().ok());
-        if let Ok(text) = &spec {
-            read_specs
-                .borrow_mut()
-                .insert(rpm_name.to_string(), text.clone());
-        }
-        spec
+        read_once(&read_specs, rpm_name, || {
+            let spec = spec_for_package(project, rpm_name, emit);
+            stash_spec(project, rpm_name, spec.as_ref().ok());
+            if spec.is_ok() {
+                stashed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(rpm_name.to_string());
+            }
+            spec
+        })
     };
     let fetch_pypi_latest = |pypi_name: &str| {
         upstream_cache::lookup(&format!("pypi:{pypi_name}"), || {
@@ -474,29 +477,62 @@ pub fn plan_each(
     let (hits_before, fetched_before) = upstream_cache::stats();
     let fetch_has_service = |pkg: &str| suse::project_has_service(project, pkg, emit);
     let fetch_release_date = |url: &str| snapshot::cached_release_date(url);
-    let lookups = Lookups {
-        fetch_pypi_latest: &fetch_pypi_latest,
-        fetch_repo_latest: &fetch_repo_latest,
-        fetch_index_latest: &fetch_index_latest,
-        fetch_repology_latest: &fetch_repology_latest,
-        fetch_gem_latest: &fetch_gem_latest,
-        fetch_cpan_latest: &fetch_cpan_latest,
-        fetch_service: &fetch_service,
-        fetch_has_service: &fetch_has_service,
-        fetch_release_date: &fetch_release_date,
-        fetch_repo_in_series: &fetch_repo_in_series,
-    };
-
     let packages: HashSet<String> = sources.iter().cloned().collect();
+    // The packages are checked `check_jobs()` at a time. `Lookups` holds
+    // closures that are not `Sync`, so each check builds its own from the
+    // shared ones above.
+    let check = |n: &str| {
+        let lookups = Lookups {
+            fetch_pypi_latest: &fetch_pypi_latest,
+            fetch_repo_latest: &fetch_repo_latest,
+            fetch_index_latest: &fetch_index_latest,
+            fetch_repology_latest: &fetch_repology_latest,
+            fetch_gem_latest: &fetch_gem_latest,
+            fetch_cpan_latest: &fetch_cpan_latest,
+            fetch_service: &fetch_service,
+            fetch_has_service: &fetch_has_service,
+            fetch_release_date: &fetch_release_date,
+            fetch_repo_in_series: &fetch_repo_in_series,
+        };
+        classify_in_project(n, &fetch_spec, &lookups, &packages)
+    };
     let total = names.len();
-    for (i, n) in names.iter().enumerate() {
+    let jobs = check_pool::check_jobs();
+    // With a pool a package is reported when its answer is handed on, so the
+    // word is "checked", not "checking".
+    let progress = |i: usize| {
+        let verb = if jobs > 1 { "checked" } else { "checking" };
         emit.reporter.report(&Event::Progress {
             step: emit.step,
-            message: format!("checking {n} ({}/{total})", i + 1),
+            message: format!("{verb} {} ({}/{total})", names[i], i + 1),
         });
-        if !on(classify_in_project(n, &fetch_spec, &lookups, &packages)) {
-            break;
-        }
+    };
+    // A check that panics is one package's failed check, not the end of the run.
+    let panicked = |name: &str, why: &str| {
+        skipped(
+            name,
+            SkipReason::LookupFailed {
+                ecosystem_tag: "check".into(),
+                name: name.into(),
+                error: format!("the check panicked: {why}"),
+            },
+        )
+    };
+    let handed = Mutex::new(BTreeSet::new());
+    let stopped = Cell::new(false);
+    check_pool::check_in_order(&names, jobs, &check, &panicked, &progress, &mut |i, c| {
+        handed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(names[i].clone());
+        let keep = on(c);
+        stopped.set(!keep);
+        keep
+    });
+    if stopped.get() {
+        let handed = handed.into_inner().unwrap_or_else(|e| e.into_inner());
+        let stashed = stashed.into_inner().unwrap_or_else(|e| e.into_inner());
+        discard_stashes(project, &stashed, &handed);
     }
     upstream_cache::flush();
     let (hits, fetched) = upstream_cache::stats();
@@ -511,36 +547,6 @@ pub fn plan_each(
         });
     }
     Ok(())
-}
-
-/// Specs a plan has just read, by (project, package), for [`planned_spec`].
-pub(super) static PLANNED_SPECS: Mutex<Option<HashMap<(String, String), String>>> =
-    Mutex::new(None);
-
-pub(super) fn stash_spec(project: &str, pkg: &str, spec: Option<&String>) {
-    if let Some(spec) = spec {
-        PLANNED_SPECS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_or_insert_with(HashMap::new)
-            .insert((project.to_string(), pkg.to_string()), spec.clone());
-    }
-}
-
-/// [`spec_for_package`] for a project that is only read during this run: the
-/// spec a plan fetched a moment ago is handed over, once, instead of fetching
-/// it again. Taken rather than kept, so a later read, after the package has
-/// been changed, always asks OBS.
-pub fn planned_spec(project: &str, pkg: &str, emit: Emit<'_>) -> Result<String, ReadError> {
-    let kept = PLANNED_SPECS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_mut()
-        .and_then(|m| m.remove(&(project.to_string(), pkg.to_string())));
-    match kept {
-        Some(spec) => Ok(spec),
-        None => spec_for_package(project, pkg, emit),
-    }
 }
 
 #[cfg(test)]

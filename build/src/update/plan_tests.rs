@@ -431,3 +431,51 @@ fn a_series_pin_takes_its_newest_without_a_repology_check() {
         Decision::Update { ref new_version, .. } if new_version == "3.11.9"
     ));
 }
+
+#[test]
+fn a_stopped_plan_forgets_the_specs_it_did_not_hand_on() {
+    use super::super::planned_specs::{PLANNED_SPECS, discard_stashes, stash_spec};
+    use std::collections::BTreeSet;
+    let project = "stash-test:discard-on-stop";
+    let key = |pkg: &str| (project.to_string(), pkg.to_string());
+    let spec = "Name: kept\n".to_string();
+    stash_spec(project, "kept", Some(&spec));
+    stash_spec(project, "dropped", Some(&spec));
+    let read = BTreeSet::from(["kept".to_string(), "dropped".to_string()]);
+    let handed = BTreeSet::from(["kept".to_string()]);
+    discard_stashes(project, &read, &handed);
+    let guard = PLANNED_SPECS.lock().unwrap_or_else(|e| e.into_inner());
+    let m = guard.as_ref().expect("the stashes were made");
+    assert!(m.contains_key(&key("kept")));
+    assert!(!m.contains_key(&key("dropped")));
+}
+
+#[test]
+fn a_spec_is_read_once_however_many_callers_ask_at_once() {
+    use super::super::planned_specs::{SpecCells, read_once};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let cells: SpecCells = Mutex::new(HashMap::new());
+    let reads = AtomicUsize::new(0);
+    let answers: Vec<Result<String, String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    read_once(&cells, "pkg", || {
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        Ok("Name: pkg\n".to_string())
+                    })
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert!(answers.iter().all(|a| a.as_deref() == Ok("Name: pkg\n")));
+    // A read that failed is not kept.
+    let failed: Result<String, String> = read_once(&cells, "other", || Err("no spec".into()));
+    assert!(failed.is_err());
+    let ok = read_once(&cells, "other", || Ok::<_, String>("Name: other\n".into()));
+    assert_eq!(ok.as_deref(), Ok("Name: other\n"));
+}

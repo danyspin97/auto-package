@@ -478,10 +478,11 @@ mod tests {
 
     #[test]
     fn a_run_asks_a_failed_repology_name_and_its_python_colon_once() {
+        use crate::upstream_flights::{InFlight, ask_once};
         let failed = Mutex::new(std::collections::BTreeMap::new());
         let asked = std::cell::RefCell::new(Vec::new());
         let ask = |key: &str, project: &str| {
-            upstream_cache::ask_once(&failed, key, || {
+            ask_once(&failed, &InFlight::new(), key, || {
                 asked.borrow_mut().push(project.to_string());
                 Err("unknown project".to_string())
             })

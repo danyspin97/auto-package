@@ -38,7 +38,7 @@ pub fn state_cached(
         .map_err(|e| format!("the kept answer is not a request state: {e}"))?;
     if status.state == PrState::Merged {
         let kept = serde_json::to_string(&status).map_err(|e| e.to_string())?;
-        let _ = lookup_with_ttl(&final_key, MERGED_TTL, true, || Ok(kept));
+        let _ = lookup_with_ttl(&final_key, MERGED_TTL, true, || Ok(kept.clone()));
     }
     Ok(status)
 }

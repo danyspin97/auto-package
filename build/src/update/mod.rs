@@ -31,6 +31,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 mod candidates;
+mod check_pool;
+pub use check_pool::set_check_jobs;
 #[cfg(test)]
 mod helpers;
 #[cfg(test)]
@@ -41,6 +43,8 @@ mod pins;
 mod requested;
 pub use requested::{AlreadyRequested, clean_version};
 mod plan;
+mod planned_specs;
+pub use planned_specs::*;
 mod read;
 #[cfg(test)]
 mod reading;
