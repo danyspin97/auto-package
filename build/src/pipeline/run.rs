@@ -110,7 +110,14 @@ fn put_back_or_confirm(
 ) -> Result<(), String> {
     match osc::restore_baseline_outcome(baseline, &expected_checkout(config), Emit::run(reporter))?
     {
-        osc::Restored::Undone => {}
+        osc::Restored::Undone => reporter.report(&Event::Warning {
+            step: None,
+            message: format!(
+                "{}: restored the OBS baseline of an earlier failed attempt: the attempt is \
+                 undone on OBS, and the run continues",
+                config.rpm_name
+            ),
+        }),
         osc::Restored::NothingWritten => reporter.report(&Event::Warning {
             step: None,
             message: format!(
