@@ -182,7 +182,7 @@ pub(crate) fn is_patch_comment(line: &str) -> bool {
 
 /// The lines of a patch file before its diff: up to a `---` line (the end of an
 /// mbox commit message), an `Index:` or `diff --git` line, or a `---`/`+++` pair.
-fn header_lines(text: &str) -> Vec<&str> {
+pub(crate) fn header_lines(text: &str) -> Vec<&str> {
     let lines: Vec<&str> = text.lines().collect();
     let end = lines
         .iter()
@@ -199,7 +199,7 @@ fn header_lines(text: &str) -> Vec<&str> {
 }
 
 /// The value of the header field `key` (`Subject`, `Upstream`).
-fn header_field<'a>(header: &[&'a str], key: &str) -> Option<&'a str> {
+pub(crate) fn header_field<'a>(header: &[&'a str], key: &str) -> Option<&'a str> {
     header.iter().find_map(|line| {
         let (k, v) = line.split_once(':')?;
         k.trim().eq_ignore_ascii_case(key).then(|| v.trim())

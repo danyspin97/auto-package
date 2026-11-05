@@ -394,7 +394,8 @@ mod network_fetch;
 mod network_fetch_tests;
 mod patch_rules;
 pub(crate) use patch_rules::{
-    declared_patches, header_problems, is_patch_comment, names_in_bullet,
+    declared_patches, header_field, header_lines, header_problems, is_patch_comment,
+    names_in_bullet,
 };
 pub(crate) use patch_rules_content::{patch_delta, source_only_problems};
 pub(crate) use patch_rules_spec::spec_route_problems;

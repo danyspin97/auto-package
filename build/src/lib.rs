@@ -28,6 +28,7 @@ pub mod obs_xml;
 pub mod osc;
 pub mod package_notes;
 pub mod patch_check;
+pub mod patch_provenance;
 pub mod pipeline;
 pub mod proc;
 pub mod quality;
