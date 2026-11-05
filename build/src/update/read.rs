@@ -35,7 +35,7 @@ impl From<ReadError> for SkipReason {
             ReadError::NoSpec => SkipReason::NoSpec,
             ReadError::Failed(why) => SkipReason::ReadFailed(why),
             ReadError::NeedsMaintainer(why) => SkipReason::NeedsMaintainer(why),
-            ReadError::Absent(why) => SkipReason::ReadFailed(why),
+            ReadError::Absent(why) => SkipReason::NotOnObs(why),
         }
     }
 }

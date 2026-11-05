@@ -344,5 +344,10 @@ mod reading {
             SkipReason::NoSpec.to_string(),
             SkipReason::ReadFailed("x".into()).to_string()
         );
+        // A 404 is a skip of its own, not a failed read that ends the run.
+        assert_eq!(
+            SkipReason::from(ReadError::Absent("x".into())),
+            SkipReason::NotOnObs("x".into())
+        );
     }
 }

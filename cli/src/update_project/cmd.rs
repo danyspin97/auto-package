@@ -381,9 +381,19 @@ pub(super) fn cmd_update_project(
         for name in a.only.iter().filter(|n| !plan.names.contains(n)) {
             ctx.warn(format!("{name}: matched no package"));
         }
+        if !plan.unreadable.is_empty() {
+            // Packages already branched and prepared are still built before the error is returned.
+            if !a.dry_run {
+                build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
+            }
+            return Err(obs_unavailable(&plan.unreadable, &a.source));
+        }
         if plan.total() == 0 {
             ctx.say(format!("no matching packages in {}", a.source));
             return none_checked(&a.only, false);
+        }
+        if plan.only_absent() {
+            return none_checked(&a.only, true);
         }
         if plan.n_update == 0 {
             ctx.say("nothing to update");

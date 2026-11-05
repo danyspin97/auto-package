@@ -85,6 +85,8 @@ pub enum SkipReason {
     NoSpec,
     /// OBS could not be asked or did not answer, after the retries.
     ReadFailed(String),
+    /// OBS answered 404: the package is not there. Not a failed read.
+    NotOnObs(String),
     /// The package is a `_link` whose target OBS no longer has: only the
     /// maintainer can decide what happens to it. The text says why.
     NeedsMaintainer(String),
@@ -213,6 +215,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::AlreadyRequested(r) => r.fmt(f),
             SkipReason::NoSpec => write!(f, "the package has no spec file"),
             SkipReason::ReadFailed(why) => write!(f, "the spec could not be read: {why}"),
+            SkipReason::NotOnObs(why) => write!(f, "the package is not on OBS: {why}"),
             SkipReason::NeedsMaintainer(why) => write!(f, "needs the maintainer: {why}"),
             SkipReason::NotAnRpmVersion { latest } if is_dated(latest) => write!(
                 f,

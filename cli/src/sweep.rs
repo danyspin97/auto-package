@@ -12,12 +12,17 @@ pub(super) struct PlanReport {
     n_found_only: usize,
     pub(super) n_uptodate: usize,
     n_skipped: usize,
+    /// The skipped packages OBS answered 404 for: the subset of `n_skipped`.
+    n_not_on_obs: usize,
     /// The packages stopped for the maintainer (a `_link` whose target is
     /// gone), each with its reason.
     pub(super) maintainer: Vec<String>,
     /// The rpm name of every package the sweep found, for the `--only` names
     /// that matched none.
     pub(super) names: Vec<String>,
+    /// The packages whose spec OBS failed to answer, each with the reason: they
+    /// were not compared, so the run is incomplete.
+    pub(super) unreadable: Vec<String>,
 }
 
 impl PlanReport {
@@ -32,6 +37,10 @@ impl PlanReport {
             Decision::Skipped(SkipReason::NeedsMaintainer(why)) => {
                 self.maintainer.push(format!("{}: {why}", c.rpm_name));
             }
+            Decision::Skipped(SkipReason::ReadFailed(why)) => {
+                self.unreadable.push(format!("{}: {why}", c.rpm_name));
+            }
+            Decision::Skipped(SkipReason::NotOnObs(_)) => self.n_not_on_obs += 1,
             Decision::Skipped(reason @ SkipReason::RepologyDisagrees { .. }) => {
                 self.maintainer.push(format!("{}: {reason}", c.rpm_name));
             }
@@ -88,6 +97,13 @@ impl PlanReport {
 
     pub(super) fn total(&self) -> usize {
         self.n_update + self.n_found_only + self.n_uptodate + self.n_skipped
+    }
+
+    /// Whether every package the sweep found is absent from OBS, or it found
+    /// none: nothing a run could check was there. A package skipped on purpose
+    /// (no spec, a maintainer's call) is a package found.
+    pub(super) fn only_absent(&self) -> bool {
+        self.total() == self.n_not_on_obs
     }
 
     pub(super) fn finish(&self, reporter: &(dyn Reporter + Send + Sync)) {
@@ -219,5 +235,66 @@ pub(super) fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts
         | FailureKind::NoFix
         | FailureKind::FixDoesNotApply => false,
         _ => rounds < max_attempts,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlanReport;
+    use ap_build::update::{Candidate, Decision, SkipReason};
+    use ap_core::sink::NullReporter;
+
+    fn skipped(name: &str, reason: SkipReason) -> Candidate {
+        Candidate {
+            rpm_name: name.to_string(),
+            decision: Decision::Skipped(reason),
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_failed_read_is_unreadable_and_a_404_is_not_on_obs() {
+        let mut plan = PlanReport::default();
+        plan.add(
+            &skipped("a", SkipReason::ReadFailed("listing failed".into())),
+            &NullReporter,
+        );
+        plan.add(
+            &skipped("b", SkipReason::NotOnObs("gone".into())),
+            &NullReporter,
+        );
+        plan.add(&skipped("c", SkipReason::NoSpec), &NullReporter);
+        assert_eq!(plan.unreadable, ["a: listing failed"]);
+        assert_eq!(plan.n_not_on_obs, 1);
+        assert_eq!(plan.total(), 3);
+        // NoSpec is a package found on purpose, so the run is not all-absent.
+        assert!(!plan.only_absent());
+    }
+
+    #[test]
+    fn a_sweep_that_found_only_absent_or_no_packages_is_not_a_checked_one() {
+        assert!(PlanReport::default().only_absent());
+        let absent = PlanReport {
+            n_skipped: 2,
+            n_not_on_obs: 2,
+            ..Default::default()
+        };
+        assert!(absent.only_absent());
+        let mixed = PlanReport {
+            n_skipped: 2,
+            n_not_on_obs: 1,
+            ..Default::default()
+        };
+        assert!(!mixed.only_absent());
+        let skipped_on_purpose = PlanReport {
+            n_skipped: 1,
+            ..Default::default()
+        };
+        assert!(!skipped_on_purpose.only_absent());
+        let found = PlanReport {
+            n_update: 1,
+            ..Default::default()
+        };
+        assert!(!found.only_absent());
     }
 }
