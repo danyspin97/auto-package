@@ -47,17 +47,18 @@ pub fn planned_spec(project: &str, pkg: &str, emit: Emit<'_>) -> Result<String, 
     }
 }
 
-/// The spec text kept for each package a plan reads, one cell per package.
-pub(super) type SpecCells = Mutex<HashMap<String, Arc<Mutex<Option<String>>>>>;
+/// The answer kept for each package a plan reads, one cell per package.
+pub(super) type SpecCells = Mutex<HashMap<String, Arc<Mutex<Option<Result<String, ReadError>>>>>>;
 
-/// `read` gives the spec of `key`, unless one is already kept for it. Callers
-/// for one key wait for each other's read, so the spec is read once; only a
-/// read that succeeded is kept, so a failed one is read again.
-pub(super) fn read_once<E>(
+/// `read` gives the answer for `key`, unless one is already kept for it. Callers
+/// for one key wait for each other's read, so OBS is asked once. Every answer is
+/// kept except a failed read ([`ReadError::Failed`]: OBS did not answer, or the
+/// run was interrupted), which the next caller reads again.
+pub(super) fn read_once(
     cells: &SpecCells,
     key: &str,
-    read: impl FnOnce() -> Result<String, E>,
-) -> Result<String, E> {
+    read: impl FnOnce() -> Result<String, ReadError>,
+) -> Result<String, ReadError> {
     let cell = cells
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -65,12 +66,12 @@ pub(super) fn read_once<E>(
         .or_default()
         .clone();
     let mut kept = cell.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(text) = kept.as_ref() {
-        return Ok(text.clone());
+    if let Some(answer) = kept.as_ref() {
+        return answer.clone();
     }
-    let read = read();
-    if let Ok(text) = &read {
-        *kept = Some(text.clone());
+    let answer = read();
+    if !matches!(answer, Err(ReadError::Failed(_))) {
+        *kept = Some(answer.clone());
     }
-    read
+    answer
 }

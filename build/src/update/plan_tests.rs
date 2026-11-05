@@ -457,7 +457,7 @@ fn a_spec_is_read_once_however_many_callers_ask_at_once() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let cells: SpecCells = Mutex::new(HashMap::new());
     let reads = AtomicUsize::new(0);
-    let answers: Vec<Result<String, String>> = std::thread::scope(|scope| {
+    let answers: Vec<Result<String, ReadError>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..8)
             .map(|_| {
                 scope.spawn(|| {
@@ -473,9 +473,31 @@ fn a_spec_is_read_once_however_many_callers_ask_at_once() {
     });
     assert_eq!(reads.load(Ordering::SeqCst), 1);
     assert!(answers.iter().all(|a| a.as_deref() == Ok("Name: pkg\n")));
-    // A read that failed is not kept.
-    let failed: Result<String, String> = read_once(&cells, "other", || Err("no spec".into()));
-    assert!(failed.is_err());
-    let ok = read_once(&cells, "other", || Ok::<_, String>("Name: other\n".into()));
+}
+
+#[test]
+fn a_permanent_read_answer_is_kept_and_a_failed_read_is_read_again() {
+    use super::super::planned_specs::{SpecCells, read_once};
+    use std::sync::Mutex;
+    let cells: SpecCells = Mutex::new(HashMap::new());
+    // No spec, and a package OBS says is not there: asked once, then kept.
+    let mut asked = 0;
+    for _ in 0..3 {
+        let no_spec = read_once(&cells, "bare", || {
+            asked += 1;
+            Err(ReadError::NoSpec)
+        });
+        assert_eq!(no_spec, Err(ReadError::NoSpec));
+        let absent = read_once(&cells, "gone", || {
+            asked += 1;
+            Err(ReadError::Absent("Package not found: gone".into()))
+        });
+        assert!(matches!(absent, Err(ReadError::Absent(_))));
+    }
+    assert_eq!(asked, 2);
+    // A failed read is not kept: the next caller asks OBS again.
+    let failed = read_once(&cells, "other", || Err(ReadError::Failed("timeout".into())));
+    assert!(matches!(failed, Err(ReadError::Failed(_))));
+    let ok = read_once(&cells, "other", || Ok("Name: other\n".into()));
     assert_eq!(ok.as_deref(), Ok("Name: other\n"));
 }
