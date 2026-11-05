@@ -42,6 +42,7 @@ mod lookup_macro_tests;
 mod lookups;
 mod pins;
 mod requested;
+mod siblings;
 pub use requested::{AlreadyRequested, clean_version};
 mod plan;
 mod planned_specs;

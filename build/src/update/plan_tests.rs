@@ -3,7 +3,6 @@
 //! package that takes its next major.
 
 use super::*;
-use std::collections::HashSet;
 
 /// Lookups that answer `latest` for every kind of source, and no release of a
 /// series of a forge repository unless `in_series` names one.
@@ -67,8 +66,10 @@ fn classify_one(
     project: &[&str],
     latest: &'static str,
 ) -> Decision {
-    let project: HashSet<String> = project.iter().map(|p| p.to_string()).collect();
-    classify_in_project(rpm_name, &specs(table), &answers(latest), &project).decision
+    let project: Vec<String> = project.iter().map(|p| p.to_string()).collect();
+    let read = specs(table);
+    let siblings = ProjectSiblings::new(project.clone(), 1, &read);
+    classify_in_project(rpm_name, &read, &answers(latest), &siblings).decision
 }
 
 #[test]
@@ -257,7 +258,7 @@ fn a_pinned_series_takes_the_newest_release_of_its_series() {
         "fmt-9",
         &specs(table),
         &lookups,
-        &project.map(String::from).into(),
+        &ProjectSiblings::new(project.map(String::from), 1, &specs(table)),
     );
     assert!(matches!(
         c.decision,
@@ -268,7 +269,7 @@ fn a_pinned_series_takes_the_newest_release_of_its_series() {
         "fmt-9",
         &specs(table),
         &lookups,
-        &project.map(String::from).into(),
+        &ProjectSiblings::new(project.map(String::from), 1, &specs(table)),
     );
     assert!(matches!(c.decision, Decision::UpToDate { .. }));
 }
@@ -281,7 +282,7 @@ fn a_pinned_series_on_a_source_without_a_tag_list_is_left() {
          Source:         https://downloads.example.org/fmt-%{version}.tar.gz\n",
     )];
     let lookups = answers_in("11.0.2", Some("9.1.2"));
-    let c = classify_in_project("fmt-9", &specs(table), &lookups, &HashSet::new());
+    let c = classify_in_project("fmt-9", &specs(table), &lookups, &ProjectSiblings::none());
     assert!(matches!(
         c.decision,
         Decision::Skipped(SkipReason::OtherSeries { ref series, .. }) if series == "9"
@@ -298,7 +299,7 @@ fn forged(name: &str, version: &str, repo: &str) -> String {
 
 /// The decision for `rpm_name`, whose spec is `spec`, in a project of `project`.
 fn decide(rpm_name: &str, spec: String, project: &[&str], lookups: &Lookups<'_>) -> Decision {
-    let project: HashSet<String> = project.iter().map(|p| p.to_string()).collect();
+    let project: Vec<String> = project.iter().map(|p| p.to_string()).collect();
     let fetch = move |name: &str| {
         if name == rpm_name {
             Ok(spec.clone())
@@ -306,7 +307,8 @@ fn decide(rpm_name: &str, spec: String, project: &[&str], lookups: &Lookups<'_>)
             Err(ReadError::NoSpec)
         }
     };
-    classify_in_project(rpm_name, &fetch, lookups, &project).decision
+    let siblings = ProjectSiblings::new(project.clone(), 1, &fetch);
+    classify_in_project(rpm_name, &fetch, lookups, &siblings).decision
 }
 
 #[test]

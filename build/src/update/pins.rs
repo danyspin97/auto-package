@@ -1,8 +1,8 @@
 //! The series a package is pinned to by its name, and the held-back check that
 //! keeps a candidate outside that series.
 
+use super::siblings::ProjectSiblings;
 use super::*;
-use std::collections::HashSet;
 
 /// The series a package is pinned to by its name: `fmt-9`, `boost-1.85` and
 /// `wlroots-0_15` name `[9]`, `[1, 85]` and `[0, 15]`. Without a dash the
@@ -95,35 +95,11 @@ pub(super) fn name_series(rpm_name: &str, version: &str) -> Option<Vec<u64>> {
 
 /// The git forge repository a package's source is, from its `Source:` and
 /// `Url:` after the macros are expanded (`https://github.com/influxdata/influxdb`).
-fn upstream_of(header: &spec::Header) -> Option<String> {
+pub(super) fn upstream_of(header: &spec::Header) -> Option<String> {
     [header.expanded_source.as_deref(), header.url.as_deref()]
         .into_iter()
         .flatten()
         .find_map(super::candidates::git_repo_url)
-}
-
-/// The project's other packages whose source is the same forge repository as
-/// `upstream`, read from their specs: `(name, packaged version)`. This finds a
-/// sibling whatever its name (`influxdb2` for `influxdb`, `zookeeper-kit` for
-/// `zookeeper`). A sibling whose spec cannot be read says nothing and is left
-/// out. Flavors (`boost:base`) are not packages of their own.
-fn sibling_versions<SpecLookup>(
-    rpm_name: &str,
-    upstream: &str,
-    project: &HashSet<String>,
-    fetch_spec: &SpecLookup,
-) -> Vec<(String, String)>
-where
-    SpecLookup: Fn(&str) -> Result<String, ReadError>,
-{
-    project
-        .iter()
-        .filter(|s| s.as_str() != rpm_name && !s.contains(':'))
-        .filter_map(|s| {
-            let header = spec::parse_header(&fetch_spec(s).ok()?)?;
-            (upstream_of(&header).as_deref() == Some(upstream)).then(|| (s.clone(), header.version))
-        })
-        .collect()
 }
 
 /// Whether `rpm_name` is the spec's `name` with a series after it: `mariadb-55`
@@ -160,16 +136,12 @@ pub(super) enum Held {
 /// because its name is an old series of its spec's Name (`mariadb-55`) or a
 /// sibling is on a newer series. A plain package's jump of two majors, or into
 /// a series a sibling is on, is left to the maintainer.
-pub(super) fn held_back<SpecLookup>(
+pub(super) fn held_back(
     rpm_name: &str,
     header: &spec::Header,
     latest: &str,
-    fetch_spec: &SpecLookup,
-    project: &HashSet<String>,
-) -> Option<Held>
-where
-    SpecLookup: Fn(&str) -> Result<String, ReadError>,
-{
+    siblings: &ProjectSiblings<'_>,
+) -> Option<Held> {
     let packaged = header.version.as_str();
     if let Some(series) = series_of(rpm_name, packaged).or_else(|| name_series(rpm_name, packaged))
     {
@@ -199,7 +171,12 @@ where
     let own_pair = series_pair(packaged);
     let latest_pair = series_pair(latest);
     let related = match upstream_of(header) {
-        Some(upstream) => sibling_versions(rpm_name, &upstream, project, fetch_spec),
+        Some(upstream) => match siblings.related(rpm_name, &upstream) {
+            Ok(related) => related,
+            // A package that could not be read might be a sibling that holds this
+            // one back, so the check cannot release it.
+            Err(why) => return Some(Held::Stop(SkipReason::ReadFailed(why))),
+        },
         None => Vec::new(),
     };
     // A sibling already on the series this would move to keeps it.

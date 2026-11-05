@@ -1,8 +1,9 @@
 use super::check_pool;
 use super::host_gate;
+use super::siblings::ProjectSiblings;
 use super::*;
 use std::cell::Cell;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 /// Fetch and classify one package. Pure given the injected lookups —
 /// factored out of [`plan`] so it is directly testable without talking to
@@ -15,17 +16,17 @@ pub fn classify<SpecLookup>(
 where
     SpecLookup: Fn(&str) -> Result<String, ReadError>,
 {
-    classify_in_project(rpm_name, fetch_spec, lookups, &HashSet::new())
+    classify_in_project(rpm_name, fetch_spec, lookups, &ProjectSiblings::none())
 }
 
-/// [`classify`] for a package of a project: `project` lists every package of
+/// [`classify`] for a package of a project: `siblings` holds every package of
 /// it, so a package can be held to its major by a sibling that is on a newer
 /// series (`influxdb` beside `influxdb2`).
 pub fn classify_in_project<SpecLookup>(
     rpm_name: &str,
     fetch_spec: &SpecLookup,
     lookups: &Lookups<'_>,
-    project: &HashSet<String>,
+    siblings: &ProjectSiblings<'_>,
 ) -> Candidate
 where
     SpecLookup: Fn(&str) -> Result<String, ReadError>,
@@ -187,7 +188,7 @@ where
     let mut notes = Vec::new();
     let decision = match compare_versions(&latest, tag_version, scheme) {
         pypi::VersionCompare::Newer => {
-            match held_back(rpm_name, &header, &latest, fetch_spec, project) {
+            match held_back(rpm_name, &header, &latest, siblings) {
                 None => {
                     let update = Decision::Update {
                         ecosystem,
@@ -496,7 +497,11 @@ pub fn plan_each(
     let (hits_before, fetched_before) = upstream_cache::stats();
     let fetch_has_service = |pkg: &str| suse::project_has_service(project, pkg, emit);
     let fetch_release_date = |url: &str| snapshot::cached_release_date(url);
-    let packages: HashSet<String> = sources.iter().cloned().collect();
+    let siblings = ProjectSiblings::new(
+        sources.iter().cloned(),
+        check_pool::check_jobs(),
+        &fetch_spec,
+    );
     // The packages are checked `check_jobs()` at a time. `Lookups` holds
     // closures that are not `Sync`, so each check builds its own from the
     // shared ones above.
@@ -513,7 +518,7 @@ pub fn plan_each(
             fetch_release_date: &fetch_release_date,
             fetch_repo_in_series: &fetch_repo_in_series,
         };
-        classify_in_project(n, &fetch_spec, &lookups, &packages)
+        classify_in_project(n, &fetch_spec, &lookups, &siblings)
     };
     let total = names.len();
     let jobs = check_pool::check_jobs();
@@ -545,6 +550,9 @@ pub fn plan_each(
             .unwrap_or_else(|e| e.into_inner())
             .insert(names[i].clone());
         let keep = on(c);
+        if !keep {
+            siblings.abandon();
+        }
         stopped.set(!keep);
         keep
     });
