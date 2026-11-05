@@ -179,6 +179,19 @@ where
             Held::Series(series)
         });
     }
+    // A date is not a major: two dates compare as dates, and the plain update
+    // below takes the newer one. A number upstream has moved to dates is a
+    // scheme nobody has mapped, which the maintainer decides. Every other pair
+    // keeps the major rule.
+    match (is_dated(packaged), is_dated(latest)) {
+        (true, true) => return None,
+        (false, true) => {
+            return Some(Held::Stop(SkipReason::NotAnRpmVersion {
+                latest: latest.to_string(),
+            }));
+        }
+        (true, false) | (false, false) => {}
+    }
     let own = major_key(packaged);
     if own.is_empty() {
         return None;

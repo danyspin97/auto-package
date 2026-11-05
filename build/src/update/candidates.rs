@@ -79,13 +79,38 @@ pub enum Decision {
     Skipped(SkipReason),
 }
 
-/// Whether a version carries a calendar date (`2020-11-13`): upstream
-/// numbers its releases by day, not by a number of the package's kind.
+/// Whether a version is a calendar date, the whole of it: `2020-11-13`, or the
+/// compact `20201113`. A date inside a longer version (`2.20191203`) is not one.
+/// Upstream numbers its releases by day, not by a number of the package's kind.
 pub(crate) fn is_dated(version: &str) -> bool {
-    version.as_bytes().windows(10).any(|w| {
-        let digits = |s: &[u8]| s.iter().all(u8::is_ascii_digit);
-        digits(&w[..4]) && w[4] == b'-' && digits(&w[5..7]) && w[7] == b'-' && digits(&w[8..])
-    })
+    let b = version.as_bytes();
+    let dashed = b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && is_calendar_date(&b[..4], &b[5..7], &b[8..]);
+    dashed || (b.len() == 8 && is_calendar_date(&b[..4], &b[4..6], &b[6..]))
+}
+
+/// Whether year, month and day are digits that make a date from 1900 to 2099,
+/// with a day that the month has (February 29 only in a leap year).
+fn is_calendar_date(year: &[u8], month: &[u8], day: &[u8]) -> bool {
+    let num = |s: &[u8]| {
+        (!s.is_empty() && s.iter().all(u8::is_ascii_digit))
+            .then(|| std::str::from_utf8(s).ok()?.parse::<u32>().ok())
+            .flatten()
+    };
+    let (Some(y), Some(m), Some(d)) = (num(year), num(month), num(day)) else {
+        return false;
+    };
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1900..=2099).contains(&y) && (1..=days).contains(&d)
 }
 
 /// What to do about a failed lookup, from the way it failed.
@@ -349,5 +374,38 @@ mod tests {
         assert!(text.contains("not a valid RPM Version"), "{text}");
         assert!(text.contains("A maintainer must choose"), "{text}");
         assert!(text.contains("--to-version"), "{text}");
+    }
+
+    #[test]
+    fn a_calendar_date_is_dated_in_either_form() {
+        assert!(is_dated("2020-11-13"));
+        assert!(is_dated("20260616"));
+        assert!(is_dated("20240229"));
+        assert!(!is_dated("3.1.2"));
+        assert!(!is_dated("20.5"));
+        assert!(!is_dated("202606161"));
+        assert!(!is_dated("20261316"));
+        assert!(!is_dated("21000101"));
+    }
+
+    #[test]
+    fn a_date_inside_a_longer_version_is_not_a_date() {
+        assert!(!is_dated("2.20191203"));
+        assert!(!is_dated("2.0.20240101"));
+        assert!(!is_dated("1.0+git20260101"));
+        assert!(!is_dated("2020-11-13-rc1"));
+        // A multi-byte character in place of a digit is not a date, and no panic.
+        assert!(!is_dated("2020-1\u{e9}-13"));
+    }
+
+    #[test]
+    fn a_day_the_month_does_not_have_is_not_a_date() {
+        assert!(!is_dated("20240230"));
+        assert!(!is_dated("20230229"));
+        assert!(!is_dated("20230431"));
+        assert!(is_dated("20000229"));
+        assert!(!is_dated("19000229"));
+        assert!(is_dated("2024-02-29"));
+        assert!(!is_dated("2023-02-29"));
     }
 }

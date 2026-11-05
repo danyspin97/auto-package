@@ -508,3 +508,58 @@ pub(super) fn dated_tags_against_a_numbered_package_need_a_maintainer() {
         "{reason}"
     );
 }
+
+/// A compact date is a date, not a major: two dates are a plain update, and
+/// a date against a number is the scheme question, not a jump of so many majors.
+#[test]
+pub(super) fn compact_dates_compare_as_dates() {
+    let repology = |latest: &'static str| move |_: &str| Ok(latest.to_string());
+    let neomutt = "Name: neomutt\nVersion: 20260406\nSource: neomutt-%{version}.tar.gz\n";
+    let newest = repology("20260616");
+    let lookups = Lookups {
+        fetch_repology_latest: &newest,
+        ..unused_lookups()
+    };
+    let c = classify("neomutt", &|_: &str| Ok(neomutt.to_string()), &lookups);
+    assert!(
+        matches!(
+            c.decision,
+            Decision::Update { ref new_version, .. } if new_version == "20260616"
+        ),
+        "{:?}",
+        c.decision
+    );
+    let email = "Name: email\nVersion: 3.1.2\nSource: email-%{version}.tar.gz\n";
+    let newest = repology("20160503");
+    let lookups = Lookups {
+        fetch_repology_latest: &newest,
+        ..unused_lookups()
+    };
+    let c = classify("email", &|_: &str| Ok(email.to_string()), &lookups);
+    let Decision::Skipped(reason) = c.decision else {
+        panic!("a date against a number must be skipped");
+    };
+    assert!(
+        reason
+            .to_string()
+            .starts_with("needs a maintainer: upstream's newest release (20160503) is a date"),
+        "{reason}"
+    );
+}
+
+/// A date inside a longer version is a number of the package's kind: its major
+/// rule still applies, so a jump of seven majors is held back.
+#[test]
+pub(super) fn a_date_inside_a_version_keeps_the_major_rule() {
+    let spec = "Name: pkg\nVersion: 2.0.20240101\nSource: pkg-%{version}.tar.gz\n";
+    let repology = |_: &str| Ok("9.0.20250101".to_string());
+    let lookups = Lookups {
+        fetch_repology_latest: &repology,
+        ..unused_lookups()
+    };
+    let c = classify("pkg", &|_: &str| Ok(spec.to_string()), &lookups);
+    let Decision::Skipped(reason) = c.decision else {
+        panic!("a jump of seven majors must be held back");
+    };
+    assert!(reason.to_string().contains("jump of 7 majors"), "{reason}");
+}
