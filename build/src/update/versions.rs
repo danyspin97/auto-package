@@ -563,3 +563,36 @@ pub(super) fn a_date_inside_a_version_keeps_the_major_rule() {
     };
     assert!(reason.to_string().contains("jump of 7 majors"), "{reason}");
 }
+
+/// A release with dashes for all its separators (`1-4-2`) is the version
+/// `1.4.2`: an equal one is up to date. A newer one is still refused, since
+/// the source name would not follow it.
+#[test]
+pub(super) fn an_all_dash_release_equal_to_the_packaged_one_is_up_to_date() {
+    let spec = "Name: opendmarc\nVersion: 1.4.2\nSource: opendmarc-%{version}.tar.gz\n";
+    let equal = |_: &str| Ok("1-4-2".to_string());
+    let lookups = Lookups {
+        fetch_repology_latest: &equal,
+        ..unused_lookups()
+    };
+    let c = classify("opendmarc", &|_: &str| Ok(spec.to_string()), &lookups);
+    assert!(
+        matches!(c.decision, Decision::UpToDate { .. }),
+        "{:?}",
+        c.decision
+    );
+    let newer = |_: &str| Ok("1-4-3".to_string());
+    let lookups = Lookups {
+        fetch_repology_latest: &newer,
+        ..unused_lookups()
+    };
+    let c = classify("opendmarc", &|_: &str| Ok(spec.to_string()), &lookups);
+    assert!(
+        matches!(
+            c.decision,
+            Decision::Skipped(SkipReason::NotAnRpmVersion { ref latest }) if latest == "1-4-3"
+        ),
+        "{:?}",
+        c.decision
+    );
+}

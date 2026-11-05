@@ -98,6 +98,9 @@ where
         .iter()
         .find_map(|s| latest.strip_suffix(s))
         .map_or(latest.clone(), str::to_string);
+    // A release that writes every separator as a dash (`1-4-2`) is the version
+    // it reads as: an equal one is up to date, not refused.
+    let latest = dashes_as_dots(&latest, &header.version).unwrap_or(latest);
     // `0.2.2~0` is the tag `0.2.2`: its zero offset is not a pre-release marker.
     let tag_version = version::strip_tag_offset(&header.version);
     if version::is_prerelease(&latest) && !version::is_prerelease(tag_version) {

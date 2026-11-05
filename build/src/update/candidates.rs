@@ -306,6 +306,17 @@ pub(super) fn lookup(ecosystem: &Ecosystem, lookups: &Lookups<'_>) -> Result<Str
     })
 }
 
+/// `latest` with dashes for all its separators (`1-4-2`) read as the dotted
+/// version it is, when that equals `packaged`. A dash beside a dot (`1.5-1`) is
+/// a distro revision, not a separator: it is not read, and `None` is returned.
+pub(crate) fn dashes_as_dots(latest: &str, packaged: &str) -> Option<String> {
+    if latest.contains('.') || !latest.contains('-') {
+        return None;
+    }
+    let dotted = latest.replace('-', ".");
+    (dotted == packaged).then_some(dotted)
+}
+
 /// Whether `latest` is strictly newer than `packaged`.
 pub fn is_newer(latest: &str, packaged: &str) -> bool {
     compare_versions(latest, packaged, Scheme::Generic) == pypi::VersionCompare::Newer
@@ -407,5 +418,14 @@ mod tests {
         assert!(!is_dated("19000229"));
         assert!(is_dated("2024-02-29"));
         assert!(!is_dated("2023-02-29"));
+    }
+
+    #[test]
+    fn a_dashed_release_is_read_as_dotted_only_when_all_dashes_separate() {
+        assert_eq!(dashes_as_dots("1-4-2", "1.4.2"), Some("1.4.2".to_string()));
+        assert_eq!(dashes_as_dots("1-4-3", "1.4.2"), None);
+        // A dash beside a dot is a distro revision of 1.5, not 1.5.1.
+        assert_eq!(dashes_as_dots("1.5-1", "1.5.1"), None);
+        assert_eq!(dashes_as_dots("1.4.2", "1.4.2"), None);
     }
 }
