@@ -44,6 +44,7 @@ mod existing_lint;
 mod fix_landed;
 #[cfg(test)]
 mod fix_landed_tests;
+mod incomplete;
 mod items;
 mod maintenance;
 mod origin;
@@ -57,6 +58,7 @@ mod tidy;
 
 #[cfg(test)]
 mod tests;
+use incomplete::obs_unavailable;
 
 pub use args::*;
 pub(crate) use request::prepare_request;
