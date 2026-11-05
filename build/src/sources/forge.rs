@@ -222,7 +222,7 @@ pub(super) fn gh_api_path_ok(path: &str) -> bool {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
         regex::Regex::new(
-            r"^(?:repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:releases(?:/latest)?|tags|compare/[A-Za-z0-9_.-]+\.\.\.[A-Za-z0-9_.-]+)|search/(?:repositories|commits))(?:\?[A-Za-z0-9%_=&.+~-]*)?$",
+            r"^(?:repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:releases(?:/latest)?|tags|pulls/[0-9]+|compare/[A-Za-z0-9_.-]+\.\.\.[A-Za-z0-9_.-]+)|search/(?:repositories|commits))(?:\?[A-Za-z0-9%_=&.+~-]*)?$",
         )
         .unwrap()
     })
