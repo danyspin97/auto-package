@@ -16,6 +16,13 @@ pub(super) struct AuditEnd {
     pub(super) packages: usize,
     /// The packages handed on to be improved.
     pub(super) items: usize,
+    /// The packages of the source the run was asked for (`--only`), audited,
+    /// skipped or unreadable alike: none means nothing matched.
+    pub(super) candidates: usize,
+    /// How many of the candidates OBS answered 404 for (absent from OBS).
+    pub(super) absent: usize,
+    /// The rpm names of every candidate, for the names asked for that matched none.
+    pub(super) matched: Vec<String>,
     /// The packages whose spec could not be read, each with the reason: OBS
     /// failed the read, so these were not checked.
     pub(super) unreadable: Vec<String>,
@@ -62,11 +69,14 @@ impl Audit {
             let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&distro);
             let mut ldconfig_left = false;
             let mut unreadable: Vec<String> = Vec::new();
+            let mut absent = 0usize;
+            let mut matched: Vec<String> = Vec::new();
             update::plan_each(
                 &source,
                 &|n| wanted_by(&only, &exclude, n),
                 emit,
                 &mut |c| {
+                    matched.push(c.rpm_name.clone());
                     let pkg = up::branch_name(&c.rpm_name);
                     if !seen.insert(pkg.to_string()) {
                         return true;
@@ -87,6 +97,9 @@ impl Audit {
                             // or no spec at all): the run is incomplete.
                             if let update::ReadError::Failed(why) = &e {
                                 unreadable.push(format!("{pkg}: {why}"));
+                            }
+                            if matches!(e, update::ReadError::Absent(_)) {
+                                absent += 1;
                             }
                             return true;
                         }
@@ -172,6 +185,9 @@ impl Audit {
             Ok(AuditEnd {
                 packages: audits.len(),
                 items: sent,
+                candidates: seen.len(),
+                absent,
+                matched,
                 unreadable,
             })
         });
@@ -185,6 +201,14 @@ impl Audit {
             .join()
             .unwrap_or_else(|_| Err("the audit of the project panicked".to_string()))
     }
+}
+
+/// What a lint run that audited no package found, for the names it was asked
+/// for: `Some(true)` when every candidate is absent from OBS, `Some(false)` when
+/// none matched, and `None` when a candidate was found, audited or skipped on
+/// purpose (no spec, a maintainer's call).
+pub(super) fn nothing_found(candidates: usize, absent: usize) -> Option<bool> {
+    (candidates == absent).then_some(absent > 0)
 }
 
 /// The findings an item hands the agent, one line each. Report-only findings
@@ -218,6 +242,18 @@ pub(super) fn improve_problem(item: &Item) -> Option<String> {
 mod tests {
     use super::*;
     use ap_build::quality::{Finding, Kind};
+
+    #[test]
+    fn a_named_package_absent_from_obs_is_not_a_found_one() {
+        // Nothing matched.
+        assert_eq!(nothing_found(0, 0), Some(false));
+        // Every named package is absent from OBS.
+        assert_eq!(nothing_found(2, 2), Some(true));
+        // A package skipped on purpose is found, so the run is not an error.
+        assert_eq!(nothing_found(1, 0), None);
+        // One found beside an absent one is found too.
+        assert_eq!(nothing_found(2, 1), None);
+    }
 
     #[test]
     fn report_only_findings_do_not_reach_the_agent() {

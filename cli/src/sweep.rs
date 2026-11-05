@@ -15,6 +15,9 @@ pub(super) struct PlanReport {
     /// The packages stopped for the maintainer (a `_link` whose target is
     /// gone), each with its reason.
     pub(super) maintainer: Vec<String>,
+    /// The rpm name of every package the sweep found, for the `--only` names
+    /// that matched none.
+    pub(super) names: Vec<String>,
 }
 
 impl PlanReport {
@@ -24,6 +27,7 @@ impl PlanReport {
         reporter: &(dyn Reporter + Send + Sync),
     ) {
         use ap_build::update::{Decision, SkipReason};
+        self.names.push(c.rpm_name.clone());
         match &c.decision {
             Decision::Skipped(SkipReason::NeedsMaintainer(why)) => {
                 self.maintainer.push(format!("{}: {why}", c.rpm_name));

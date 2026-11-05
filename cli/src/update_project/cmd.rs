@@ -378,9 +378,12 @@ pub(super) fn cmd_update_project(
             }
         };
         report.maintainer.extend(plan.maintainer.iter().cloned());
+        for name in a.only.iter().filter(|n| !plan.names.contains(n)) {
+            ctx.warn(format!("{name}: matched no package"));
+        }
         if plan.total() == 0 {
             ctx.say(format!("no matching packages in {}", a.source));
-            return Ok(());
+            return none_checked(&a.only, false);
         }
         if plan.n_update == 0 {
             ctx.say("nothing to update");
@@ -398,6 +401,9 @@ pub(super) fn cmd_update_project(
                 return Err(eyre!("{e}"));
             }
         };
+        for name in a.only.iter().filter(|n| !end.matched.contains(n)) {
+            ctx.warn(format!("{name}: matched no package"));
+        }
         if !end.unreadable.is_empty() {
             // Packages already branched and prepared are still built before the error is returned.
             if !a.dry_run {
@@ -405,9 +411,13 @@ pub(super) fn cmd_update_project(
             }
             return Err(obs_unavailable(&end.unreadable, &a.source));
         }
-        if end.packages == 0 {
+        // A named package that is skipped on purpose (no spec, a maintainer's
+        // call) is a package found: only a name that matched nothing fails.
+        if end.packages == 0
+            && let Some(absent) = nothing_found(end.candidates, end.absent)
+        {
             ctx.say(format!("no matching packages in {}", a.source));
-            return Ok(());
+            return none_checked(&a.only, absent);
         }
         if end.items == 0 {
             ctx.say("nothing to improve");
@@ -540,5 +550,41 @@ mod obs_unavailable_tests {
             "{text}"
         );
         assert!(text.ends_with("foo: listing failed"), "{text}");
+    }
+}
+
+/// What a run that checked no package ends with: an error when `--only` named
+/// packages (they were asked for and none could be checked), else nothing.
+fn none_checked(only: &[String], absent: bool) -> color_eyre::Result<()> {
+    if only.is_empty() {
+        return Ok(());
+    }
+    let why = if absent { "not on OBS: " } else { "" };
+    Err(eyre!(
+        "none of the requested packages could be checked: {why}{}",
+        only.join(", ")
+    ))
+}
+
+#[cfg(test)]
+mod none_checked_tests {
+    use super::none_checked;
+
+    #[test]
+    fn a_run_that_checked_nothing_fails_only_when_packages_were_asked_for() {
+        assert!(none_checked(&[], false).is_ok());
+        let err = none_checked(&["foo".to_string(), "bar".to_string()], false).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("none of the requested packages could be checked"),
+            "{err}"
+        );
+        let absent = none_checked(&["gone".to_string()], true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            absent,
+            "none of the requested packages could be checked: not on OBS: gone"
+        );
     }
 }
