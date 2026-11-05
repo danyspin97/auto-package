@@ -100,6 +100,8 @@ pub(super) fn submit(a: &FixArgs, c: SubmitCtx<'_>) -> color_eyre::Result<()> {
         &a.arch,
         c.state_root,
         &item,
+        // A fix run never tidies a header only (that is lint's), so no Skipped
+        // item is resubmitted here; a branch with no change is refused inside.
         &ItemOutcome::Updated,
         false,
         false,

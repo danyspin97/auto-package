@@ -128,6 +128,33 @@ pub(crate) fn prepare_request(
         say(format!("no request for {}: {why}", item.pkg));
         return Err(SrOutcome::NotEligible(why));
     }
+    // A branch whose sources are those of its origin has nothing to submit: the
+    // origin is the revision the branch was made from, so equal sources mean no
+    // change (a tidy that changed nothing, or a header the revision refused).
+    if let Some(branch_rev) = source_rev.as_deref() {
+        let origin = match osc::source_srcmd5(&item.origin, &item.pkg, emit) {
+            Ok(rev) => OriginRev::Rev(rev),
+            Err(e) if is_missing(&e.to_string()) => OriginRev::Missing,
+            Err(e) => OriginRev::Unreadable(e.to_string()),
+        };
+        match origin_guard(Some(branch_rev), &origin) {
+            OriginGuard::Pass => {}
+            OriginGuard::NoChange => {
+                let why = "the branch has no change against its origin".to_string();
+                say(format!("no request for {}: {why}", item.pkg));
+                return Err(SrOutcome::NotEligible(why));
+            }
+            OriginGuard::Unreadable(e) => {
+                warn(format!(
+                    "no request for {}: could not read its origin's revision: {e}",
+                    item.pkg
+                ));
+                return Err(SrOutcome::Failed(format!(
+                    "could not read the origin's revision: {e}"
+                )));
+            }
+        }
+    }
     match osc::open_submit_requests(branch, &item.pkg, &item.origin, emit) {
         Ok(open) => {
             if let Some(first) = first_open_request(&open, superseding) {
@@ -234,4 +261,70 @@ fn arch_gate(
     Ok(ap_build::arch_check::gate_verdict(
         pkg, primary, &rows, allow, failed,
     ))
+}
+
+/// The origin's revision of a package, as the guard reads it.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum OriginRev {
+    Rev(String),
+    /// The origin has no such package: a new one, which has nothing to compare.
+    Missing,
+    Unreadable(String),
+}
+
+/// What the origin guard decides for a branch.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum OriginGuard {
+    Pass,
+    /// The branch's sources are its origin's: nothing to submit.
+    NoChange,
+    Unreadable(String),
+}
+
+/// The origin guard (see `prepare_request`): a branch whose revision equals its
+/// origin's has no change; a new package (no origin) and a branch whose
+/// revision is not known pass.
+pub(super) fn origin_guard(branch_rev: Option<&str>, origin: &OriginRev) -> OriginGuard {
+    match (branch_rev, origin) {
+        (None, _) | (_, OriginRev::Missing) => OriginGuard::Pass,
+        (Some(_), OriginRev::Unreadable(e)) => OriginGuard::Unreadable(e.clone()),
+        (Some(b), OriginRev::Rev(o)) if !b.is_empty() && b == o => OriginGuard::NoChange,
+        (Some(_), OriginRev::Rev(_)) => OriginGuard::Pass,
+    }
+}
+
+/// Whether an osc error says the package is not there (a new package).
+fn is_missing(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("404") || lower.contains("not found")
+}
+
+#[cfg(test)]
+mod origin_guard_tests {
+    use super::*;
+
+    #[test]
+    fn the_guard_refuses_only_an_equal_revision() {
+        let rev = |s: &str| OriginRev::Rev(s.to_string());
+        assert_eq!(
+            origin_guard(Some("abc"), &rev("abc")),
+            OriginGuard::NoChange
+        );
+        assert_eq!(origin_guard(Some("abc"), &rev("abd")), OriginGuard::Pass);
+        assert_eq!(origin_guard(None, &rev("abc")), OriginGuard::Pass);
+    }
+
+    #[test]
+    fn a_new_package_is_not_refused_and_an_unreadable_origin_is() {
+        assert_eq!(
+            origin_guard(Some("abc"), &OriginRev::Missing),
+            OriginGuard::Pass
+        );
+        assert_eq!(
+            origin_guard(Some("abc"), &OriginRev::Unreadable("timeout".into())),
+            OriginGuard::Unreadable("timeout".into())
+        );
+        assert!(is_missing("osc: package not found (404)"));
+        assert!(!is_missing("timeout"));
+    }
 }

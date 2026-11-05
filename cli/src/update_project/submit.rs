@@ -30,6 +30,14 @@ impl SubmitBackend {
             .insert(osc::fuzzy_key(&item.pkg), item.clone());
     }
 
+    /// Takes an item that ended Skipped out of the offers: it is not submitted.
+    pub(super) fn forget(&self, item: &Item) {
+        self.items
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&osc::fuzzy_key(&item.pkg));
+    }
+
     fn item(&self, row: &str) -> Result<Item, String> {
         self.items
             .lock()
@@ -45,7 +53,8 @@ impl SubmitBackend {
         if let Some(lines) = yes_refusal(self.yes, &gate) {
             return Err(tui::SubmitFailure::Other(lines.join("; ")));
         }
-        // The TUI only offers rows that built; OBS is asked again inside.
+        // The rows offered are this run's items that were not forgotten (a
+        // Skipped item is); whether the build succeeded is read again inside.
         match prepare_request(
             &self.branch,
             self.distro.as_deref(),

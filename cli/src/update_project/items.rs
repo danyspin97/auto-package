@@ -406,6 +406,8 @@ pub(super) fn build_ready(
         if let Some(b) = &ctx.backend {
             b.register(&item);
         }
+        // Why the item is not submitted once its work is done (see `skipped`).
+        let mut skip: Option<String> = None;
         let done = if let Some(job) = &a.backport_job {
             ctx.say(format!(
                 "backporting into {} {} in {branch} (the version stays)",
@@ -425,13 +427,15 @@ pub(super) fn build_ready(
             if mechanical.contains(&item.pkg) {
                 let target = osc::choose_repository(branch, a.distro.as_deref(), &a.arch).0;
                 let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&target);
-                tidy_item(branch, &item, ctx, ldconfig)
-            } else if a.no_agent && !item.findings.is_empty() {
-                report.results.push(ItemResult {
-                    item,
-                    outcome: ItemOutcome::Skipped("the findings need the agent".to_string()),
-                    sr: SrOutcome::NotRequested,
-                });
+                match tidy_item(branch, &item, ctx, ldconfig) {
+                    Ok(done) => {
+                        skip = super::tidy::tidy_skip(done).map(str::to_string);
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            } else if agent_needed(a.no_agent, &item.findings) {
+                skipped(ctx, report, item, "the findings need the agent".to_string());
                 continue;
             } else {
                 build_item(a, branch, &item, resolver, ctx)
@@ -444,9 +448,14 @@ pub(super) fn build_ready(
             build_item(a, branch, &item, resolver, ctx)
         };
         let outcome = match done {
+            Ok(()) if skip.is_some() => ItemOutcome::Skipped(skip.clone().unwrap_or_default()),
             Ok(()) => ItemOutcome::Updated,
             Err(why) => ItemOutcome::Failed(why),
         };
+        if let ItemOutcome::Skipped(why) = outcome {
+            skipped(ctx, report, item, why);
+            continue;
+        }
         if outcome == ItemOutcome::Updated {
             super::arch::check_item(a, branch, &item, ctx, report);
         }
@@ -456,6 +465,26 @@ pub(super) fn build_ready(
             sr: SrOutcome::NotRequested,
         });
     }
+}
+
+/// Whether an item needs the agent and the run has none: an item with no
+/// fixable finding goes to the pipeline anyway, because the pipeline applies
+/// its proven removal of a merged request patch without a model.
+pub(super) fn agent_needed(no_agent: bool, fixable: &[String]) -> bool {
+    no_agent && !fixable.is_empty()
+}
+
+/// Records an item that is not submitted: it leaves the TUI's offers (so it
+/// cannot be submitted from there) and the report says why.
+fn skipped(ctx: &Ctx<'_>, report: &mut Report, item: Item, why: String) {
+    if let Some(b) = &ctx.backend {
+        b.forget(&item);
+    }
+    report.results.push(ItemResult {
+        item,
+        outcome: ItemOutcome::Skipped(why),
+        sr: SrOutcome::NotRequested,
+    });
 }
 
 /// Build `item` in the branch project with the ordinary pipeline.

@@ -26,3 +26,42 @@ fn a_named_rpmlintrc_the_checkout_lacks_is_skipped() {
     let dir = tempfile::tempdir().unwrap();
     assert!(rpmlintrc_fixes(dir.path(), SPEC).unwrap().is_empty());
 }
+
+#[test]
+fn the_commit_says_what_it_changed() {
+    assert_eq!(
+        commit_message(true, false),
+        "Tidy the spec (auto-package lint)"
+    );
+    assert_eq!(
+        commit_message(false, true),
+        "Add upstream provenance to patch headers (auto-package lint)"
+    );
+    assert_eq!(
+        commit_message(true, true),
+        "Tidy the spec (auto-package lint); Add upstream provenance to patch headers (auto-package lint)"
+    );
+}
+
+#[test]
+fn a_header_only_tidy_is_not_a_change_to_submit() {
+    assert_eq!(tidy_done(false, false, true), TidyDone::ProvenanceOnly);
+    assert_eq!(tidy_done(true, false, true), TidyDone::Changed);
+    assert_eq!(tidy_done(false, true, false), TidyDone::Changed);
+    assert_eq!(tidy_done(false, false, false), TidyDone::AlreadyTidy);
+}
+
+#[test]
+fn only_a_header_only_tidy_is_skipped() {
+    assert!(tidy_skip(TidyDone::ProvenanceOnly).is_some());
+    assert_eq!(tidy_skip(TidyDone::AlreadyTidy), None);
+    assert_eq!(tidy_skip(TidyDone::Changed), None);
+}
+
+#[test]
+fn the_agent_is_skipped_only_for_items_with_fixable_findings() {
+    use super::super::items::agent_needed;
+    assert!(agent_needed(true, &["style: x".to_string()]));
+    assert!(!agent_needed(true, &[]));
+    assert!(!agent_needed(false, &["style: x".to_string()]));
+}
