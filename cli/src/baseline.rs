@@ -62,6 +62,36 @@ fn project_dirs(work_dir: &Path, project: &str, arch: Option<&str>) -> Vec<PathB
     }
 }
 
+/// Whether `name` is a plain OBS package name: it is joined into paths, so it
+/// must not climb out of its directory, name another one, or be empty.
+fn plain_package_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.starts_with('.')
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.+~".contains(&b))
+}
+
+/// Whether the baseline in `dir` was saved from a checkout of `project`: the
+/// checkout's `.osc/_project` names it, or, when the checkout is gone, its path
+/// has `project` as a component. Two projects can share a directory name once
+/// sanitized (`home:B` and `home_B`), so the directory alone does not say.
+fn baseline_of_project(dir: &Path, project: &str) -> bool {
+    let Ok(checkout) = fs::read_to_string(dir.join("checkout")) else {
+        return false;
+    };
+    let checkout = PathBuf::from(checkout);
+    match fs::read_to_string(checkout.join(".osc/_project")) {
+        Ok(recorded) => recorded.trim() == project,
+        Err(_) => checkout
+            .components()
+            .any(|c| c.as_os_str() == std::ffi::OsStr::new(project)),
+    }
+}
+
 /// The pending OBS baselines of `name` for the branch `project` in the
 /// workspace `work_dir`: the build's own state, the baselines the update and
 /// `tidy` keep in the project directories, and the maintenance ones. Only the
@@ -72,6 +102,9 @@ fn pending_baselines(
     arch: Option<&str>,
     name: &str,
 ) -> Vec<PathBuf> {
+    if !plain_package_name(name) {
+        return Vec::new();
+    }
     let branch = ap_core::run::sanitize_name(project);
     let mut candidates = Vec::new();
     for dir in project_dirs(work_dir, project, arch) {
@@ -93,7 +126,7 @@ fn pending_baselines(
             .join(&branch)
             .join(name),
     );
-    candidates.retain(|dir| ap_build::osc::is_pending(dir));
+    candidates.retain(|dir| ap_build::osc::is_pending(dir) && baseline_of_project(dir, project));
     candidates
 }
 
@@ -167,17 +200,51 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[test]
+    fn a_name_that_is_not_a_plain_package_name_names_nothing() {
+        let ws = tempfile::tempdir().unwrap();
+        let mine = ws.path().join("home_B-x86_64/.obs-baseline/home_B/foo");
+        pending_at(&mine, "home:B");
+        let other = ws.path().join("home_B-x86_64/.obs-baseline/home_B2/foo");
+        pending_at(&other, "home:B2");
+        for name in ["../home_B2/foo", "foo/bar", "", "..", "a\0b"] {
+            assert!(
+                pending_baselines(ws.path(), "home:B", None, name).is_empty(),
+                "{name:?}"
+            );
+        }
+        assert!(plain_package_name("python-foo_bar.2+x"));
+    }
+
+    #[test]
+    fn a_baseline_of_a_project_sharing_the_directory_name_is_not_named() {
+        let ws = tempfile::tempdir().unwrap();
+        let dir = ws.path().join("home_B-x86_64/.obs-baseline/home_B/foo");
+        pending_at(&dir, "home:B");
+        let co = ws.path().join("checkouts/home_B/foo");
+        fs::create_dir_all(co.join(".osc")).unwrap();
+        fs::write(co.join(".osc/_project"), "home_B\n").unwrap();
+        fs::write(dir.join("checkout"), co.to_string_lossy().as_bytes()).unwrap();
+        assert!(pending_baselines(ws.path(), "home:B", None, "foo").is_empty());
+        assert_eq!(
+            pending_baselines(ws.path(), "home_B", None, "foo"),
+            vec![dir]
+        );
+    }
+
     /// A baseline directory with one attempted file, so it is pending.
-    fn pending_at(dir: &Path) {
+    fn pending_at(dir: &Path, project: &str) {
         fs::create_dir_all(dir).unwrap();
         ap_build::osc::note_attempt(dir, &["foo.spec".to_string()]).unwrap();
+        // Saved from a checkout of `project` (not on disk any more).
+        fs::write(dir.join("checkout"), format!("/x/{project}/foo")).unwrap();
     }
 
     #[test]
     fn a_tidy_baseline_is_found_from_the_workspace_root() {
         let ws = tempfile::tempdir().unwrap();
         let dir = ws.path().join("home_B-x86_64/.obs-baseline/home_B/foo");
-        pending_at(&dir);
+        pending_at(&dir, "home:B");
         assert_eq!(
             pending_baselines(ws.path(), "home:B", None, "foo"),
             vec![dir.clone()]
@@ -193,8 +260,8 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         let mine = ws.path().join("home_B-x86_64/.obs-baseline/home_B/foo");
         let other = ws.path().join("home_B-x86_64/.obs-baseline/home_B2/foo");
-        pending_at(&mine);
-        pending_at(&other);
+        pending_at(&mine, "home:B");
+        pending_at(&other, "home:B2");
         assert_eq!(
             pending_baselines(ws.path(), "home:B", None, "foo"),
             vec![mine]
@@ -205,7 +272,7 @@ mod tests {
     fn a_pipeline_state_is_found_for_its_arch_only_when_asked_for_it() {
         let ws = tempfile::tempdir().unwrap();
         let dir = ws.path().join("home_B-x86_64/state/foo/obs-baseline");
-        pending_at(&dir);
+        pending_at(&dir, "home:B");
         assert_eq!(
             pending_baselines(ws.path(), "home:B", Some("x86_64"), "foo"),
             vec![dir.clone()]
@@ -232,6 +299,8 @@ mod tests {
         assert!(pending_baselines(w, "Base:System", Some("x86_64"), "foo").is_empty());
         // The marker of a pending baseline (`osc::UNRESTORED`).
         std::fs::write(dir.join("unrestored"), "").unwrap();
+        // Saved from a checkout of this project.
+        std::fs::write(dir.join("checkout"), "/x/Base:System/foo").unwrap();
         assert_eq!(
             pending_baselines(w, "Base:System", Some("x86_64"), "foo"),
             vec![dir]
