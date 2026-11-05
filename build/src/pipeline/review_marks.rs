@@ -9,6 +9,7 @@ use crate::pipeline::patch_rewrite::rewritten_patches;
 use sha2::{Digest, Sha256};
 
 const REWROTE: &str = "patch-review/rewritten";
+const REPLACED: &str = "patch-provenance/replaced";
 const PENDING: &str = "patch-review/pending";
 const IN_PROGRESS: &str = "patch-review/in-progress";
 const START_DIR: &str = "patch-review/start";
@@ -115,9 +116,22 @@ pub(super) fn was_reviewer_rewrite(ws: &Workspace, checkout: &Path, name: &str) 
         .any(|n| n == name)
 }
 
-/// Forgets the reviewer rewrites, once the change that carries them is submitted.
+/// Marks a patch replaced by its open request's current revision, at its
+/// current bytes.
+pub(super) fn mark_replaced(ws: &Workspace, checkout: &Path, name: &str) -> Result<(), String> {
+    append(ws, REPLACED, checkout, name)
+}
+
+/// The patches replaced by an upstream revision that still have its bytes.
+pub(crate) fn replaced_patches(ws: &Workspace, checkout: &Path) -> Vec<String> {
+    recorded(ws, REPLACED, checkout, false)
+}
+
+/// Forgets the reviewer rewrites and the replaced patches, once the change
+/// that carries them is submitted.
 pub(crate) fn clear_reviewer_rewrites(ws: &Workspace) {
     remove(ws, REWROTE);
+    remove(ws, REPLACED);
 }
 
 /// The rewritten patches a stop left unreviewed that still have those bytes.

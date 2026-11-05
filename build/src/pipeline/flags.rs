@@ -57,6 +57,11 @@ pub(super) fn settle_risk_flags(ctx: &RunCtx, baseline: &Path) {
         &reviewer_rewrites(&ctx.ws, &ctx.checkout_dir),
         &after,
     ));
+    // A carried patch replaced by its open request's current revision.
+    found.extend(crate::risk_flags::replaced_flags(
+        &crate::pipeline::review_marks::replaced_patches(&ctx.ws, &ctx.checkout_dir),
+        &after,
+    ));
     if let Some(task) = ctx.config.bug_fix.as_deref() {
         found.extend(crate::bugfix::fix_risk_flags(task, &before, &after));
     }

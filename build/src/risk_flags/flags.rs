@@ -43,7 +43,9 @@ pub enum RiskFlag {
     AdaptedUpstreamFix { patch: String },
     /// A staged fix that is a pull or merge request, or a commit nothing shows is
     /// on the default branch (a bug text can name an attacker's request): a
-    /// person checks that upstream stands behind it.
+    /// person checks that upstream stands behind it. Also a carried patch
+    /// replaced by the current revision of its open request, which is code
+    /// from an unmerged, author-writable request.
     UnmergedUpstreamFix { patch: String },
 }
 
@@ -94,6 +96,18 @@ impl RiskFlag {
         };
         one_line(&text)
     }
+}
+
+/// The flags for the patches replaced by their open request's revision (`names`)
+/// that the final change still has: a patch dropped since is not flagged.
+pub fn replaced_flags(names: &[String], fin: &Files) -> Vec<RiskFlag> {
+    names
+        .iter()
+        .filter(|n| fin.patches.contains_key(*n))
+        .map(|patch| RiskFlag::UnmergedUpstreamFix {
+            patch: patch.clone(),
+        })
+        .collect()
 }
 
 /// The flags for the patches a reviewer rewrote (`names`) that the final change

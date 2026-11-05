@@ -127,6 +127,7 @@ fn the_update_loop_takes_a_moved_revision_and_marks_it_accepted() {
     );
     let c = run_replacing(&[("106.patch", &carried)], &net, true, true);
     assert_eq!(c.accepted, ["106.patch".to_string()]);
+    assert_eq!(c.replaced, ["106.patch".to_string()]);
     let patch = std::fs::read_to_string(c.checkout.join("106.patch")).unwrap();
     assert!(patch.contains("+B\n"), "{patch}");
 }

@@ -205,6 +205,12 @@ fn replace_with_revision(
                 back(ctx);
                 return Err(ctx.failed_as(FailureKind::NeedsMaintainer, why));
             }
+            // Recorded before the turn is forgotten: a crash between the two
+            // must not leave a replacement the risk flag cannot see.
+            if let Err(why) = mark_replaced(&ctx.ws, &ctx.checkout_dir, name) {
+                back(ctx);
+                return Err(ctx.failed_as(FailureKind::NeedsMaintainer, why));
+            }
             if !take_unsettled() {
                 end_turn(&ctx.ws);
             }

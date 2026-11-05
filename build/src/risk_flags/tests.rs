@@ -580,3 +580,20 @@ fn a_patch_the_reviewer_rewrote_is_flagged_while_the_change_still_has_it() {
     settle(&mut st, "r2", found);
     assert_eq!(st.risk_flags.len(), 1);
 }
+
+#[test]
+fn a_patch_replaced_by_an_open_request_is_flagged_while_it_is_still_in_the_change() {
+    let mut fin = files(SPEC);
+    fin.patches.insert("106.patch".into(), PATCH.into());
+    let names = vec!["106.patch".to_string(), "gone.patch".to_string()];
+    let found = replaced_flags(&names, &fin);
+    assert_eq!(
+        found,
+        vec![RiskFlag::UnmergedUpstreamFix {
+            patch: "106.patch".into()
+        }]
+    );
+    // Dropped again from the change, the flag goes with it.
+    let dropped = replaced_flags(&names, &files(SPEC));
+    assert!(dropped.is_empty());
+}

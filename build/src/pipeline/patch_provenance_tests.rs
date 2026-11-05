@@ -19,6 +19,7 @@ const SPEC_HEAD: &str = "Name: foo\nVersion: 1.0\nRelease: 0\nSummary: test\nLic
 struct Case {
     accepted: Vec<String>,
     reviewer: Vec<String>,
+    replaced: Vec<String>,
     _root: tempfile::TempDir,
     checkout: PathBuf,
     spec: String,
@@ -103,6 +104,7 @@ fn stage_case(
         provenance_stage_with(&ctx, net);
     }
     Case {
+        replaced: crate::pipeline::review_marks::replaced_patches(&ctx.ws, &checkout),
         accepted: accepted.keys().cloned().collect(),
         reviewer: crate::pipeline::review_marks::reviewer_rewrites(&ctx.ws, &checkout),
         _root: root,
