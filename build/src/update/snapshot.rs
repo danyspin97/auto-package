@@ -50,6 +50,7 @@ pub(super) fn day_of_epoch(secs: i64) -> String {
 /// pair is stored as `<version> <date>`.
 pub fn cached_release_date(url: &str) -> Result<(String, String), String> {
     let cached = upstream_cache::lookup(&format!("release-date:{url}"), || {
+        let _slot = super::host_gate::enter(super::host_gate::host_of(url));
         crate::sources::latest_release_date(url).map(|(v, d)| format!("{v} {d}"))
     })?;
     cached

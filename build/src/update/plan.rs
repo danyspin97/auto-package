@@ -1,4 +1,5 @@
 use super::check_pool;
+use super::host_gate;
 use super::*;
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashSet};
@@ -440,37 +441,44 @@ pub fn plan_each(
     };
     let fetch_pypi_latest = |pypi_name: &str| {
         upstream_cache::lookup(&format!("pypi:{pypi_name}"), || {
+            let _slot = host_gate::enter("pypi.org");
             pypi::fetch_latest_version(pypi_name).map_err(|e| e.to_string())
         })
     };
     let fetch_repo_latest = |url: &str| {
         upstream_cache::lookup(&format!("repo:{url}"), || {
+            let _slot = host_gate::enter(host_gate::host_of(url));
             crate::sources::latest_release(url)
         })
     };
     let fetch_index_latest = |url: &str| {
         upstream_cache::lookup(&format!("index:{url}"), || {
+            let _slot = host_gate::enter(host_gate::host_of(url));
             crate::upstream::latest_in_index(url)
         })
     };
     let fetch_repology_latest = |name: &str| {
         upstream_cache::lookup(&format!("repology:{name}"), || {
+            let _slot = host_gate::enter("repology.org");
             crate::upstream::latest_on_repology(name)
         })
     };
     let fetch_gem_latest = |gem: &str| {
         upstream_cache::lookup(&format!("rubygems:{gem}"), || {
+            let _slot = host_gate::enter("rubygems.org");
             crate::upstream::latest_on_rubygems(gem)
         })
     };
     let fetch_cpan_latest = |dist: &str| {
         upstream_cache::lookup(&format!("cpan:{dist}"), || {
+            let _slot = host_gate::enter("metacpan.org");
             crate::upstream_cpan::latest_on_metacpan(dist)
         })
     };
     let fetch_service = |rpm_name: &str| osc::cat_file(project, rpm_name, "_service", emit);
     let fetch_repo_in_series = |url: &str, series: &[u64]| {
         upstream_cache::lookup(&format!("repo-series:{url}:{series:?}"), || {
+            let _slot = host_gate::enter(host_gate::host_of(url));
             crate::sources::latest_release_in_series(url, series)
         })
     };

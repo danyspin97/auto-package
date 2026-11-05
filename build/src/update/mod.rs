@@ -32,6 +32,7 @@ use std::sync::Mutex;
 
 mod candidates;
 mod check_pool;
+mod host_gate;
 pub use check_pool::set_check_jobs;
 #[cfg(test)]
 mod helpers;
