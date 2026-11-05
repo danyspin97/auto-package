@@ -521,7 +521,14 @@ pub fn restore_baseline(
     emit: Emit<'_>,
 ) -> Result<(), String> {
     match restore_baseline_outcome(dir, expected, emit) {
-        Ok(Restored::Undone) => {}
+        Ok(Restored::Undone) => {
+            let message = "restored the OBS baseline of an earlier failed attempt: the attempt is undone on OBS, and the work continues";
+            ap_core::diag!("{message}");
+            emit.reporter.report(&Event::Warning {
+                step: emit.step,
+                message: message.into(),
+            });
+        }
         Ok(Restored::NothingWritten) => ap_core::diag!(
             "nothing was written to OBS since the failed attempt: the saved baseline is dropped and the work continues"
         ),
