@@ -13,6 +13,8 @@ pub(super) fn run_on(
     summary: &mut Option<String>,
     is_tty: bool,
 ) -> color_eyre::Result<()> {
+    // The forge budget of the patch provenance check is per invocation.
+    ap_build::patch_provenance::reset_budget();
     deprecated::check_args(&a).map_err(|e| eyre!("{e}"))?;
     if a.local && (a.maintenance.is_some() || a.maintenance_list) {
         return Err(eyre!(

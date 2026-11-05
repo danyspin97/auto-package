@@ -204,6 +204,25 @@ pub fn lookup(key: &str, fetch: impl FnOnce() -> Result<String, String>) -> Resu
     lookup_in(&STORE, dir, key, TTL, now(), refresh, fetch)
 }
 
+/// Whether this run asked to refresh its answers (`--refresh`).
+pub fn refreshing() -> bool {
+    REFRESH.load(Ordering::Relaxed)
+}
+
+/// The answer kept for `key` while it is fresh, read without a fetch: `None`
+/// when there is none, or no cache directory is set. An answer keeps the TTL
+/// it was stored with.
+pub fn fresh(key: &str) -> Option<String> {
+    let dir = DIR.get()?;
+    fresh_in(&STORE, dir, key, now())
+}
+
+fn fresh_in(cache: &Mutex<Option<Store>>, dir: &Path, key: &str, now: u64) -> Option<String> {
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let store = guard.get_or_insert_with(|| Store::open(dir));
+    store.fresh(key, now)
+}
+
 /// [`lookup`] for an answer kept for `ttl`. `refresh` asks `fetch` anyway; the
 /// global `--refresh` does not apply, the caller decides. The answer is kept
 /// either way, and a failure never is.
@@ -540,5 +559,22 @@ mod tests {
             assert_eq!(ask_once(&failed, "repology:x", fetch), Ok("2.0".into()));
         }
         assert_eq!(asked.get(), 2);
+    }
+
+    #[test]
+    fn fresh_reads_a_kept_answer_only_within_its_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Mutex::new(None);
+        let ttl = Duration::from_secs(60);
+        let got = lookup_in(&cache, dir.path(), "k", ttl, 1000, false, || {
+            Ok("a".to_string())
+        });
+        assert_eq!(got.as_deref(), Ok("a"));
+        assert_eq!(
+            fresh_in(&cache, dir.path(), "k", 1059).as_deref(),
+            Some("a")
+        );
+        assert_eq!(fresh_in(&cache, dir.path(), "k", 1060), None);
+        assert_eq!(fresh_in(&cache, dir.path(), "other", 1000), None);
     }
 }

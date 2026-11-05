@@ -30,6 +30,7 @@ mod helpers;
 mod index_tests;
 mod kind;
 mod map;
+mod redirects;
 mod release_date;
 mod release_list;
 mod release_series;

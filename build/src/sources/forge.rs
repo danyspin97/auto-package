@@ -404,7 +404,7 @@ impl ForgeError {
         }
     }
 
-    fn from_call_failure(f: &ap_ecosystem::net::CallFailure) -> Self {
+    pub(super) fn from_call_failure(f: &ap_ecosystem::net::CallFailure) -> Self {
         match f {
             ap_ecosystem::net::CallFailure::Status(s) => Self::from_status_failure(s),
             ap_ecosystem::net::CallFailure::Transport(e) => Self::from_ureq(e),
@@ -493,7 +493,23 @@ pub fn get_json_for_search(url: &str) -> Result<serde_json::Value, String> {
     get_json(url)
 }
 
+/// [`get_json_for_search`] with `check` run on every hop of the raw https path
+/// (the `gh` path follows its own redirects).
+pub fn get_json_checked(
+    url: &str,
+    check: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<serde_json::Value, String> {
+    get_json_hops(url, check)
+}
+
 pub(super) fn get_json(url: &str) -> Result<serde_json::Value, String> {
+    get_json_hops(url, &|_| Ok(()))
+}
+
+fn get_json_hops(
+    url: &str,
+    check: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<serde_json::Value, String> {
     // Prefer `gh api` for GitHub URLs when it's installed — see
     // `try_gh_api`'s doc comment for the three reasons.
     if let Some(result) = try_gh_api(url) {
@@ -501,69 +517,8 @@ pub(super) fn get_json(url: &str) -> Result<serde_json::Value, String> {
         return serde_json::from_str(&body).map_err(|e| format!("{url}: {e}"));
     }
 
-    let body = http_get_text(url)?;
+    let body = super::redirects::http_get_text(url, check)?;
     serde_json::from_str(&body).map_err(|e| format!("{url}: {e}"))
-}
-
-/// GET `url` as JSON text with timeout and size cap. A token is attached only
-/// for the hosts [`forge_auth_header`] allows, and redirects are followed by
-/// hand so it is never carried to a different host (ureq would forward a
-/// custom header like `PRIVATE-TOKEN` across any redirect).
-pub(super) fn http_get_text(url: &str) -> Result<String, String> {
-    let agent = crate::http::agent(crate::http::API_TIMEOUT, 0);
-    let mut current = url.to_string();
-    for _ in 0..5 {
-        let origin_host = crate::http::host_of(url);
-        let auth = if crate::http::host_of(&current) == origin_host {
-            forge_auth_header(&current)
-        } else {
-            None
-        };
-        let resp = ap_ecosystem::net::call_with_retries_detailed(|| {
-            let mut req = agent
-                .get(&current)
-                .header("User-Agent", "auto-package")
-                .header("Accept", "application/json");
-            if let Some((name, value)) = &auth {
-                req = req.header(*name, value.as_str());
-            }
-            req
-        })
-        .map_err(|e| describe_forge_http_error(url, &ForgeError::from_call_failure(&e)))?;
-        let status = resp.status().as_u16();
-        if (300..400).contains(&status)
-            && let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok())
-        {
-            current = redirect_target(&current, loc).map_err(|e| format!("{url}: {e}"))?;
-            continue;
-        }
-        if status >= 400 {
-            return Err(describe_forge_http_error(
-                url,
-                &ForgeError::from_status(status),
-            ));
-        }
-        return crate::http::read_text(resp).map_err(|e| format!("{url}: {e}"));
-    }
-    Err(format!("{url}: too many redirects"))
-}
-
-/// Where a redirect from `current` to `loc` leads. An https URL may not be
-/// redirected to plain http: that would send the request (and any token) in
-/// the clear, and a network attacker could forge the answer.
-pub(super) fn redirect_target(current: &str, loc: &str) -> Result<String, String> {
-    let lower = loc.to_ascii_lowercase();
-    if lower.starts_with("https://") {
-        return Ok(loc.to_string());
-    }
-    if lower.starts_with("http://") {
-        if current.to_ascii_lowercase().starts_with("https://") {
-            return Err(format!("refusing redirect from https to insecure {loc}"));
-        }
-        return Ok(loc.to_string());
-    }
-    let host = crate::http::host_of(current).unwrap_or_default();
-    Ok(format!("https://{host}{loc}"))
 }
 
 /// The first `tag_name` (or `name`, for a bare tag list) in a forge response,

@@ -2,19 +2,25 @@
 //! upstream request or commit it copies), and what the forge says about that
 //! request. Reading the origin needs no network; see [`detect`].
 
+mod budget;
+mod cache;
 mod detect;
 #[cfg(test)]
 mod detect_tests;
 mod header;
 #[cfg(test)]
 mod header_tests;
+mod live;
 mod reason;
 mod status;
 #[cfg(test)]
 mod status_tests;
 
+pub use budget::reset as reset_budget;
+pub use cache::{containment_cached, state_cached};
 pub use detect::{OriginInputs, OriginRead, classify_url, read_origin};
 pub use header::{Claim, spec_with_comment, with_header};
+pub use live::LiveForge;
 pub use reason::{cut, fold_field, reason_from_changes, reason_of, sanitize};
 pub use status::{
     Containment, ForgeNet, PrState, PrStatus, containment_of, diff_url, parse_state, state_url,

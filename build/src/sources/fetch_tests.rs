@@ -159,14 +159,14 @@ pub(super) fn direct_archive_must_match_requested_version() {
 #[test]
 pub(super) fn redirects_may_not_downgrade_to_http() {
     let from = "https://api.example.org/x";
-    assert!(super::redirect_target(from, "http://evil.example/x").is_err());
-    assert!(super::redirect_target(from, "HTTP://evil.example/x").is_err());
+    assert!(super::redirects::redirect_target(from, "http://evil.example/x").is_err());
+    assert!(super::redirects::redirect_target(from, "HTTP://evil.example/x").is_err());
     assert_eq!(
-        super::redirect_target(from, "https://b.example/y").unwrap(),
+        super::redirects::redirect_target(from, "https://b.example/y").unwrap(),
         "https://b.example/y"
     );
     assert_eq!(
-        super::redirect_target(from, "/z").unwrap(),
+        super::redirects::redirect_target(from, "/z").unwrap(),
         "https://api.example.org/z"
     );
 }
