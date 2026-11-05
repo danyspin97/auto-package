@@ -23,6 +23,18 @@ pub(super) struct PlanReport {
     /// The packages whose spec OBS failed to answer, each with the reason: they
     /// were not compared, so the run is incomplete.
     pub(super) unreadable: Vec<String>,
+    /// The skipped packages counted by their reason (see [`skip_label`]).
+    by_reason: std::collections::BTreeMap<String, usize>,
+}
+
+/// The label a skip counts under in the plan line: the reason's kind, and
+/// `stopped` for a read that the run's interruption ended.
+fn skip_label(reason: &ap_build::update::SkipReason) -> String {
+    use ap_build::update::SkipReason;
+    match reason {
+        SkipReason::ReadFailed(why) if why == "interrupted" => "stopped".to_string(),
+        other => other.kind().to_string(),
+    }
 }
 
 impl PlanReport {
@@ -80,6 +92,7 @@ impl PlanReport {
             }
             Decision::Skipped(reason) => {
                 self.n_skipped += 1;
+                *self.by_reason.entry(skip_label(reason)).or_default() += 1;
                 format!("[skip]    {}  ({reason})", c.rpm_name)
             }
         };
@@ -107,10 +120,27 @@ impl PlanReport {
     }
 
     pub(super) fn finish(&self, reporter: &(dyn Reporter + Send + Sync)) {
+        let stopped = self.by_reason.contains_key("stopped") || ap_build::proc::shutting_down();
+        let head = if stopped {
+            "update plan, stopped before the end"
+        } else {
+            "update plan"
+        };
+        let breakdown = self
+            .by_reason
+            .iter()
+            .map(|(label, n)| format!("{label} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let breakdown = if breakdown.is_empty() {
+            String::new()
+        } else {
+            format!(" ({breakdown})")
+        };
         reporter.report(&Event::Progress {
             step: None,
             message: format!(
-                "update plan: {} to update, {} newer but not buildable, {} up to date, {} skipped",
+                "{head}: {} to update, {} newer but not buildable, {} up to date, {} skipped{breakdown}",
                 self.n_update, self.n_found_only, self.n_uptodate, self.n_skipped
             ),
         });
@@ -296,5 +326,26 @@ mod tests {
             ..Default::default()
         };
         assert!(!found.only_absent());
+    }
+
+    #[test]
+    fn the_plan_line_breaks_the_skips_down_by_reason() {
+        let mut plan = PlanReport::default();
+        plan.add(&skipped("a", SkipReason::NoSpec), &NullReporter);
+        plan.add(&skipped("b", SkipReason::NoSpec), &NullReporter);
+        plan.add(
+            &skipped("c", SkipReason::ReadFailed("interrupted".into())),
+            &NullReporter,
+        );
+        assert_eq!(plan.by_reason.get("NoSpec"), Some(&2));
+        assert_eq!(plan.by_reason.get("stopped"), Some(&1));
+        assert_eq!(super::skip_label(&SkipReason::NoSpec), "NoSpec");
+        let lookup = SkipReason::LookupFailed {
+            ecosystem_tag: "PyPI".into(),
+            name: "x".into(),
+            error: "404".into(),
+        };
+        assert_eq!(super::skip_label(&lookup), "LookupFailed");
+        assert_eq!(SkipReason::NotOnObs("gone".into()).kind(), "NotOnObs");
     }
 }

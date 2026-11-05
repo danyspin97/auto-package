@@ -129,6 +129,40 @@ pub enum SkipReason {
     },
 }
 
+impl SkipReason {
+    /// The kind of the reason, as a short label: the variant's name. The plan
+    /// line counts skips under it.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SkipReason::NoSpec => "NoSpec",
+            SkipReason::NoFiles => "NoFiles",
+            SkipReason::Aggregate(_) => "Aggregate",
+            SkipReason::ReadFailed(_) => "ReadFailed",
+            SkipReason::NotOnObs(_) => "NotOnObs",
+            SkipReason::NeedsMaintainer(_) => "NeedsMaintainer",
+            SkipReason::SpecHeaderMissing => "SpecHeaderMissing",
+            SkipReason::AlreadyRequested(_) => "AlreadyRequested",
+            SkipReason::NoSourceLine => "NoSourceLine",
+            SkipReason::NotRecognized { .. } => "NotRecognized",
+            SkipReason::LookupFailed { .. } => "LookupFailed",
+            SkipReason::VersionCompareFailed { .. } => "VersionCompareFailed",
+            SkipReason::Snapshot { .. } => "Snapshot",
+            SkipReason::ComputedVersion { .. } => "ComputedVersion",
+            SkipReason::PatchLevelScript { .. } => "PatchLevelScript",
+            SkipReason::OtherSeries { .. } => "OtherSeries",
+            SkipReason::NotAnRpmVersion { .. } => "NotAnRpmVersion",
+            SkipReason::Prerelease { .. } => "Prerelease",
+            SkipReason::VersionNotFound { .. } => "VersionNotFound",
+            SkipReason::UnexpandedMacro { .. } => "UnexpandedMacro",
+            SkipReason::SuseNoUpstream { .. } => "SuseNoUpstream",
+            SkipReason::SnapshotBehind { .. } => "SnapshotBehind",
+            SkipReason::BranchAhead { .. } => "BranchAhead",
+            SkipReason::RepologyDisagrees { .. } => "RepologyDisagrees",
+            SkipReason::Deprecated { .. } => "Deprecated",
+        }
+    }
+}
+
 impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
