@@ -16,7 +16,7 @@ pub(super) fn unreadable_origin(
 }
 
 /// Whether a failed read may pass on a retry: OBS did not answer, rather than
-/// the origin being broken.
+/// the origin being broken or absent.
 pub(super) fn is_transient(read: &Result<String, update::ReadError>) -> bool {
     matches!(read, Err(update::ReadError::Failed(_)))
 }
@@ -34,6 +34,22 @@ pub(super) fn settled_as_broken_origin(item: &Item, ctx: &Ctx<'_>, report: &mut 
     let Some(reason) = unreadable_origin(&read) else {
         return false;
     };
+    // OBS's 404 for the origin: the package is not on OBS, which is a skip
+    // with that cause, not a broken origin for the maintainer.
+    let absent = match &read {
+        Err(update::ReadError::Absent(why)) => Some(why),
+        _ => None,
+    };
+    if let Some(why) = absent {
+        let why = format!("the origin {} is not on OBS: {why}", item.origin);
+        ctx.warn(format!("{}: {why}", item.pkg));
+        report.results.push(ItemResult {
+            item: item.clone(),
+            outcome: ItemOutcome::Skipped(why),
+            sr: SrOutcome::NotRequested,
+        });
+        return true;
+    }
     if is_transient(&read) {
         let why = format!(
             "the origin {} could not be read, so it is left alone: {reason}",

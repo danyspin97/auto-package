@@ -93,8 +93,8 @@ pub fn branch_version(branch: &str, pkg: &str, emit: Emit<'_>) -> Result<Option<
 }
 
 /// [`branch_version`] given the read of the branch's spec. A missing spec, and
-/// a package the project does not have (OBS's answer, see `read.rs`), are the
-/// branch not holding the package.
+/// a package the branch does not have ([`update::ReadError::Absent`]: OBS
+/// answered 404), are the branch not holding the package.
 fn version_of_read(read: Result<String, update::ReadError>) -> Result<Option<String>, String> {
     match read {
         // A spec that has no readable header is not a missing package: it is
@@ -103,8 +103,7 @@ fn version_of_read(read: Result<String, update::ReadError>) -> Result<Option<Str
             Some(h) => Ok(Some(h.version)),
             None => Err("its spec has no readable Name: and Version:".to_string()),
         },
-        Err(update::ReadError::NoSpec) => Ok(None),
-        Err(update::ReadError::Failed(why)) if why.contains("does not exist on OBS") => Ok(None),
+        Err(update::ReadError::NoSpec | update::ReadError::Absent(_)) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -190,13 +189,28 @@ mod tests {
     fn a_missing_spec_or_package_is_a_branch_that_does_not_hold_it() {
         use update::ReadError;
         assert_eq!(version_of_read(Err(ReadError::NoSpec)), Ok(None));
+        // OBS's 404 for the package: the branch is not branched yet, so the
+        // package goes down the branch path, with no "left alone" skip.
         assert_eq!(
-            version_of_read(Err(ReadError::Failed(
+            version_of_read(Err(ReadError::Absent(
                 "foo does not exist on OBS (Server returned an error: HTTP Error 404: Not Found); \
                  not retried"
                     .into()
             ))),
             Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_failed_read_with_the_404_text_is_not_a_missing_branch() {
+        // Only OBS's permanent 404 classifies a package as absent: a failed read
+        // that merely mentions it says nothing about the branch.
+        use update::ReadError;
+        assert!(
+            version_of_read(Err(ReadError::Failed(
+                "foo does not exist on OBS (transient)".into()
+            )))
+            .is_err()
         );
     }
 

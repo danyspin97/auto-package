@@ -49,3 +49,17 @@ fn only_a_failed_read_is_transient() {
     ))));
     assert!(!is_transient(&Ok("Name: foo\n".to_string())));
 }
+
+#[test]
+fn an_origin_obs_says_is_not_there_is_skipped_as_not_on_obs() {
+    let read = Err(update::ReadError::Absent(
+        "foo does not exist on OBS (HTTP Error 404); not retried".to_string(),
+    ));
+    assert_eq!(
+        unreadable_origin(&read),
+        Some(update::SkipReason::NotOnObs(
+            "foo does not exist on OBS (HTTP Error 404); not retried".to_string()
+        ))
+    );
+    assert!(!is_transient(&read));
+}
