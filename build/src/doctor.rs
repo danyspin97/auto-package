@@ -108,7 +108,9 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
         if !skipped.is_empty() {
             out.push(format!(
                 "{name}: the checkout has file(s) its spec does not reference, which are not \
-                 committed: {}",
+                 committed: {}; the next commit deletes the local copy of an archive OBS does \
+                 not hold, removes from OBS a file OBS holds that the spec does not name, and \
+                 leaves anything else in the checkout until it is deleted by hand",
                 skipped.join(", ")
             ));
         }
@@ -332,6 +334,10 @@ mod tests {
             "{all}"
         );
         assert!(all.contains("not committed: stray.bin"), "{all}");
+        assert!(
+            all.contains("the next commit deletes the local copy of an archive"),
+            "{all}"
+        );
         // Without obs_name the rpm name is the checkout: nothing is there to find.
         write(&state_root, "python-apscheduler", |s| s.obs_name = None);
         let all = run(&state_root, &checkouts, || None).join("\n");
