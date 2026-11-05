@@ -51,6 +51,9 @@ where
     };
     let service_git = obs_scm_repo(&header, rpm_name, lookups.fetch_service);
     let mut found = None;
+    // Repology marks no release as newest for some projects: the package's own
+    // repository (its `tar_scm` service) is then asked, as a last resort.
+    let mut repology_no_newest = false;
     for ecosystem in ecosystems(&header, service_git) {
         match lookup(&ecosystem, lookups) {
             Ok(v) => {
@@ -58,6 +61,8 @@ where
                 break;
             }
             Err(failure) => {
+                repology_no_newest |= matches!(&ecosystem, Ecosystem::Repology { .. })
+                    && matches!(&failure, SkipReason::LookupFailed { error, .. } if error.contains("has no newest version"));
                 if matches!(&ecosystem, Ecosystem::GitRepo { .. }) {
                     git_failure.get_or_insert(failure.clone());
                 }
@@ -74,6 +79,9 @@ where
                 }
             }
         }
+    }
+    if found.is_none() && repology_no_newest {
+        found = tar_scm_fallback(rpm_name, lookups);
     }
     let Some((ecosystem, latest)) = found else {
         if let Some(why) = suse::no_upstream_release(&header, git_failure.as_ref(), || {

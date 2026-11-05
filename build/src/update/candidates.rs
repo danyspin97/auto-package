@@ -236,8 +236,50 @@ pub(crate) fn ecosystems(header: &spec::Header, service_git: Option<String>) -> 
 /// that does not fetch from git (`scm`). `tar_scm` is not read: a snapshot
 /// packaged from one names its own version, not the newest tag.
 pub(crate) fn service_git_url(service: &str) -> Option<String> {
+    service_git_of(service, "obs_scm", git_repo_url)
+}
+
+/// The git repository a `tar_scm` service names, read as [`service_git_url`]
+/// reads an `obs_scm` one. It is the last resort for a package whose upstream
+/// (Repology) names no newest release: see [`tar_scm_fallback`].
+pub(crate) fn tar_scm_git_url(service: &str) -> Option<String> {
+    service_git_of(service, "tar_scm", fixed_forge_repo_url)
+}
+
+/// [`git_repo_url`] for a repository that is queried on the strength of a
+/// service: only a fixed forge host (`is_fixed_forge_host`) is trusted, so a
+/// self-hosted `gitlab.<x>` named there is not asked.
+fn fixed_forge_repo_url(source: &str) -> Option<String> {
+    git_repo_url(source).filter(|url| {
+        ap_ecosystem::forge::parse(url)
+            .is_some_and(|forge| ap_ecosystem::forge::is_fixed_forge_host(&forge.host))
+    })
+}
+
+/// The newest version of the git repository a package's `tar_scm` service
+/// names, for a package whose Repology has no newest version. `None` when the
+/// package has no such service or the repository has no version either.
+pub(super) fn tar_scm_fallback(
+    rpm_name: &str,
+    lookups: &Lookups<'_>,
+) -> Option<(Ecosystem, String)> {
+    let url = (lookups.fetch_service)(rpm_name)
+        .as_deref()
+        .and_then(tar_scm_git_url)?;
+    let ecosystem = Ecosystem::GitRepo { url };
+    let latest = lookup(&ecosystem, lookups).ok()?;
+    Some((ecosystem, latest))
+}
+
+/// The git repository of the first live `element` service (`obs_scm`,
+/// `tar_scm`) of `service` that fetches from git.
+fn service_git_of(
+    service: &str,
+    element: &str,
+    repo: fn(&str) -> Option<String>,
+) -> Option<String> {
     let masked = mask_xml_comments(service);
-    service_elements(&masked, "obs_scm")
+    service_elements(&masked, element)
         .into_iter()
         .find_map(|at| {
             let params = source_params(service, &masked, at);
@@ -247,7 +289,7 @@ pub(crate) fn service_git_url(service: &str) -> Option<String> {
             if disabled || param("scm").is_some_and(|scm| scm != "git") {
                 return None;
             }
-            git_repo_url(param("url")?)
+            repo(param("url")?)
         })
 }
 
@@ -447,5 +489,55 @@ mod tests {
             );
         }
         assert_eq!(lookup_hint("invalid JSON"), "");
+    }
+
+    #[test]
+    fn a_package_without_a_newest_repology_release_is_looked_up_in_its_tar_scm_repository() {
+        let spec = "Name: grommunio-cui\nVersion: 1.0.0\nSource: grommunio-cui-%{version}.tar.gz\n";
+        let service = "<services><service name=\"tar_scm\"><param name=\"url\">https://github.com/grommunio/grommunio-cui.git</param><param name=\"scm\">git</param></service></services>";
+        let no_newest = |_: &str| Err("Repology has no newest version for it".to_string());
+        let repo = |_: &str| Ok("1.2.3".to_string());
+        let with_service = |_: &str| Some(service.to_string());
+        let lookups = Lookups {
+            fetch_repology_latest: &no_newest,
+            fetch_repo_latest: &repo,
+            fetch_service: &with_service,
+            ..crate::update::helpers::unused_lookups()
+        };
+        let c = classify("grommunio-cui", &|_: &str| Ok(spec.to_string()), &lookups);
+        assert!(
+            matches!(
+                c.decision,
+                Decision::Update { ref new_version, .. } if new_version == "1.2.3"
+            ),
+            "{:?}",
+            c.decision
+        );
+        // Without a tar_scm service the Repology failure stands.
+        let no_service = crate::update::helpers::unused_lookups();
+        let lookups = Lookups {
+            fetch_repology_latest: &no_newest,
+            ..no_service
+        };
+        let c = classify("grommunio-cui", &|_: &str| Ok(spec.to_string()), &lookups);
+        assert!(matches!(
+            c.decision,
+            Decision::Skipped(SkipReason::LookupFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_tar_scm_repository_is_queried_only_on_a_fixed_forge_host() {
+        let service = |url: &str| {
+            format!(
+                "<services><service name=\"tar_scm\"><param name=\"url\">{url}</param>\
+                 <param name=\"scm\">git</param></service></services>"
+            )
+        };
+        assert!(tar_scm_git_url(&service("https://github.com/o/r.git")).is_some());
+        assert_eq!(
+            tar_scm_git_url(&service("https://gitlab.corp.example/o/r.git")),
+            None
+        );
     }
 }
