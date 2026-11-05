@@ -73,6 +73,7 @@ mod tests {
             repology: &|_| Err("off".into()),
             ldconfig_macro: &|_| true,
             host_allowed: &|_| true,
+            forge: &crate::request_review::provenance_check::NO_FORGE,
         };
         let reviewed = review(&obs(), &o, &deps).unwrap();
         let work = tempfile::tempdir().unwrap();

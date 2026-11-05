@@ -31,6 +31,8 @@ pub struct Deps<'a> {
     pub ldconfig_macro: &'a dyn Fn(&str) -> bool,
     /// Whether a host may be contacted for a lookup: the allowed-hosts list.
     pub host_allowed: &'a dyn Fn(&str) -> bool,
+    /// The forge of a carried patch's upstream request (read only).
+    pub forge: &'a dyn crate::patch_provenance::ForgeNet,
 }
 
 pub struct Options<'a> {
@@ -111,6 +113,10 @@ fn check_action(
         }));
     }
     findings.extend(patch_findings(package, &a.old, &a.new));
+    let (provenance, unknown) =
+        super::provenance_check::provenance_findings(package, &a.old, &a.new, deps.forge);
+    findings.extend(provenance);
+    skipped.extend(unknown);
     let downloads = if o.download {
         let dir = o.scratch.join(format!("{index}-{package}"));
         download_sources(obs, a, &dir)

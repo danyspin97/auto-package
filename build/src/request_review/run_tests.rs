@@ -22,6 +22,7 @@ fn deps() -> Deps<'static> {
         repology: &|_| Ok("2.10.4".to_string()),
         ldconfig_macro: &|_| true,
         host_allowed: &|_| true,
+        forge: &crate::request_review::provenance_check::NO_FORGE,
     }
 }
 

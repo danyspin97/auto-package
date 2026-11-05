@@ -161,11 +161,16 @@ fn run_checks(
     let plan = live_plan(Emit::run(sink));
     let hosts = ap_build::allowed_hosts::load_default();
     let host_allowed = |host: &str| hosts.allows(host, ap_build::allowed_hosts::Use::Source);
+    let forge = ap_build::patch_provenance::LiveForge {
+        package: "review",
+        hosts: &hosts,
+    };
     let deps = Deps {
         plan: &plan,
         repology: &live_repology,
         ldconfig_macro: &crate::review_cmd::ldconfig_macro,
         host_allowed: &host_allowed,
+        forge: &forge,
     };
     let options = Options {
         id,

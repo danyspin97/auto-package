@@ -158,6 +158,13 @@ pub fn route(f: &ReviewFinding) -> FindingRoute {
         ids::PATCH_UNREADABLE | ids::PATCH_DROPPED => {
             Maintainer("a patch the tool cannot read or a dropped patch needs a person")
         }
+        ids::PATCH_PROVENANCE_MISSING
+        | ids::PATCH_UPSTREAM_MERGED
+        | ids::PATCH_UPSTREAM_RELEASED
+        | ids::PATCH_UPSTREAM_MOVED
+        | ids::PATCH_UPSTREAM_CLOSED => {
+            Maintainer("the upstream request of a carried patch changed: a person checks it")
+        }
         ids::SOURCE_UNEXPANDED => Maintainer("a source the tool cannot expand is not checked"),
         ids::BUILD_FAILS_IN_TARGET_TOO => {
             Maintainer("the target fails too: not this change's doing")

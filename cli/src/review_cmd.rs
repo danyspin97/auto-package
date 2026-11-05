@@ -149,11 +149,16 @@ fn run(args: &ReviewArgs) -> Result<i32, String> {
     // The lookups of a spec from a request go only to hosts the list allows.
     let hosts = ap_build::allowed_hosts::load_default();
     let host_allowed = |host: &str| hosts.allows(host, ap_build::allowed_hosts::Use::Source);
+    let forge = ap_build::patch_provenance::LiveForge {
+        package: "review",
+        hosts: &hosts,
+    };
     let deps = Deps {
         plan: &plan,
         repology: &live_repology,
         ldconfig_macro: &ldconfig_macro,
         host_allowed: &host_allowed,
+        forge: &forge,
     };
     let options = Options {
         id: &args.request_id,

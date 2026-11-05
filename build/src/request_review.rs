@@ -28,6 +28,7 @@ pub mod ids;
 pub mod patch_checks;
 #[cfg(test)]
 mod patch_checks_tests;
+pub mod provenance_check;
 #[cfg(test)]
 mod read_only_tests;
 pub mod render;
