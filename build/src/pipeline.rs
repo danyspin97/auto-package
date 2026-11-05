@@ -281,6 +281,9 @@ mod review_marks_tests;
 use review_marks::*;
 #[cfg(test)]
 mod disabled_patch_tests;
+mod patch_provenance;
+#[cfg(test)]
+mod patch_provenance_tests;
 #[cfg(test)]
 mod patch_review_tests;
 mod patch_rewrite;

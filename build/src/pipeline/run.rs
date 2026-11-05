@@ -10,6 +10,7 @@ use crate::pipeline::commit::*;
 use crate::pipeline::deps_turn::*;
 use crate::pipeline::generate_stage::*;
 use crate::pipeline::notes_step::*;
+use crate::pipeline::patch_provenance::*;
 use crate::pipeline::patch_stage::*;
 use crate::pipeline::review::*;
 use crate::pipeline::sdist_stage::*;
@@ -485,6 +486,10 @@ fn run_stages(
     // The carried-forward patches against the new sources, before the review
     // turn and the first commit.
     patch_stage(&ctx, &mut st, &spec)?;
+    // The lint stage only: an update checks its carried patches in the patch loop.
+    if spec.carried_from.is_none() && !ctx.config.update {
+        provenance_stage(&ctx, &mut st)?;
+    }
 
     let build_log_nonempty = checkout.has_failed_build_log(
         ctx.ws

@@ -17,7 +17,7 @@ mod live;
 mod reason;
 mod status;
 #[cfg(test)]
-mod status_tests;
+pub(crate) mod status_tests;
 mod verdict;
 #[cfg(test)]
 mod verdict_tests;
