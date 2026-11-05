@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use super::reason::bullets_of;
 use super::{OriginEvidence, OriginKind, PatchOrigin};
 use crate::bugfix::{upstream_repo_of_spec, urls_in};
 use crate::pipeline::{declared_patches, header_field, header_lines, names_in_bullet};
@@ -310,25 +311,9 @@ fn spec_comment_refs(spec: &str, index: usize) -> Vec<String> {
     block.iter().flat_map(|l| refs_in(l)).collect()
 }
 
-/// The URLs and references of the `.changes` bullets that name `name`. A
-/// bullet is a `- ` line with its indented continuation lines.
+/// The URLs and references of the `.changes` bullets that name `name`.
 fn bullet_refs(changes: &str, name: &str) -> Vec<String> {
-    let mut bullets: Vec<String> = Vec::new();
-    let mut open = false;
-    for line in changes.lines() {
-        if let Some(text) = line.strip_prefix("- ") {
-            bullets.push(text.to_string());
-            open = true;
-        } else if open && line.starts_with(char::is_whitespace) {
-            if let Some(last) = bullets.last_mut() {
-                last.push(' ');
-                last.push_str(line.trim());
-            }
-        } else {
-            open = false;
-        }
-    }
-    bullets
+    bullets_of(changes)
         .iter()
         .filter(|b| {
             let words: Vec<&str> = b.split_whitespace().collect();

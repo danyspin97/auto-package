@@ -5,8 +5,14 @@
 mod detect;
 #[cfg(test)]
 mod detect_tests;
+mod header;
+#[cfg(test)]
+mod header_tests;
+mod reason;
 
 pub use detect::{OriginInputs, OriginRead, classify_url, read_origin};
+pub use header::{Claim, spec_with_comment, with_header};
+pub use reason::{cut, fold_field, reason_from_changes, reason_of, sanitize};
 
 /// What kind of upstream change a patch is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
