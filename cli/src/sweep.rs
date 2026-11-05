@@ -52,6 +52,11 @@ impl PlanReport {
             Decision::Skipped(SkipReason::ReadFailed(why)) => {
                 self.unreadable.push(format!("{}: {why}", c.rpm_name));
             }
+            // A lookup that a rate limit or an outage failed may pass: the package
+            // is not checked, so the run is incomplete.
+            Decision::Skipped(reason) if reason.is_transient_lookup() => {
+                self.unreadable.push(format!("{}: {reason}", c.rpm_name));
+            }
             Decision::Skipped(SkipReason::NotOnObs(_)) => self.n_not_on_obs += 1,
             Decision::Skipped(reason @ SkipReason::RepologyDisagrees { .. }) => {
                 self.maintainer.push(format!("{}: {reason}", c.rpm_name));
@@ -347,5 +352,35 @@ mod tests {
         };
         assert_eq!(super::skip_label(&lookup), "LookupFailed");
         assert_eq!(SkipReason::NotOnObs("gone".into()).kind(), "NotOnObs");
+    }
+
+    #[test]
+    fn a_lookup_an_outage_failed_is_incomplete_not_a_skip() {
+        let mut plan = PlanReport::default();
+        plan.add(
+            &skipped(
+                "mailchariot",
+                SkipReason::LookupFailed {
+                    ecosystem_tag: "GitRepo".into(),
+                    name: "https://example.org/x".into(),
+                    error: "http status: 503".into(),
+                },
+            ),
+            &NullReporter,
+        );
+        plan.add(
+            &skipped(
+                "gone",
+                SkipReason::LookupFailed {
+                    ecosystem_tag: "PyPI".into(),
+                    name: "gone".into(),
+                    error: "http status: 404".into(),
+                },
+            ),
+            &NullReporter,
+        );
+        assert_eq!(plan.unreadable.len(), 1);
+        assert!(plan.unreadable[0].starts_with("mailchariot: "));
+        assert_eq!(plan.n_skipped, 2);
     }
 }

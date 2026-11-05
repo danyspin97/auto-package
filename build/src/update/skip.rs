@@ -163,6 +163,44 @@ impl SkipReason {
     }
 }
 
+impl SkipReason {
+    /// Whether a lookup failed in a way that may pass: the host answered with
+    /// a rate limit or a 502, 503 or 504 (in the forms the lookups' errors take:
+    /// `http status: 503`, `HTTP 503`, `503 Service Unavailable`), or timed out,
+    /// or dropped the connection. Such a package is not checked, so the run is
+    /// incomplete, rather than the package being skipped for good. A status
+    /// number inside a URL is not a status.
+    pub fn is_transient_lookup(&self) -> bool {
+        let SkipReason::LookupFailed { error, .. } = self else {
+            return false;
+        };
+        let error = error.to_ascii_lowercase();
+        let status = [429u16, 502, 503, 504].iter().any(|code| {
+            ["http status: ", "http error ", "http ", "status "]
+                .iter()
+                .any(|prefix| error.contains(&format!("{prefix}{code}")))
+                || error.contains(&format!("{code} "))
+                    && [
+                        "too many requests",
+                        "bad gateway",
+                        "service unavailable",
+                        "gateway timeout",
+                    ]
+                    .iter()
+                    .any(|phrase| error.contains(phrase))
+        });
+        status
+            || [
+                "timed out",
+                "timeout:",
+                "connection reset",
+                "temporarily unavailable",
+            ]
+            .iter()
+            .any(|p| error.contains(p))
+    }
+}
+
 impl std::fmt::Display for SkipReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -287,5 +325,40 @@ impl std::fmt::Display for SkipReason {
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod transient_tests {
+    use super::SkipReason;
+
+    fn lookup(error: &str) -> SkipReason {
+        SkipReason::LookupFailed {
+            ecosystem_tag: "Repology".into(),
+            name: "x".into(),
+            error: error.into(),
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_a_gateway_error_or_a_timeout_may_pass() {
+        assert!(lookup("http status: 503").is_transient_lookup());
+        assert!(lookup("http status: 429 (retry after 60s)").is_transient_lookup());
+        assert!(lookup("https://example.org/x: HTTP 502").is_transient_lookup());
+        assert!(lookup("HTTP Error 504: Gateway Timeout").is_transient_lookup());
+        assert!(lookup("503 Service Unavailable").is_transient_lookup());
+        assert!(lookup("operation timed out").is_transient_lookup());
+        assert!(lookup("Connection reset by peer").is_transient_lookup());
+    }
+
+    #[test]
+    fn a_deterministic_failure_stays_a_skip_even_with_a_503_in_its_url() {
+        assert!(!lookup("https://example.org/503.tar.gz: http status: 404").is_transient_lookup());
+        assert!(
+            !lookup("https://example.org/v503/releases: http status: 404").is_transient_lookup()
+        );
+        assert!(!lookup("http status: 403").is_transient_lookup());
+        assert!(!lookup("no newest version").is_transient_lookup());
+        assert!(!SkipReason::NoSpec.is_transient_lookup());
     }
 }
