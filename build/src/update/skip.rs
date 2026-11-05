@@ -213,10 +213,9 @@ impl std::fmt::Display for SkipReason {
             SkipReason::NeedsMaintainer(why) => write!(f, "needs the maintainer: {why}"),
             SkipReason::NotAnRpmVersion { latest } if is_dated(latest) => write!(
                 f,
-                "needs a maintainer: upstream's newest release ({latest}) is a date, which is \
-                 not a valid RPM Version: a date cannot be compared with the package's version. \
-                 A maintainer must choose the version to package and run update with \
-                 --to-version (no '-', spaces or slashes)"
+                "needs a maintainer: upstream's newest release ({latest}) is a date, and the \
+                 package keeps its own version scheme: a maintainer must choose the version to \
+                 package and run update with --to-version (no '-', spaces or slashes)"
             ),
             SkipReason::NotAnRpmVersion { latest } => write!(
                 f,

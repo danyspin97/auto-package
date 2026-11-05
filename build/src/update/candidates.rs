@@ -454,6 +454,8 @@ mod tests {
         assert!(!is_dated("2020-11-13-rc1"));
         // A multi-byte character in place of a digit is not a date, and no panic.
         assert!(!is_dated("2020-1\u{e9}-13"));
+        // The same with a ten-byte version, which reaches the dashed check.
+        assert!(!is_dated("2020-\u{e9}-13"));
     }
 
     #[test]
