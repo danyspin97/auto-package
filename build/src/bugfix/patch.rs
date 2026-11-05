@@ -114,7 +114,7 @@ fn text(line: &[u8]) -> String {
 }
 
 /// The number of lines before the diff or the `---` that ends a commit message.
-fn header_len(lines: &[&[u8]]) -> usize {
+pub(crate) fn header_len(lines: &[&[u8]]) -> usize {
     (0..lines.len())
         .find(|&i| {
             let l = text(lines[i]);
@@ -127,12 +127,32 @@ fn header_len(lines: &[&[u8]]) -> usize {
         .unwrap_or(lines.len())
 }
 
-fn has_field(lines: &[&[u8]], key: &str) -> bool {
+pub(crate) fn has_field(lines: &[&[u8]], key: &str) -> bool {
     lines.iter().any(|l| {
         text(l)
             .split_once(':')
             .is_some_and(|(k, v)| k.trim().eq_ignore_ascii_case(key) && !v.trim().is_empty())
     })
+}
+
+/// The line after the `Subject:` line of a header that is `head` lines long,
+/// and after its folded continuation lines; `None` when the header has no
+/// `Subject:`.
+pub(crate) fn subject_end(lines: &[&[u8]], head: usize) -> Option<usize> {
+    let s = lines[..head].iter().position(|l| {
+        text(l)
+            .split_once(':')
+            .is_some_and(|(k, _)| k.eq_ignore_ascii_case("Subject"))
+    })?;
+    let mut after = s + 1;
+    while after < head
+        && lines[after]
+            .first()
+            .is_some_and(|b| *b == b' ' || *b == b'\t')
+    {
+        after += 1;
+    }
+    Some(after)
 }
 
 /// `bytes` with the `References:` and `Upstream:` lines convention 111 asks
@@ -143,11 +163,6 @@ fn has_field(lines: &[&[u8]], key: &str) -> bool {
 pub fn with_fix_header(bytes: &[u8], facts: &HeaderFacts) -> Vec<u8> {
     let lines = lines_of(bytes);
     let head = header_len(&lines);
-    let subject = lines[..head].iter().position(|l| {
-        text(l)
-            .split_once(':')
-            .is_some_and(|(k, _)| k.eq_ignore_ascii_case("Subject"))
-    });
     let mut add: Vec<String> = Vec::new();
     if !has_field(&lines[..head], "References")
         && let Some(r) = facts.references()
@@ -157,7 +172,7 @@ pub fn with_fix_header(bytes: &[u8], facts: &HeaderFacts) -> Vec<u8> {
     if !has_field(&lines[..head], "Upstream") && !has_field(&lines[..head], "Patch-Mainline") {
         add.push(facts.upstream_line());
     }
-    let Some(s) = subject else {
+    let Some(after) = subject_end(&lines, head) else {
         let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 256);
         out.extend(format!("Subject: {}\n", facts.reason).bytes());
         for l in &add {
@@ -167,14 +182,6 @@ pub fn with_fix_header(bytes: &[u8], facts: &HeaderFacts) -> Vec<u8> {
         out.extend_from_slice(bytes);
         return out;
     };
-    let mut after = s + 1;
-    while after < head
-        && lines[after]
-            .first()
-            .is_some_and(|b| *b == b' ' || *b == b'\t')
-    {
-        after += 1;
-    }
     let assemble = |add: &[String]| -> Vec<u8> {
         let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 256);
         for l in &lines[..after] {

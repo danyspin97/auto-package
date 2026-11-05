@@ -165,3 +165,14 @@ fn text_for_a_spec_comment_has_no_macro_and_no_line_break() {
     );
     assert_eq!(spec_safe("plain text"), "plain text");
 }
+
+#[test]
+fn subject_end_takes_the_folded_subject_lines() {
+    let text = "From: a\nSubject: [PATCH] one\n two\nDate: x\n\nbody\n";
+    let lines: Vec<&[u8]> = text.split_inclusive('\n').map(str::as_bytes).collect();
+    let head = header_len(&lines);
+    assert_eq!(subject_end(&lines, head), Some(3));
+    let plain = "Index: x\n--- a\n+++ b\n";
+    let lines: Vec<&[u8]> = plain.split_inclusive('\n').map(str::as_bytes).collect();
+    assert_eq!(subject_end(&lines, header_len(&lines)), None);
+}
