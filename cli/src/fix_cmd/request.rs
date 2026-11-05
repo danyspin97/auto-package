@@ -267,15 +267,16 @@ pub(super) fn run(a: &FixArgs, id: &str, summary: &mut Option<String>) -> color_
     let sink = HumanSink::new(level);
     let emit = Emit::run(&sink);
     let obs = LiveRequestObs { emit };
-    let user = osc::current_user(emit).map_err(|e| eyre!("{e}"))?;
-    let work_dir = std::path::absolute(&a.work_dir)?;
-    // The same terminal check as `update --submit`: nothing is built or sent when no one can confirm.
+    // The same terminal check as `update --submit`, before any read from OBS: nothing is
+    // built or sent when no one can confirm.
     let is_tty = std::io::stdin().is_terminal();
     if let Some(message) =
         crate::update_project::needs_terminal(a.submit, false, a.yes, a.dry_run, is_tty)
     {
         return Err(crate::session::NotSubmitted(message).into());
     }
+    let user = osc::current_user(emit).map_err(|e| eyre!("{e}"))?;
+    let work_dir = std::path::absolute(&a.work_dir)?;
 
     // A request this run may not fix is refused before anything is downloaded or written.
     let early = gather(&obs, id).map_err(|e| eyre!("{}", e.0))?;
