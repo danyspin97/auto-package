@@ -400,7 +400,9 @@ pub fn restore_baseline_listing(
     commit: impl FnOnce(&Path, &str, &[String]) -> Result<(), Error>,
 ) -> Result<Restored, String> {
     if let Ok(xml) = obs_xml(expected)
-        && (obs_listing_matches(dir, expected, &xml) || commit_never_landed(dir, &xml))
+        && (obs_listing_matches(dir, expected, &xml)
+            || commit_never_landed(dir, &xml)
+            || restore_already_landed(dir, expected, &xml))
     {
         // Nothing landed on OBS, but the failed attempt's edits are still in the
         // checkout: put the saved copies back there (nothing is committed), so a
@@ -422,6 +424,17 @@ fn commit_never_landed(dir: &Path, obs_xml: &str) -> bool {
     })
 }
 
+/// Whether a restore of `dir` already landed and was cut short before the
+/// baseline was removed: OBS and the checkout both hold the revision that
+/// restore made. Nothing is left to put back, so the next run drops the baseline.
+fn restore_already_landed(dir: &Path, expected: &Path, obs_xml: &str) -> bool {
+    let Some(head) = expanded_revision(obs_xml) else {
+        return false;
+    };
+    restored_revisions(dir).contains(&head)
+        && checkout_revision(expected).as_deref() == Some(head.as_str())
+}
+
 /// [`restore_baseline_listing`] against OBS, committing through [`commit`], and
 /// removing `dir` once it is settled. A failure leaves `dir` in place, marked
 /// as unrestored (see [`begin_baseline`]). The commit may run after a
@@ -441,8 +454,18 @@ pub fn restore_baseline_outcome(
                 .map_err(|e| e.to_string())
         },
         |checkout| obs_still_at_checkout(checkout, dir),
-        |checkout, message, files| commit(checkout, message, files, None, emit),
+        |checkout, message, files| {
+            record_restore(dir, checkout, || {
+                commit(checkout, message, files, None, emit)
+            })
+        },
     );
+    let outcome = outcome.and_then(|restored| match restored {
+        Restored::Undone if !attempted_files(dir).is_empty() => {
+            restore_landed_as_made(dir, expected).map(|()| restored)
+        }
+        Restored::Undone | Restored::NothingWritten => Ok(restored),
+    });
     match outcome {
         Ok(restored) => {
             let _ = fs::remove_dir_all(dir);
@@ -453,6 +476,39 @@ pub fn restore_baseline_outcome(
             Err(why)
         }
     }
+}
+
+/// After the restore's commit: OBS must still hold the revision the restore
+/// made, which the checkout records. Between the commit and this read another
+/// commit could land (the window is small but not closed: a commit cannot be
+/// fenced). When one did, the restore is reported as not done and the baseline
+/// is kept for inspection, with the reason.
+fn restore_landed_as_made(dir: &Path, expected: &Path) -> Result<(), String> {
+    let (project, package) = checkout_project_package(expected)?;
+    let made = checkout_revision(expected)
+        .ok_or_else(|| format!("the checkout of {project}/{package} records no revision"))?;
+    let xml = source_listing_expanded_xml(&project, &package, Emit::quiet()).map_err(|e| {
+        format!(
+            "the restore's commit cannot be checked on OBS ({e}); the baseline is kept in {}",
+            dir.display()
+        )
+    })?;
+    let head = expanded_revision(&xml)
+        .ok_or_else(|| format!("OBS returned no revision for {project}/{package}"))?;
+    landed_as_made(dir, &format!("{project}/{package}"), &made, &head)
+}
+
+/// Whether OBS's head `head` is the revision the restore `made`. When it is not,
+/// the reason says so, and the baseline stays in `dir`.
+pub fn landed_as_made(dir: &Path, package: &str, made: &str, head: &str) -> Result<(), String> {
+    if head == made {
+        return Ok(());
+    }
+    Err(format!(
+        "a commit landed on OBS during the restore: {package} is at revision {head}, \
+         the restore made {made}; the baseline is kept in {} for inspection",
+        dir.display()
+    ))
 }
 
 /// [`restore_baseline_outcome`] for callers that only need to know it worked.

@@ -255,3 +255,66 @@ fn a_marker_at_obs_revision_settles_a_commit_that_never_landed() {
     );
     assert!(commits.borrow().is_empty());
 }
+
+/// The restore's commit landed (osc recorded its revision) and the run ended
+/// before the baseline was removed. The next run must not refuse it: OBS holds
+/// the restored revision, so there is nothing left to put back.
+#[test]
+fn a_restore_that_landed_before_a_crash_is_not_refused_again() {
+    let co = checkout_at("aaa");
+    let base = attempted(co.path());
+    record_commit(base.path(), co.path(), || {
+        write_rev(co.path(), "bbb");
+        Ok(())
+    })
+    .unwrap();
+    record_restore(base.path(), co.path(), || {
+        write_rev(co.path(), "ccc");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(restored_revisions(base.path()), vec!["ccc".to_string()]);
+    let commits = RefCell::new(Vec::new());
+    assert_eq!(
+        restore(base.path(), co.path(), &link_listing("ccc", "z"), &commits),
+        Ok(Restored::NothingWritten)
+    );
+    assert!(commits.borrow().is_empty());
+}
+
+/// A restore cut short before its commit: OBS still holds the attempt's
+/// recorded revision, so the restore is made again, and nothing else is.
+#[test]
+fn a_restore_cut_short_before_its_commit_is_made_again() {
+    let co = checkout_at("aaa");
+    let base = attempted(co.path());
+    record_commit(base.path(), co.path(), || {
+        write_rev(co.path(), "bbb");
+        Ok(())
+    })
+    .unwrap();
+    let _ = record_restore(base.path(), co.path(), || {
+        Err(Error::NotActionable("killed".into()))
+    });
+    assert!(restored_revisions(base.path()).is_empty());
+    let commits = RefCell::new(Vec::new());
+    assert_eq!(
+        restore(base.path(), co.path(), &link_listing("bbb", "y"), &commits),
+        Ok(Restored::Undone)
+    );
+    assert_eq!(commits.borrow().len(), 1);
+}
+
+/// A commit that lands during the restore: the head is not the revision the
+/// restore made, so the baseline stays for inspection.
+#[test]
+fn a_commit_landing_during_the_restore_keeps_the_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(landed_as_made(dir.path(), "home:p/foo", "ccc", "ccc").is_ok());
+    let why = landed_as_made(dir.path(), "home:p/foo", "ccc", "hhh").unwrap_err();
+    assert!(
+        why.contains("a commit landed on OBS during the restore"),
+        "{why}"
+    );
+    assert!(why.contains("the baseline is kept in"), "{why}");
+}

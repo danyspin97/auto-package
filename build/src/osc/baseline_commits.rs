@@ -13,6 +13,11 @@ const PENDING_COMMIT: &str = "pending-commit";
 /// first. Written after each commit lands.
 const COMMITTED: &str = "revisions";
 
+/// The revisions the restores of a baseline landed as (see
+/// `restore_baseline_outcome`), kept apart from the attempts' so a restore that
+/// landed and was cut short before the baseline was removed is recognised.
+const RESTORED: &str = "restored";
+
 /// The revision the checkout holds, as osc records it in `.osc/_files`.
 pub fn checkout_revision(checkout: &Path) -> Option<String> {
     fs::read_to_string(checkout.join(".osc/_files"))
@@ -30,7 +35,16 @@ pub fn pending_commit_base(dir: &Path) -> Option<String> {
 
 /// The revisions the attempts' commits landed as in `dir`, oldest first.
 pub fn committed_revisions(dir: &Path) -> Vec<String> {
-    fs::read_to_string(dir.join(COMMITTED))
+    revisions_in(dir, COMMITTED)
+}
+
+/// The revisions the restores of `dir` landed as, oldest first.
+pub fn restored_revisions(dir: &Path) -> Vec<String> {
+    revisions_in(dir, RESTORED)
+}
+
+fn revisions_in(dir: &Path, log: &str) -> Vec<String> {
+    fs::read_to_string(dir.join(log))
         .unwrap_or_default()
         .lines()
         .filter(|l| !l.is_empty())
@@ -119,4 +133,23 @@ fn append_landed(dir: &Path, checkout: &Path, log: &str, before: &str) -> bool {
             false
         }
     }
+}
+
+/// Runs the restore commit `commit` of `dir` and records the revision it landed
+/// as in the restored log. No marker is set: a restore cut short before its
+/// commit leaves OBS at the attempt's recorded revision, so the next run
+/// restores again. A restore cut short after osc recorded its commit, but
+/// before this append, leaves a revision this baseline does not know: the next
+/// run refuses it (equality is not ownership) and the baseline is discarded by
+/// hand, with the command the refusal names. A second restore commit is not made
+/// over a revision of unknown origin.
+pub fn record_restore(
+    dir: &Path,
+    checkout: &Path,
+    commit: impl FnOnce() -> Result<(), Error>,
+) -> Result<(), Error> {
+    let before = checkout_revision(checkout).unwrap_or_default();
+    commit()?;
+    append_landed(dir, checkout, RESTORED, &before);
+    Ok(())
 }

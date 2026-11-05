@@ -110,3 +110,16 @@ fn a_service_listed_in_the_listing_but_not_checked_out_records_nothing() {
     .unwrap();
     assert!(committed_revisions(base.path()).is_empty());
 }
+
+#[test]
+fn a_restore_lands_in_its_own_log_not_the_attempts() {
+    let co = checkout_at("aaa");
+    let base = tempfile::tempdir().unwrap();
+    record_restore(base.path(), co.path(), || {
+        land(co.path(), "bbb");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(restored_revisions(base.path()), vec!["bbb".to_string()]);
+    assert!(committed_revisions(base.path()).is_empty());
+}
