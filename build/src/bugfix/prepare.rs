@@ -187,22 +187,15 @@ fn fixed_release(repo: &str, sha: &str, version: &str, net: &dyn FixNet) -> Fixe
         Ok(t) => t,
         Err(e) => return FixedIn::NotChecked(e),
     };
-    // Oldest first: the first release that has it.
-    let newer: Vec<&String> = tags
-        .iter()
-        .filter(|t| crate::update::is_newer(tag_version(t), version))
-        .rev()
-        .take(8)
-        .collect();
-    for tag in newer {
+    let mut contains = |tag: &str| {
         let path = compare_path(&forge.project_path, tag, sha);
-        match net.github_json(&path) {
-            Ok(j) if tag_contains(&j) => return FixedIn::Tag(tag.clone()),
-            Ok(_) => {}
-            Err(e) => return FixedIn::NotChecked(e),
-        }
+        net.github_json(&path).map(|j| tag_contains(&j))
+    };
+    match release_containing(&tags, version, 8, false, &mut contains) {
+        Ok(ReleaseHas::Newer(tag)) => FixedIn::Tag(tag),
+        Ok(_) => FixedIn::NoneYet,
+        Err(e) => FixedIn::NotChecked(e),
     }
-    FixedIn::NoneYet
 }
 
 fn read_texts(req: &FixRequest<'_>, hosts: &AllowedHosts, net: &dyn FixNet, job: &mut FixJob) {

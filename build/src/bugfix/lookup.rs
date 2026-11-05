@@ -121,3 +121,45 @@ pub fn tag_version(tag: &str) -> &str {
     tag.find(|c: char| c.is_ascii_digit())
         .map_or(tag, |i| &tag[i..])
 }
+
+/// Where a commit is contained among the release tags of a project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseHas {
+    /// The tag of the packaged version contains it.
+    Packaged,
+    /// The oldest newer release that contains it.
+    Newer(String),
+    /// No release that was asked contains it.
+    None,
+}
+
+/// The first release that contains a commit. With `check_packaged`, the tag
+/// of `version` is asked first; then the newer tags, oldest first, at most
+/// `newer_limit` of them. `contains` says whether a tag contains the commit;
+/// its error stops the search.
+pub fn release_containing(
+    tags: &[String],
+    version: &str,
+    newer_limit: usize,
+    check_packaged: bool,
+    contains: &mut dyn FnMut(&str) -> Result<bool, String>,
+) -> Result<ReleaseHas, String> {
+    if check_packaged
+        && let Some(tag) = tags.iter().find(|t| tag_version(t) == version)
+        && contains(tag)?
+    {
+        return Ok(ReleaseHas::Packaged);
+    }
+    let newer: Vec<&String> = tags
+        .iter()
+        .filter(|t| crate::update::is_newer(tag_version(t), version))
+        .rev()
+        .take(newer_limit)
+        .collect();
+    for tag in newer {
+        if contains(tag)? {
+            return Ok(ReleaseHas::Newer(tag.clone()));
+        }
+    }
+    Ok(ReleaseHas::None)
+}
