@@ -130,7 +130,11 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
     // not bumped with it, or the archive is left from an older release.
     if let Some(spec_version) = &spec_version {
         let archives = source_archives(checkout);
-        if !archives.is_empty() && !archives.iter().any(|a| names_version(a, spec_version)) {
+        if !archives.is_empty()
+            && !archives
+                .iter()
+                .any(|a| names_version(a, spec_version) || spec_names_archive(&spec, a))
+        {
             out.push(format!(
                 "{name}: the spec says {spec_version} but the checkout's source archive(s) are {}",
                 archives.join(", ")
@@ -190,6 +194,18 @@ fn names_version(archive: &str, version: &str) -> bool {
                         || (is_wheel && (rest.starts_with('-') || rest == ".whl")))
             })
     })
+}
+
+/// Whether the spec's own `Source` lines name `archive`, with `%{name}`,
+/// `%{version}` and its `%global`/`%define` values expanded. A spec may name an
+/// archive with a version that is not its `Version:` (`dmraid-%{src_version}`
+/// for `1.0.0.rc16-3` under `Version: 1.0.0.rc16.3`, `popt-%{version}-release`):
+/// what the spec names is the archive it builds from.
+fn spec_names_archive(spec: &str, archive: &str) -> bool {
+    crate::osc::spec_names_source(spec, archive)
+        || crate::spec::expanded_sources(spec)
+            .iter()
+            .any(|source| source.file == archive)
 }
 
 /// File names of the source archives in a checkout.
@@ -450,6 +466,49 @@ mod tests {
             "{found}"
         );
         assert!(!found.contains("w-1.0.tar.gz"), "{found}");
+    }
+
+    #[test]
+    fn an_archive_the_spec_names_under_another_spelling_of_its_version_is_not_stale() {
+        let root = tempfile::tempdir().unwrap();
+        let state_root = root.path().join("state");
+        let checkouts = root.path().join("proj");
+        let cases = [
+            // `src_version` keeps the `-` that `Version:` writes as `.`.
+            (
+                "dmraid",
+                "Name: dmraid\nVersion: 1.0.0.rc16.3\n%define src_version 1.0.0.rc16-3\n\
+                 Source: https://h/dmraid-%{src_version}.tar.bz2\n",
+                "dmraid-1.0.0.rc16-3.tar.bz2",
+            ),
+            // A `-release` suffix written into `Source0`.
+            (
+                "popt",
+                "Name: popt\nVersion: 1.19\nSource0: %{name}-%{version}-release.tar.gz\n",
+                "popt-1.19-release.tar.gz",
+            ),
+            // An archive of another version than the spec's is still stale.
+            (
+                "elfutils",
+                "Name: elfutils\nVersion: 0.197\nSource: https://h/%{name}-%{version}.tar.bz2\n",
+                "elfutils-0.196.tar.bz2",
+            ),
+        ];
+        for (name, spec, archive) in cases {
+            std::fs::create_dir_all(checkouts.join(name)).unwrap();
+            std::fs::write(checkouts.join(format!("{name}/{name}.spec")), spec).unwrap();
+            std::fs::write(checkouts.join(format!("{name}/{archive}")), "x").unwrap();
+            write(&state_root, name, |s| {
+                s.last_outcome = Some("failed".into());
+            });
+        }
+        let all = run(&state_root, &checkouts, || None).join("\n");
+        assert!(!all.contains("dmraid: the spec says"), "{all}");
+        assert!(!all.contains("popt: the spec says"), "{all}");
+        assert!(
+            all.contains("the spec says 0.197 but the checkout's source archive(s) are elfutils-0.196.tar.bz2"),
+            "{all}"
+        );
     }
 
     #[test]
