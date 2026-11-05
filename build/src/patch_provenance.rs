@@ -15,6 +15,9 @@ mod reason;
 mod status;
 #[cfg(test)]
 mod status_tests;
+mod verdict;
+#[cfg(test)]
+mod verdict_tests;
 
 pub use budget::reset as reset_budget;
 pub use cache::{containment_cached, state_cached};
@@ -24,6 +27,9 @@ pub use live::LiveForge;
 pub use reason::{cut, fold_field, reason_from_changes, reason_of, sanitize};
 pub use status::{
     Containment, ForgeNet, PrState, PrStatus, containment_of, diff_url, parse_state, state_url,
+};
+pub use verdict::{
+    HeaderPlan, Inputs, Provenance, Verdict, assess, claim_of, header_for, spec_comment_for,
 };
 
 /// What kind of upstream change a patch is.

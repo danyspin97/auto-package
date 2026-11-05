@@ -15,6 +15,7 @@ const REPO: &str = "https://github.com/o/r";
 pub(crate) struct FakeForge {
     pub json: HashMap<String, Result<Value, String>>,
     pub tags: Vec<String>,
+    pub patches: HashMap<String, String>,
     pub calls: RefCell<Vec<String>>,
 }
 
@@ -28,7 +29,10 @@ impl ForgeNet for FakeForge {
     }
     fn patch_text(&self, url: &str) -> Result<String, String> {
         self.calls.borrow_mut().push(url.to_string());
-        Err(format!("no patch {url}"))
+        self.patches
+            .get(url)
+            .cloned()
+            .ok_or_else(|| format!("no patch {url}"))
     }
     fn release_tags(&self, _repo: &str) -> Result<Vec<String>, String> {
         Ok(self.tags.clone())
