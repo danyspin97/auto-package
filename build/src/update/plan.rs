@@ -497,10 +497,22 @@ pub fn plan_each(
     let (hits_before, fetched_before) = upstream_cache::stats();
     let fetch_has_service = |pkg: &str| suse::project_has_service(project, pkg, emit);
     let fetch_release_date = |url: &str| snapshot::cached_release_date(url);
+    let sibling_progress = |done: usize, total: usize| {
+        let mut message =
+            format!("reading the specs of {project} for the sibling check ({done}/{total})");
+        if done == 0 {
+            message.push_str(": a one-time read for this plan");
+        }
+        emit.reporter.report(&Event::Progress {
+            step: emit.step,
+            message,
+        });
+    };
     let siblings = ProjectSiblings::new(
         sources.iter().cloned(),
         check_pool::check_jobs(),
         &fetch_spec,
+        &sibling_progress,
     );
     // The packages are checked `check_jobs()` at a time. `Lookups` holds
     // closures that are not `Sync`, so each check builds its own from the

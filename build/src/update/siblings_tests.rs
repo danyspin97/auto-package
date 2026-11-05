@@ -50,7 +50,7 @@ fn plan_with(jobs: usize, flaky: &str) -> (Vec<String>, BTreeMap<String, usize>)
     };
     let cells: SpecCells = Mutex::new(HashMap::new());
     let fetch = |name: &str| read_once(&cells, name, || obs(name));
-    let siblings = ProjectSiblings::new(names.clone(), jobs, &fetch);
+    let siblings = ProjectSiblings::new(names.clone(), jobs, &fetch, &NO_REPORT);
     let check = |name: &str| classify_in_project(name, &fetch, &only_repo("2.2.0"), &siblings);
     let panicked = |name: &str, why: &str| {
         skipped(
@@ -100,7 +100,7 @@ fn a_package_without_a_forge_upstream_reads_no_other_spec() {
         }
     };
     let names: Vec<String> = (0..200).map(|i| package(i).0).collect();
-    let siblings = ProjectSiblings::new(names.clone(), 8, &fetch);
+    let siblings = ProjectSiblings::new(names.clone(), 8, &fetch, &NO_REPORT);
     let lookups = crate::update::helpers::only_pypi("2.0.0");
     let c = classify_in_project("python-x", &fetch, &lookups, &siblings);
     assert!(
@@ -141,7 +141,7 @@ fn influx_decision(sibling: &(dyn Fn(usize) -> Result<String, ReadError> + Sync)
         _ => Err(ReadError::NoSpec),
     };
     let names = vec!["influxdb".to_string(), "influxdb2".to_string()];
-    let siblings = ProjectSiblings::new(names, 1, &fetch);
+    let siblings = ProjectSiblings::new(names, 1, &fetch, &NO_REPORT);
     classify_in_project("influxdb", &fetch, &only_repo("2.7.12"), &siblings).decision
 }
 
@@ -207,8 +207,38 @@ fn an_abandoned_index_reads_nothing_and_stops_the_checks_that_need_it() {
         Err(ReadError::NoSpec)
     };
     let names = vec!["a".to_string(), "b".to_string()];
-    let siblings = ProjectSiblings::new(names, 2, &fetch);
+    let siblings = ProjectSiblings::new(names, 2, &fetch, &NO_REPORT);
     siblings.abandon();
     assert!(siblings.related("a", "https://github.com/x/y").is_err());
     assert_eq!(reads.load(Ordering::SeqCst), 0);
+}
+
+/// The reports of an index build of `n` packages on `jobs` threads, where
+/// every read is instant.
+fn reports_of(n: usize, jobs: usize) -> Vec<(usize, usize)> {
+    let names: Vec<String> = (0..n).map(|i| format!("pkg-{i:03}")).collect();
+    let fetch = |_: &str| Err(ReadError::NoSpec);
+    let reports = Mutex::new(Vec::new());
+    let report = |done: usize, total: usize| {
+        reports
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((done, total));
+    };
+    let siblings = ProjectSiblings::new(names, jobs, &fetch, &report);
+    let _ = siblings.related("pkg-000", "https://github.com/org/repo");
+    reports.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
+#[test]
+fn the_index_build_reports_each_hundred_packages_from_its_start_to_its_end() {
+    // One thread reads in order, so the reports are exact: the start, each
+    // hundred packages, and the end.
+    assert_eq!(reports_of(200, 1), [(0, 200), (100, 200), (200, 200)]);
+    // With more threads the reports come from the calling thread, but the
+    // first is the start and the last is the end, and there are not many.
+    let many = reports_of(200, 8);
+    assert_eq!(many.first(), Some(&(0, 200)));
+    assert_eq!(many.last(), Some(&(200, 200)));
+    assert!(many.len() <= 4, "{many:?}");
 }

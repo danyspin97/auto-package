@@ -2,6 +2,7 @@
 //! (an old-series copy of `mariadb`), `influxdb` beside `influxdb2`, and a plain
 //! package that takes its next major.
 
+use super::super::siblings::NO_REPORT;
 use super::*;
 
 /// Lookups that answer `latest` for every kind of source, and no release of a
@@ -68,7 +69,7 @@ fn classify_one(
 ) -> Decision {
     let project: Vec<String> = project.iter().map(|p| p.to_string()).collect();
     let read = specs(table);
-    let siblings = ProjectSiblings::new(project.clone(), 1, &read);
+    let siblings = ProjectSiblings::new(project.clone(), 1, &read, &NO_REPORT);
     classify_in_project(rpm_name, &read, &answers(latest), &siblings).decision
 }
 
@@ -258,7 +259,7 @@ fn a_pinned_series_takes_the_newest_release_of_its_series() {
         "fmt-9",
         &specs(table),
         &lookups,
-        &ProjectSiblings::new(project.map(String::from), 1, &specs(table)),
+        &ProjectSiblings::new(project.map(String::from), 1, &specs(table), &NO_REPORT),
     );
     assert!(matches!(
         c.decision,
@@ -269,7 +270,7 @@ fn a_pinned_series_takes_the_newest_release_of_its_series() {
         "fmt-9",
         &specs(table),
         &lookups,
-        &ProjectSiblings::new(project.map(String::from), 1, &specs(table)),
+        &ProjectSiblings::new(project.map(String::from), 1, &specs(table), &NO_REPORT),
     );
     assert!(matches!(c.decision, Decision::UpToDate { .. }));
 }
@@ -307,7 +308,7 @@ fn decide(rpm_name: &str, spec: String, project: &[&str], lookups: &Lookups<'_>)
             Err(ReadError::NoSpec)
         }
     };
-    let siblings = ProjectSiblings::new(project.clone(), 1, &fetch);
+    let siblings = ProjectSiblings::new(project.clone(), 1, &fetch, &NO_REPORT);
     classify_in_project(rpm_name, &fetch, lookups, &siblings).decision
 }
 

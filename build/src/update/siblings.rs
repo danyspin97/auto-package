@@ -16,9 +16,17 @@ use super::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 /// Reads the spec of a package, through the plan's cache.
 pub(super) type SpecRead<'a> = dyn Fn(&str) -> Result<String, ReadError> + Sync + 'a;
+
+/// Reports the index build: `(read so far, packages)`.
+pub(super) type SiblingProgress<'a> = dyn Fn(usize, usize) + Sync + 'a;
+
+/// The build reports every this many packages, and every [`REPORT_EVERY`].
+const REPORT_PACKAGES: usize = 100;
+const REPORT_EVERY: Duration = Duration::from_secs(5);
 
 /// A package of the project with a forge upstream: its name, upstream and
 /// packaged version.
@@ -54,6 +62,7 @@ pub struct ProjectSiblings<'a> {
     names: Vec<String>,
     jobs: usize,
     read: &'a SpecRead<'a>,
+    report: &'a SiblingProgress<'a>,
     /// Set when the plan stopped: nothing more is read.
     abandoned: AtomicBool,
     index: OnceLock<Index>,
@@ -66,12 +75,19 @@ fn no_spec(_: &str) -> Result<String, ReadError> {
 /// The spec reader of a check with no project: it has no packages to read.
 static NO_SPEC: fn(&str) -> Result<String, ReadError> = no_spec;
 
+fn no_report(_: usize, _: usize) {}
+
+/// The progress of a project with no packages to read.
+pub(super) static NO_REPORT: fn(usize, usize) = no_report;
+
 impl<'a> ProjectSiblings<'a> {
-    /// The siblings of `names`, read with `read` on `jobs` threads.
+    /// The siblings of `names`, read with `read` on `jobs` threads, and the
+    /// build reported to `report`.
     pub(super) fn new(
         names: impl IntoIterator<Item = String>,
         jobs: usize,
         read: &'a SpecRead<'a>,
+        report: &'a SiblingProgress<'a>,
     ) -> Self {
         let mut names: Vec<String> = names.into_iter().filter(|n| !n.contains(':')).collect();
         names.sort();
@@ -80,6 +96,7 @@ impl<'a> ProjectSiblings<'a> {
             names,
             jobs,
             read,
+            report,
             abandoned: AtomicBool::new(false),
             index: OnceLock::new(),
         }
@@ -87,7 +104,7 @@ impl<'a> ProjectSiblings<'a> {
 
     /// A project with no other packages: no check reads a spec through it.
     pub(super) fn none() -> ProjectSiblings<'static> {
-        ProjectSiblings::new([], 1, &NO_SPEC)
+        ProjectSiblings::new([], 1, &NO_SPEC, &NO_REPORT)
     }
 
     /// Stop reading: the plan has stopped and no more checks are kept.
@@ -126,10 +143,13 @@ impl<'a> ProjectSiblings<'a> {
     }
 
     /// The index of every package, whatever the order the threads read them in.
-    /// A package whose read failed is read once more after the others, when the
-    /// run is not stopping.
+    /// The calling thread reads too, and is the only one that reports: after
+    /// each of its reads, when a report is due. A package whose read failed is
+    /// read once more after the others, when the plan is not stopping.
     fn build(&self) -> Index {
+        let total = self.names.len();
         let next = AtomicUsize::new(0);
+        let done = AtomicUsize::new(0);
         let found: Mutex<Vec<(usize, Probe)>> = Mutex::new(Vec::new());
         let read_one = || {
             if self.abandoned.load(Ordering::Relaxed) {
@@ -144,14 +164,30 @@ impl<'a> ProjectSiblings<'a> {
                     .unwrap_or_else(|e| e.into_inner())
                     .push((i, answer)),
             }
+            done.fetch_add(1, Ordering::Relaxed);
             Some(())
         };
         let read_one = &read_one;
+        (self.report)(0, total);
+        let mut reported = (0, Instant::now());
         std::thread::scope(|scope| {
-            for _ in 0..self.jobs.clamp(1, self.names.len()) {
+            for _ in 1..self.jobs.clamp(1, total) {
                 scope.spawn(move || while read_one().is_some() {});
             }
+            while read_one().is_some() {
+                let so_far = done.load(Ordering::Relaxed);
+                if so_far - reported.0 >= REPORT_PACKAGES
+                    || (so_far != reported.0 && reported.1.elapsed() >= REPORT_EVERY)
+                {
+                    (self.report)(so_far, total);
+                    reported = (so_far, Instant::now());
+                }
+            }
         });
+        // The other threads may still have been reading when this one ran out.
+        if reported.0 != total {
+            (self.report)(total, total);
+        }
         let mut found = found.into_inner().unwrap_or_else(|e| e.into_inner());
         found.sort_by_key(|(i, _)| *i);
         let mut index = Index::default();
