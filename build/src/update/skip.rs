@@ -6,8 +6,12 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
-    /// The package has no spec file (not retried, nothing to read).
+    /// The package has sources and no spec file (not retried, nothing to read).
     NoSpec,
+    /// OBS lists no files for the package.
+    NoFiles,
+    /// The package is an `_aggregate`: the text says which project holds it.
+    Aggregate(String),
     /// OBS could not be asked or did not answer, after the retries.
     ReadFailed(String),
     /// OBS answered 404: the package is not there. Not a failed read.
@@ -130,6 +134,8 @@ impl std::fmt::Display for SkipReason {
         match self {
             SkipReason::AlreadyRequested(r) => r.fmt(f),
             SkipReason::NoSpec => write!(f, "the package has no spec file"),
+            SkipReason::NoFiles => write!(f, "the package has no files on OBS"),
+            SkipReason::Aggregate(report) => write!(f, "{report}"),
             SkipReason::ReadFailed(why) => write!(f, "the spec could not be read: {why}"),
             SkipReason::NotOnObs(why) => write!(f, "the package is not on OBS: {why}"),
             SkipReason::NeedsMaintainer(why) => write!(f, "needs the maintainer: {why}"),

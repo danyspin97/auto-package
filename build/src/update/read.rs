@@ -14,6 +14,12 @@ pub enum ReadError {
     /// OBS answered 404: the package is not there. A permanent answer, not a
     /// failed read of one that is.
     Absent(String),
+    /// OBS lists no files for the package, and no incident copy holds one: an
+    /// empty package, not one with sources and no spec.
+    NoFiles,
+    /// The package is an `_aggregate`: its sources are in another project. The
+    /// text is the report for the operator (see [`aggregate_report`]).
+    Aggregate(String),
 }
 
 impl std::fmt::Display for ReadError {
@@ -23,6 +29,8 @@ impl std::fmt::Display for ReadError {
             ReadError::Failed(why) => write!(f, "the spec could not be read: {why}"),
             ReadError::NeedsMaintainer(why) => write!(f, "needs the maintainer: {why}"),
             ReadError::Absent(why) => write!(f, "the package is not on OBS: {why}"),
+            ReadError::NoFiles => write!(f, "the package has no files on OBS"),
+            ReadError::Aggregate(report) => write!(f, "{report}"),
         }
     }
 }
@@ -36,6 +44,8 @@ impl From<ReadError> for SkipReason {
             ReadError::Failed(why) => SkipReason::ReadFailed(why),
             ReadError::NeedsMaintainer(why) => SkipReason::NeedsMaintainer(why),
             ReadError::Absent(why) => SkipReason::NotOnObs(why),
+            ReadError::NoFiles => SkipReason::NoFiles,
+            ReadError::Aggregate(report) => SkipReason::Aggregate(report),
         }
     }
 }
@@ -71,8 +81,43 @@ pub fn spec_for_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Stri
         ReadError::NeedsMaintainer(fallback) => {
             ReadError::NeedsMaintainer(osc::broken_link_report(project, pkg, &fallback, emit))
         }
+        ReadError::Aggregate(target) => {
+            ReadError::Aggregate(aggregate_report(project, pkg, &target))
+        }
         other => other,
     })
+}
+
+/// The report for an `_aggregate` package: read in `project`, its sources are
+/// in `target`, the project the `_aggregate` file names.
+pub(super) fn aggregate_report(project: &str, pkg: &str, target: &str) -> String {
+    format!("aggregate of {project}/{pkg}: nothing to update here; update it in {target}")
+}
+
+/// The project an `_aggregate` file names: the `project` of its first
+/// `<aggregate>` element.
+fn aggregate_target(text: &str) -> Option<String> {
+    let rest = &text[text.find("<aggregate")?..];
+    let tag = &rest[..rest.find('>')?];
+    let value = tag[tag.find("project=")? + "project=".len()..].trim_start();
+    let quote = value.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let value = &value[1..];
+    Some(value[..value.find(quote)?].to_string())
+}
+
+/// The read of an `_aggregate` package: the project it names, or no spec when
+/// the file names none. A failed read of the file is a failed read.
+fn aggregate_read(cat: &dyn Fn(&str) -> Result<String, String>) -> ReadError {
+    match cat("_aggregate") {
+        Ok(text) => aggregate_target(&text).map_or(ReadError::NoSpec, ReadError::Aggregate),
+        Err(osc_says) => {
+            let first = osc_says.lines().map(str::trim).find(|l| !l.is_empty());
+            ReadError::Failed(format!(
+                "reading _aggregate (osc cat) failed: {}",
+                first.unwrap_or("no output")
+            ))
+        }
+    }
 }
 
 /// The error a permanent failure of an osc read is: a `_link` that cannot be
@@ -200,10 +245,14 @@ pub(super) fn read_spec(
             }
         };
         let Some(picked) = pick_spec_filename(pkg, &files) else {
-            if files.is_empty()
-                && let Some(read) = incident()
-            {
-                return read;
+            if files.is_empty() {
+                if let Some(read) = incident() {
+                    return read;
+                }
+                return Err(ReadError::NoFiles);
+            }
+            if files.iter().any(|f| f == "_aggregate") {
+                return Err(aggregate_read(cat));
             }
             return Err(ReadError::NoSpec);
         };

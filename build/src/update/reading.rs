@@ -78,10 +78,41 @@ mod reading {
         assert_eq!(r.lists.get(), 1);
         assert_eq!(r.cats.get(), 0);
         assert!(r.waits.borrow().is_empty());
-        // An empty listing without an incident copy is no spec either.
+        // An empty listing without an incident copy is an empty package.
         let (out, r) = run(&[Some(vec![])], &[None], None, true);
-        assert_eq!(out, Err(ReadError::NoSpec));
+        assert_eq!(out, Err(ReadError::NoFiles));
         assert_eq!(r.lists.get(), 1);
+    }
+
+    #[test]
+    fn an_aggregate_names_the_project_that_holds_it() {
+        let agg = r#"<aggregate project="openSUSE:Factory"><package>foo</package></aggregate>"#;
+        let (out, r) = run(&[Some(files(&["_aggregate"]))], &[Some(agg)], None, true);
+        assert_eq!(out, Err(ReadError::Aggregate("openSUSE:Factory".into())));
+        assert_eq!(r.cats.get(), 1);
+        assert!(r.waits.borrow().is_empty());
+        assert_eq!(
+            aggregate_report("Base:X", "foo", "openSUSE:Factory"),
+            "aggregate of Base:X/foo: nothing to update here; update it in openSUSE:Factory"
+        );
+    }
+
+    #[test]
+    fn an_aggregate_without_a_project_is_no_spec_and_an_unreadable_one_fails() {
+        // No project named: the package has no spec, as before.
+        let (out, _) = run(
+            &[Some(files(&["_aggregate"]))],
+            &[Some("<aggregate/>")],
+            None,
+            true,
+        );
+        assert_eq!(out, Err(ReadError::NoSpec));
+        // The file cannot be read: a failed read, retried by nothing here.
+        let (out, _) = run(&[Some(files(&["_aggregate"]))], &[None], None, true);
+        let Err(ReadError::Failed(why)) = out else {
+            panic!("expected a failed read");
+        };
+        assert!(why.contains("_aggregate"), "{why}");
     }
 
     #[test]
@@ -331,6 +362,20 @@ mod reading {
         );
         assert!(matches!(out, Err(ReadError::Failed(_))), "{out:?}");
         assert_eq!(r.lists.get(), 3);
+    }
+
+    #[test]
+    fn an_empty_package_and_an_aggregate_have_their_own_skip_text() {
+        assert_eq!(SkipReason::from(ReadError::NoFiles), SkipReason::NoFiles);
+        assert_eq!(
+            SkipReason::NoFiles.to_string(),
+            "the package has no files on OBS"
+        );
+        let report = aggregate_report("Base:X", "foo", "openSUSE:Factory");
+        assert_eq!(
+            SkipReason::from(ReadError::Aggregate(report.clone())).to_string(),
+            report
+        );
     }
 
     #[test]

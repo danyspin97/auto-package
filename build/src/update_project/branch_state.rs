@@ -103,7 +103,12 @@ fn version_of_read(read: Result<String, update::ReadError>) -> Result<Option<Str
             Some(h) => Ok(Some(h.version)),
             None => Err("its spec has no readable Name: and Version:".to_string()),
         },
-        Err(update::ReadError::NoSpec | update::ReadError::Absent(_)) => Ok(None),
+        Err(
+            update::ReadError::NoSpec
+            | update::ReadError::NoFiles
+            | update::ReadError::Aggregate(_)
+            | update::ReadError::Absent(_),
+        ) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
 }
