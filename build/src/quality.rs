@@ -92,6 +92,20 @@ impl Kind {
         )
     }
 
+    /// Whether the finding is about a carried patch of an upstream request
+    /// (see `patch_provenance`): the agent is not asked to act on it.
+    pub fn is_provenance(self) -> bool {
+        matches!(
+            self,
+            Kind::PatchProvenance
+                | Kind::PatchUpstreamMerged
+                | Kind::PatchUpstreamMoved
+                | Kind::PatchUpstreamReleased
+                | Kind::PatchUpstreamClosed
+                | Kind::PatchUpstreamNotChecked
+        )
+    }
+
     /// Whether the finding is only reported: nothing fixes it by itself and
     /// it does not send the package to the pipeline.
     pub fn is_report_only(self) -> bool {

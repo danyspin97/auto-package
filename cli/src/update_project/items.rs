@@ -426,7 +426,7 @@ pub(super) fn build_ready(
                 let target = osc::choose_repository(branch, a.distro.as_deref(), &a.arch).0;
                 let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&target);
                 tidy_item(branch, &item, ctx, ldconfig)
-            } else if a.no_agent {
+            } else if a.no_agent && !item.findings.is_empty() {
                 report.results.push(ItemResult {
                     item,
                     outcome: ItemOutcome::Skipped("the findings need the agent".to_string()),

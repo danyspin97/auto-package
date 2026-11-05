@@ -47,6 +47,7 @@ mod fix_landed_tests;
 mod items;
 mod maintenance;
 mod origin;
+mod provenance;
 mod request;
 mod requested;
 mod rpmlint_audit;

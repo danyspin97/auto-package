@@ -67,6 +67,7 @@ impl Audit {
             let mut sent = 0;
             let mut seen: HashSet<String> = HashSet::new();
             let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&distro);
+            let hosts = ap_build::allowed_hosts::load_default();
             let mut ldconfig_left = false;
             let mut unreadable: Vec<String> = Vec::new();
             let mut absent = 0usize;
@@ -111,6 +112,14 @@ impl Audit {
                         | update::Decision::UpToDate { ecosystem, .. } => Some(ecosystem),
                         update::Decision::Skipped(_) => None,
                     };
+                    findings.extend(super::provenance::provenance_findings(
+                        &source,
+                        pkg,
+                        &spec,
+                        emit,
+                        &|m| warn(m),
+                        &hosts,
+                    ));
                     findings.extend(super::rpmlint_audit::findings(
                         &source,
                         Some(branch.as_str()),
@@ -216,7 +225,7 @@ pub(super) fn nothing_found(candidates: usize, absent: usize) -> Option<bool> {
 fn fixable_lines(findings: &[quality::Finding]) -> Vec<String> {
     findings
         .iter()
-        .filter(|f| !f.kind.is_report_only())
+        .filter(|f| !f.kind.is_report_only() && !f.kind.is_provenance())
         .map(|f| format!("{}: {}", f.kind.label(), f.detail))
         .collect()
 }
