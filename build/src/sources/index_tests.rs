@@ -288,3 +288,14 @@ pub(super) fn a_release_counter_after_a_dotted_version_is_not_the_version() {
         Some(("hello".into(), "2.12".into()))
     );
 }
+
+#[test]
+pub(super) fn a_dmraid_listing_names_the_release_counter_as_part_of_the_version() {
+    // A listing of dmraid's source directory: the newest release is `1.0.0.rc16-3`,
+    // with `-3` part of the version.
+    let links = ["dmraid-1.0.0.rc16-3.tar.bz2"].map(str::to_string);
+    assert_eq!(
+        crate::upstream::newest_for(&links, "dmraid").as_deref(),
+        Some("1.0.0.rc16-3")
+    );
+}
