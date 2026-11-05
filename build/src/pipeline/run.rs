@@ -123,6 +123,17 @@ fn put_back_or_confirm(
     Ok(())
 }
 
+/// The command that discards the pending baseline of `config`'s package, for a
+/// refusal to name (the work directory is the workspace, above the project dir).
+fn discard_hint(config: &PipelineConfig) -> String {
+    osc::discard_command(
+        &config.rpm_name,
+        &config.project,
+        Some(&config.arch),
+        config.work_dir.parent().unwrap_or(&config.work_dir),
+    )
+}
+
 /// Puts back a baseline that a failed attempt could not restore, before this
 /// run writes anything. Returns the baseline directory; if the restore fails
 /// the package does not start.
@@ -149,17 +160,9 @@ fn restore_stale_baseline(
                 "not started: the OBS baseline of an earlier failed attempt was NOT \
                  restored ({why}); OBS keeps that attempt. The baseline is kept in {} \
                  and is not deleted; fix the cause and run again, or, if OBS is right \
-                 as it is, discard the baseline with `auto-package baseline discard {} \
-                 --project {} --arch {} --work-dir {}`",
+                 as it is, discard the baseline with `{}`",
                 baseline.display(),
-                config.rpm_name,
-                config.project,
-                config.arch,
-                config
-                    .work_dir
-                    .parent()
-                    .unwrap_or(&config.work_dir)
-                    .display(),
+                discard_hint(config),
             ),
             kind: FailureKind::Other,
         });
@@ -208,7 +211,7 @@ fn finish_package(
         (result, _) => result,
     };
     let expected = expected_checkout(config);
-    let result = restore_obs_baseline(baseline, reporter, result, |dir| {
+    let result = restore_obs_baseline(baseline, reporter, result, &discard_hint(config), |dir| {
         osc::restore_baseline_outcome(dir, &expected, Emit::run(reporter))
     });
     // Persist last-attempt status in the durable workspace so a resumed run

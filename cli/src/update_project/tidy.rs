@@ -59,11 +59,16 @@ pub(super) fn tidy_item(
     };
     // What OBS holds is kept before the first write, so a failed commit can be
     // undone on OBS as well as in the checkout.
+    // The update's project dir is `<workspace>/<branch>-<arch>`: the command
+    // names the workspace, and the arch is found from the project dirs.
+    let workspace = ctx.work_dir.parent().unwrap_or(&ctx.work_dir);
+    let discard = osc::discard_command(&item.pkg, branch, None, workspace);
     let baseline = osc::begin_baseline(
         &ctx.work_dir.join(osc::BASELINE_ROOT),
         &dir,
         branch,
         &item.pkg,
+        &discard,
         emit,
     )
     .map_err(|e| format!("cannot keep the OBS baseline of {branch}: {e}"))?;
@@ -102,7 +107,7 @@ pub(super) fn tidy_item(
             let _ = std::fs::remove_dir_all(&baseline);
             Ok(())
         }
-        Err(why) => match osc::restore_baseline(&baseline, &dir, emit) {
+        Err(why) => match osc::restore_baseline(&baseline, &dir, &discard, emit) {
             Ok(()) => Err(why),
             Err(e) => Err(format!("{why}; the OBS baseline was NOT restored: {e}")),
         },

@@ -1,6 +1,7 @@
 //! The baseline subcommand and the discarding of pending baselines.
 
 use super::*;
+use std::fs;
 
 #[derive(Subcommand)]
 pub(super) enum BaselineCommand {
@@ -14,8 +15,10 @@ pub(super) enum BaselineCommand {
         #[arg(long)]
         project: String,
 
-        #[arg(long, default_value = "x86_64")]
-        arch: String,
+        /// The arch the build or update used. Without it every arch of the
+        /// project in the work directory is searched.
+        #[arg(long)]
+        arch: Option<String>,
 
         /// The work directory the build or update used.
         #[arg(long, default_value = "ap-work")]
@@ -31,31 +34,65 @@ pub(super) enum BaselineCommand {
     },
 }
 
-/// The pending OBS baselines of `name` that the build of `project` (in
-/// `work_dir`) and the update and maintenance runs of the same work directory
-/// kept.
-fn pending_baselines(work_dir: &Path, project: &str, arch: &str, name: &str) -> Vec<PathBuf> {
-    let project_dir = work_dir.join(format!(
-        "{}-{}",
-        ap_core::run::sanitize_name(project),
-        ap_core::run::sanitize_name(arch),
-    ));
-    let mut candidates = vec![
-        project_dir
-            .join("state")
-            .join(ap_core::run::sanitize_name(name))
-            .join("obs-baseline"),
-    ];
-    candidates.extend(ap_build::osc::baselines_of(
-        &project_dir.join(ap_build::osc::BASELINE_ROOT),
-        name,
-    ));
-    candidates.extend(ap_build::osc::baselines_of(
-        &work_dir
+/// The project directories of `project` (the branch project the build or the
+/// update wrote to) in the work directory `work_dir`: `<project>-<arch>`, for
+/// the arch given, or for each arch there is one.
+fn project_dirs(work_dir: &Path, project: &str, arch: Option<&str>) -> Vec<PathBuf> {
+    let branch = ap_core::run::sanitize_name(project);
+    match arch {
+        Some(arch) => {
+            vec![work_dir.join(format!("{branch}-{}", ap_core::run::sanitize_name(arch)))]
+        }
+        None => {
+            let prefix = format!("{branch}-");
+            fs::read_dir(work_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_dir()
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .and_then(|n| n.strip_prefix(&prefix))
+                            .is_some_and(|arch| !arch.is_empty() && !arch.contains('-'))
+                })
+                .collect()
+        }
+    }
+}
+
+/// The pending OBS baselines of `name` for the branch `project` in the
+/// workspace `work_dir`: the build's own state, the baselines the update and
+/// `tidy` keep in the project directories, and the maintenance ones. Only the
+/// baselines of `project` are named: other branches' are not.
+fn pending_baselines(
+    work_dir: &Path,
+    project: &str,
+    arch: Option<&str>,
+    name: &str,
+) -> Vec<PathBuf> {
+    let branch = ap_core::run::sanitize_name(project);
+    let mut candidates = Vec::new();
+    for dir in project_dirs(work_dir, project, arch) {
+        candidates.push(
+            dir.join("state")
+                .join(ap_core::run::sanitize_name(name))
+                .join("obs-baseline"),
+        );
+        candidates.push(
+            dir.join(ap_build::osc::BASELINE_ROOT)
+                .join(&branch)
+                .join(name),
+        );
+    }
+    candidates.push(
+        work_dir
             .join("maintenance")
-            .join(ap_build::osc::BASELINE_ROOT),
-        name,
-    ));
+            .join(ap_build::osc::BASELINE_ROOT)
+            .join(&branch)
+            .join(name),
+    );
     candidates.retain(|dir| ap_build::osc::is_pending(dir));
     candidates
 }
@@ -94,7 +131,7 @@ pub(super) fn baseline_command(command: BaselineCommand) -> color_eyre::Result<(
             dry_run,
             yes,
         } => {
-            let pending = pending_baselines(&work_dir, &project, &arch, &name);
+            let pending = pending_baselines(&work_dir, &project, arch.as_deref(), &name);
             if pending.is_empty() {
                 println!("{name}: no pending OBS baseline in {}", work_dir.display());
                 return Ok(());
@@ -130,6 +167,56 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    /// A baseline directory with one attempted file, so it is pending.
+    fn pending_at(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        ap_build::osc::note_attempt(dir, &["foo.spec".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn a_tidy_baseline_is_found_from_the_workspace_root() {
+        let ws = tempfile::tempdir().unwrap();
+        let dir = ws.path().join("home_B-x86_64/.obs-baseline/home_B/foo");
+        pending_at(&dir);
+        assert_eq!(
+            pending_baselines(ws.path(), "home:B", None, "foo"),
+            vec![dir.clone()]
+        );
+        assert_eq!(
+            pending_baselines(ws.path(), "home:B", Some("x86_64"), "foo"),
+            vec![dir]
+        );
+    }
+
+    #[test]
+    fn another_branches_baseline_of_the_same_package_survives() {
+        let ws = tempfile::tempdir().unwrap();
+        let mine = ws.path().join("home_B-x86_64/.obs-baseline/home_B/foo");
+        let other = ws.path().join("home_B-x86_64/.obs-baseline/home_B2/foo");
+        pending_at(&mine);
+        pending_at(&other);
+        assert_eq!(
+            pending_baselines(ws.path(), "home:B", None, "foo"),
+            vec![mine]
+        );
+    }
+
+    #[test]
+    fn a_pipeline_state_is_found_for_its_arch_only_when_asked_for_it() {
+        let ws = tempfile::tempdir().unwrap();
+        let dir = ws.path().join("home_B-x86_64/state/foo/obs-baseline");
+        pending_at(&dir);
+        assert_eq!(
+            pending_baselines(ws.path(), "home:B", Some("x86_64"), "foo"),
+            vec![dir.clone()]
+        );
+        assert!(pending_baselines(ws.path(), "home:B", Some("aarch64"), "foo").is_empty());
+        assert_eq!(
+            pending_baselines(ws.path(), "home:B", None, "foo"),
+            vec![dir]
+        );
+    }
+
     #[derive(Parser)]
     struct Wrapper {
         #[command(subcommand)]
@@ -142,11 +229,11 @@ mod tests {
         let w = t.path();
         let dir = w.join("Base_System-x86_64/state/foo/obs-baseline");
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(pending_baselines(w, "Base:System", "x86_64", "foo").is_empty());
+        assert!(pending_baselines(w, "Base:System", Some("x86_64"), "foo").is_empty());
         // The marker of a pending baseline (`osc::UNRESTORED`).
         std::fs::write(dir.join("unrestored"), "").unwrap();
         assert_eq!(
-            pending_baselines(w, "Base:System", "x86_64", "foo"),
+            pending_baselines(w, "Base:System", Some("x86_64"), "foo"),
             vec![dir]
         );
     }

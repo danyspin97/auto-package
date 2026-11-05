@@ -396,7 +396,7 @@ pub fn run_with(
         // A code stream whose changelog cannot be amended is left out; the
         // others still go.
         let mut sent: Vec<Ready> = Vec::new();
-        let mut bases: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut bases: Vec<(PathBuf, PathBuf, String)> = Vec::new();
         for r in ready {
             if let Some((name, _)) = &r.amended {
                 match commit_refs(&r.action.source_project, pkg, name, opts, &refs, &bullets) {
@@ -424,7 +424,7 @@ pub fn run_with(
         };
         match create_request(&req, emit) {
             Ok(id) => {
-                for (base, _) in &bases {
+                for (base, _, _) in &bases {
                     let _ = std::fs::remove_dir_all(base);
                 }
                 // The request text carries the flags from now on.

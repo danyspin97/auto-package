@@ -40,6 +40,7 @@ pub(super) fn restore_obs_baseline(
     dir: &Path,
     reporter: &dyn Reporter,
     result: PipelineResult,
+    discard: &str,
     restore: impl FnOnce(&Path) -> Result<osc::Restored, String>,
 ) -> PipelineResult {
     let built = matches!(
@@ -68,10 +69,13 @@ pub(super) fn restore_obs_baseline(
             result
         }
         Err(why) => {
-            let message = format!(
-                "the OBS baseline was NOT restored ({why}): OBS keeps the failed attempt; \
-                 the saved baseline is in {}",
-                dir.display()
+            let message = osc::with_discard_hint(
+                &format!(
+                    "the OBS baseline was NOT restored ({why}): OBS keeps the failed attempt; \
+                     the saved baseline is in {}",
+                    dir.display()
+                ),
+                discard,
             );
             reporter.report(&Event::Warning {
                 step: None,

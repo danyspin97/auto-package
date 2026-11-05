@@ -128,8 +128,14 @@ mod baseline;
 pub use baseline::*;
 mod baseline_commits;
 pub use baseline_commits::*;
+mod baseline_head;
+pub use baseline_head::*;
 #[cfg(test)]
 mod baseline_commits_tests;
+#[cfg(test)]
+mod baseline_head_tests;
+#[cfg(test)]
+mod baseline_recover_tests;
 #[cfg(test)]
 mod recipe_files_tests;
 

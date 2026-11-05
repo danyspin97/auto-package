@@ -113,10 +113,24 @@ fn an_attempted_file_that_never_reached_obs_is_left_alone() {
 fn begin_baseline_replaces_an_earlier_one_for_the_same_package() {
     let co = checkout(&[("foo.spec", "a")]);
     let root = tempfile::tempdir().unwrap();
-    let first =
-        begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap();
-    let second =
-        begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap();
+    let first = begin_baseline(
+        root.path(),
+        co.path(),
+        "home:u:Base",
+        "foo",
+        "discard",
+        Emit::quiet(),
+    )
+    .unwrap();
+    let second = begin_baseline(
+        root.path(),
+        co.path(),
+        "home:u:Base",
+        "foo",
+        "discard",
+        Emit::quiet(),
+    )
+    .unwrap();
     assert_eq!(first, second);
     assert!(attempted_files(&second).is_empty());
     assert!(second.join("files/foo.spec").exists());
@@ -126,7 +140,15 @@ fn begin_baseline_replaces_an_earlier_one_for_the_same_package() {
 fn discard_pending_removes_only_a_pending_baseline() {
     let co = checkout(&[("foo.spec", "a")]);
     let root = tempfile::tempdir().unwrap();
-    let kept = begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap();
+    let kept = begin_baseline(
+        root.path(),
+        co.path(),
+        "home:u:Base",
+        "foo",
+        "discard",
+        Emit::quiet(),
+    )
+    .unwrap();
     assert!(!discard_pending(&kept).unwrap());
     assert!(kept.exists());
     note_attempt(&kept, &["foo.spec".to_string()]).unwrap();
@@ -140,12 +162,27 @@ fn begin_baseline_refuses_a_pending_one_without_a_reason() {
     // reason was written. The next baseline must not replace it.
     let co = checkout(&[("foo.spec", "a")]);
     let root = tempfile::tempdir().unwrap();
-    let kept = begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap();
+    let kept = begin_baseline(
+        root.path(),
+        co.path(),
+        "home:u:Base",
+        "foo",
+        "discard",
+        Emit::quiet(),
+    )
+    .unwrap();
     note_attempt(&kept, &["../escape".to_string()]).unwrap();
     assert!(is_pending(&kept));
     assert!(!kept.join(UNRESTORED).exists());
-    let err =
-        begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap_err();
+    let err = begin_baseline(
+        root.path(),
+        co.path(),
+        "home:u:Base",
+        "foo",
+        "discard",
+        Emit::quiet(),
+    )
+    .unwrap_err();
     assert!(err.contains(&kept.display().to_string()), "{err}");
     assert!(kept.join("files/foo.spec").exists());
 }
@@ -154,13 +191,28 @@ fn begin_baseline_refuses_a_pending_one_without_a_reason() {
 fn begin_baseline_keeps_an_unrestored_one_and_refuses() {
     let co = checkout(&[("foo.spec", "a")]);
     let root = tempfile::tempdir().unwrap();
-    let kept = begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap();
+    let kept = begin_baseline(
+        root.path(),
+        co.path(),
+        "home:u:Base",
+        "foo",
+        "discard",
+        Emit::quiet(),
+    )
+    .unwrap();
     // An attempt whose restore cannot run (a file name that is not plain):
     // no OBS call is made, the restore fails and marks the baseline.
     note_attempt(&kept, &["../escape".to_string()]).unwrap();
-    assert!(restore_baseline(&kept, co.path(), Emit::quiet()).is_err());
-    let err =
-        begin_baseline(root.path(), co.path(), "home:u:Base", "foo", Emit::quiet()).unwrap_err();
+    assert!(restore_baseline(&kept, co.path(), "discard", Emit::quiet()).is_err());
+    let err = begin_baseline(
+        root.path(),
+        co.path(),
+        "home:u:Base",
+        "foo",
+        "discard",
+        Emit::quiet(),
+    )
+    .unwrap_err();
     assert!(err.contains(&kept.display().to_string()), "{err}");
     assert_eq!(attempted_files(&kept), vec!["../escape".to_string()]);
     assert!(kept.join("files/foo.spec").exists());

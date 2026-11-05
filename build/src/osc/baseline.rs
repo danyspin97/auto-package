@@ -135,15 +135,15 @@ pub fn begin_baseline(
     checkout_dir: &Path,
     branch: &str,
     pkg: &str,
+    discard: &str,
     emit: Emit<'_>,
 ) -> Result<PathBuf, String> {
     let dir = root.join(ap_core::run::sanitize_name(branch)).join(pkg);
     if is_pending(&dir) {
-        restore_baseline(&dir, checkout_dir, emit).map_err(|why| {
+        restore_baseline(&dir, checkout_dir, discard, emit).map_err(|why| {
             format!(
                 "the OBS baseline kept at {} was NOT restored ({why}); \
-                 it is kept there, and nothing was written. If OBS is right as it \
-                 is, discard it with `auto-package baseline discard`",
+                 it is kept there, and nothing was written",
                 dir.display()
             )
         })?;
@@ -151,6 +151,43 @@ pub fn begin_baseline(
     let _ = fs::remove_dir_all(&dir);
     save_baseline(checkout_dir, &dir).map_err(|e| e.to_string())?;
     Ok(dir)
+}
+
+/// The command that drops the pending baseline of OBS package `name` of
+/// `project` (the branch project), without putting it back. `arch` is left out
+/// when it is not known (the baseline roots are per project, whatever its
+/// arch), and `workspace` is the work directory the update or build used, which
+/// is quoted for the shell.
+pub fn discard_command(name: &str, project: &str, arch: Option<&str>, workspace: &Path) -> String {
+    let arch = arch
+        .map(|a| format!(" --arch {}", shell_word(a)))
+        .unwrap_or_default();
+    format!(
+        "auto-package baseline discard {} --project {}{arch} --work-dir {}",
+        shell_word(name),
+        shell_word(project),
+        shell_word(&workspace.to_string_lossy())
+    )
+}
+
+/// `word` as one shell word: as it is when it has only plain characters,
+/// otherwise in single quotes.
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./:@+=".contains(&b));
+    if plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
+/// A refusal of a restore with the command that discards the baseline, which
+/// puts OBS as it is in place of the baseline.
+pub fn with_discard_hint(why: &str, discard: &str) -> String {
+    format!("{why}; if OBS is right as it is, discard the baseline with `{discard}`")
 }
 
 /// The baseline directories of `pkg` under `root`, one per branch
@@ -259,6 +296,9 @@ fn checkout_project_package(checkout: &Path) -> Result<(String, String), String>
 /// directory srcmd5 otherwise. The unexpanded directory of a link carries the
 /// link's own revision (`lsrcmd5`), which osc never records, so comparing that
 /// with `.osc/_files` reports a move that never happened.
+///
+/// The srcmd5 is derived from the content of the revision: two listings with
+/// the same srcmd5 hold the same files.
 pub fn expanded_revision(listing_xml: &str) -> Option<String> {
     let linkinfo = listing_xml.find("<linkinfo").map(|i| {
         let rest = &listing_xml[i..];
@@ -274,23 +314,45 @@ pub fn expanded_revision(listing_xml: &str) -> Option<String> {
 /// checkout holds (`.osc/_files`, which osc updates when a commit lands). When
 /// it is not, someone committed after the attempt, or the attempt landed but
 /// osc did not record it: either way the restore would overwrite a revision
-/// nobody here has looked at, so it is refused.
-pub fn obs_still_at_checkout(checkout: &Path) -> Result<(), String> {
+/// nobody here has looked at, so it is refused. `dir` is the baseline, which
+/// says whether the revision OBS holds is one an attempt committed.
+pub fn obs_still_at_checkout(checkout: &Path, dir: &Path) -> Result<(), String> {
     let (project, package) = checkout_project_package(checkout)?;
-    let local = fs::read_to_string(checkout.join(".osc/_files"))
-        .ok()
-        .and_then(|xml| parse_directory_srcmd5(&xml))
-        .ok_or_else(|| format!("the checkout of {project}/{package} records no revision"))?;
-    let xml = source_listing_xml(&project, &package, Emit::quiet())
+    let xml = source_listing_expanded_xml(&project, &package, Emit::quiet())
         .map_err(|e| format!("cannot read the OBS revision of {project}/{package}: {e}"))?;
-    let head = expanded_revision(&xml)
+    head_matches_checkout(checkout, dir, &xml, source_history)
+}
+
+/// [`obs_still_at_checkout`] for a listing already read (`listing_xml`). The
+/// restore goes ahead only when OBS holds a revision an attempt of this baseline
+/// committed, and the checkout holds that same revision. Equality alone is not
+/// ownership: a checkout refreshed from OBS (`osc up`) holds whatever OBS holds,
+/// including a commit made by someone else. The history is read (`history`)
+/// only when the restore is refused, to name the revision.
+pub fn head_matches_checkout(
+    checkout: &Path,
+    dir: &Path,
+    listing_xml: &str,
+    history: impl FnOnce(&str, &str) -> Result<LatestRevision, String>,
+) -> Result<(), String> {
+    let (project, package) = checkout_project_package(checkout)?;
+    let local = checkout_revision(checkout)
+        .ok_or_else(|| format!("the checkout of {project}/{package} records no revision"))?;
+    let head = expanded_revision(listing_xml)
         .ok_or_else(|| format!("OBS returned no revision for {project}/{package}"))?;
-    if head == local {
+    if head == local && committed_revisions(dir).contains(&head) {
         return Ok(());
     }
-    Err(format!(
-        "OBS moved on: {project}/{package} is at revision {head}, the checkout at {local}; \
-         nothing was written to OBS"
+    let latest = history(&project, &package);
+    let own = parse_directory_srcmd5(listing_xml);
+    Err(moved_on_reason(
+        &project,
+        &package,
+        &head,
+        &local,
+        own.as_deref(),
+        dir,
+        latest,
     ))
 }
 
@@ -338,7 +400,7 @@ pub fn restore_baseline_listing(
     commit: impl FnOnce(&Path, &str, &[String]) -> Result<(), Error>,
 ) -> Result<Restored, String> {
     if let Ok(xml) = obs_xml(expected)
-        && obs_listing_matches(dir, expected, &xml)
+        && (obs_listing_matches(dir, expected, &xml) || commit_never_landed(dir, &xml))
     {
         // Nothing landed on OBS, but the failed attempt's edits are still in the
         // checkout: put the saved copies back there (nothing is committed), so a
@@ -347,6 +409,17 @@ pub fn restore_baseline_listing(
         return Ok(Restored::NothingWritten);
     }
     restore_baseline_with(dir, expected, obs_check, commit).map(|()| Restored::Undone)
+}
+
+/// Whether the commit in flight (see `record_commit`) never landed: OBS is
+/// still at the revision the checkout had before it.
+fn commit_never_landed(dir: &Path, obs_xml: &str) -> bool {
+    // A base an attempt of this baseline committed is on OBS as an attempt:
+    // the baseline must be put back over it, not dropped.
+    pending_commit_base(dir).is_some_and(|before| {
+        !committed_revisions(dir).contains(&before)
+            && expanded_revision(obs_xml).as_deref() == Some(before.as_str())
+    })
 }
 
 /// [`restore_baseline_listing`] against OBS, committing through [`commit`], and
@@ -367,7 +440,7 @@ pub fn restore_baseline_outcome(
             source_listing_expanded_xml(&project, &package, Emit::quiet())
                 .map_err(|e| e.to_string())
         },
-        obs_still_at_checkout,
+        |checkout| obs_still_at_checkout(checkout, dir),
         |checkout, message, files| commit(checkout, message, files, None, emit),
     );
     match outcome {
@@ -385,12 +458,18 @@ pub fn restore_baseline_outcome(
 /// [`restore_baseline_outcome`] for callers that only need to know it worked.
 /// Says on stderr when nothing was written to OBS (the run-start path reports
 /// the same through its reporter).
-pub fn restore_baseline(dir: &Path, expected: &Path, emit: Emit<'_>) -> Result<(), String> {
-    match restore_baseline_outcome(dir, expected, emit)? {
-        Restored::Undone => {}
-        Restored::NothingWritten => ap_core::diag!(
+pub fn restore_baseline(
+    dir: &Path,
+    expected: &Path,
+    discard: &str,
+    emit: Emit<'_>,
+) -> Result<(), String> {
+    match restore_baseline_outcome(dir, expected, emit) {
+        Ok(Restored::Undone) => {}
+        Ok(Restored::NothingWritten) => ap_core::diag!(
             "nothing was written to OBS since the failed attempt: the saved baseline is dropped and the work continues"
         ),
+        Err(why) => return Err(with_discard_hint(&why, discard)),
     }
     Ok(())
 }

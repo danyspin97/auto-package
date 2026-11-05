@@ -89,6 +89,17 @@ pub fn source_listing_expanded_xml(
     )
 }
 
+/// The `_history` of `project/package` as OBS returns it: one `<revision>` a
+/// commit, oldest first.
+pub fn source_history_xml(project: &str, package: &str, emit: Emit<'_>) -> Result<String, Error> {
+    check_obs_name("project", project)?;
+    check_obs_name("package", package)?;
+    api_get(
+        &format!("/source/{project}/{}/_history", enc(package)),
+        emit,
+    )
+}
+
 /// Refuse a request whose source package is no longer at the revision it was
 /// prepared for. `current` reads the revision now.
 pub fn verify_source_rev(

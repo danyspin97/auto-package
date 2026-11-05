@@ -110,7 +110,7 @@ pub(super) fn commit_refs(
     opts: &Options,
     refs: &[String],
     bullets: &[(String, String)],
-) -> Result<Option<(PathBuf, PathBuf)>, String> {
+) -> Result<Option<(PathBuf, PathBuf, String)>, String> {
     let _obs_write = proc::obs_write();
     let emit = Emit::quiet();
     let dir = osc::checkout(branch, pkg, &opts.checkout_dir, emit).map_err(|e| e.to_string())?;
@@ -120,11 +120,13 @@ pub(super) fn commit_refs(
     let Some(amended) = amend_changes(&text, refs, bullets) else {
         return Ok(None);
     };
+    let discard = osc::discard_command(pkg, branch, Some(&opts.arch), &opts.work_dir);
     let baseline = osc::begin_baseline(
         &opts.checkout_dir.join(osc::BASELINE_ROOT),
         &dir,
         branch,
         pkg,
+        &discard,
         emit,
     )
     .map_err(|e| format!("cannot keep the OBS baseline of {branch}: {e}"))?;
@@ -142,8 +144,8 @@ pub(super) fn commit_refs(
         emit,
     );
     match committed {
-        Ok(()) => Ok(Some((baseline, dir))),
-        Err(e) => match osc::restore_baseline(&baseline, &dir, emit) {
+        Ok(()) => Ok(Some((baseline, dir, discard))),
+        Err(e) => match osc::restore_baseline(&baseline, &dir, &discard, emit) {
             Ok(()) => Err(e.to_string()),
             Err(why) => Err(format!("{e}; the OBS baseline was NOT restored: {why}")),
         },
@@ -186,11 +188,11 @@ pub fn branch_state_root(work_dir: &std::path::Path, branch: &str, arch: &str) -
 /// Put back the OBS baselines of branches whose references were committed, for
 /// a maintenance request that could not be created: the references must not
 /// stay on the branches without their request. Returns what could not go back.
-pub(super) fn undo_refs(bases: &[(PathBuf, PathBuf)]) -> Option<String> {
+pub(super) fn undo_refs(bases: &[(PathBuf, PathBuf, String)]) -> Option<String> {
     let failed: Vec<String> = bases
         .iter()
-        .filter_map(|(baseline, checkout)| {
-            osc::restore_baseline(baseline, checkout, Emit::quiet()).err()
+        .filter_map(|(baseline, checkout, discard)| {
+            osc::restore_baseline(baseline, checkout, discard, Emit::quiet()).err()
         })
         .collect();
     (!failed.is_empty()).then(|| failed.join("; "))
