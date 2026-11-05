@@ -34,8 +34,12 @@ mod redirects;
 mod release_date;
 mod release_list;
 mod release_series;
+#[cfg(test)]
+mod release_tag_tests;
 mod releases;
 mod sourcehut;
+mod tag_list;
+use tag_list::*;
 
 pub use archive::*;
 pub use forge::*;

@@ -256,11 +256,14 @@ pub fn latest_release(repo_url: &str) -> Result<String, String> {
                              to update it"
                         ));
                     }
-                    let version = version_from_tag(&tag, &repo_name);
                     // A tag such as `start` or `latest` marks no release; the
                     // tag list may still have one.
-                    if version.chars().any(|c| c.is_ascii_digit()) {
-                        return Ok(version);
+                    match version_for_tag_or_listing(&tag, &repo_name, || {
+                        get_repo_tag_listing(repo_url)
+                    }) {
+                        Ok(Some(version)) => return Ok(version),
+                        Ok(None) => {}
+                        Err(why) => return Err(why),
                     }
                     last_err = Some(format!("{url}: the newest tag {tag:?} is not a version"));
                 }
@@ -358,48 +361,6 @@ pub fn version_from_tag(tag: &str, repo: &str) -> String {
         v = rest;
     }
     v.to_string()
-}
-
-/// The tag-listing endpoint of a forge project, chosen the same way as
-/// [`release_endpoints`].
-pub(super) fn tag_list_url(host: &str, project_path: &str) -> String {
-    if is_github_host(host) {
-        format!("https://api.github.com/repos/{project_path}/tags?per_page=100")
-    } else if is_gitlab_host(host) {
-        let encoded = project_path.replace('/', "%2F");
-        format!("https://{host}/api/v4/projects/{encoded}/repository/tags?per_page=100")
-    } else {
-        // Gitea/Forgejo
-        format!("https://{host}/api/v1/repos/{project_path}/tags?limit=100")
-    }
-}
-
-/// Get all tags from a repository via the forge API.
-pub(super) fn get_repo_tags(repo_url: &str) -> Result<Vec<String>, String> {
-    if source_kind(repo_url) != SourceKind::Forge {
-        return Ok(Vec::new());
-    }
-    let (host, project_path, _repo_name) = owner_repo(repo_url)?;
-    if is_sourcehut_host(&host) {
-        return ls_remote_tags(&format!("https://{host}/{project_path}"));
-    }
-
-    let json = get_json(&tag_list_url(&host, &project_path))?;
-
-    let tags = match json.as_array() {
-        Some(arr) => arr
-            .iter()
-            .filter_map(|item| {
-                item.get("name")
-                    .or_else(|| item.get("tag_name"))
-                    .and_then(|t| t.as_str())
-                    .map(str::to_string)
-            })
-            .collect(),
-        None => vec![],
-    };
-
-    Ok(tags)
 }
 
 /// Find the best matching tag for a given version.
