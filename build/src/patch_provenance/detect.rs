@@ -230,12 +230,12 @@ pub fn classify_url(url: &str, evidence: OriginEvidence) -> Option<PatchOrigin> 
 }
 
 /// Whether `host` is a GitLab instance (gitlab.com, or `gitlab.<x>`, `<x>.gitlab.<y>`).
-fn is_gitlab_host(host: &str) -> bool {
+pub(super) fn is_gitlab_host(host: &str) -> bool {
     host == "gitlab.com" || host.starts_with("gitlab.") || host.contains(".gitlab.")
 }
 
 /// Whether `host` is a Gitea-style forge: Codeberg, Gitea or Forgejo.
-fn is_gitea_host(host: &str) -> bool {
+pub(super) fn is_gitea_host(host: &str) -> bool {
     host == "codeberg.org" || host.starts_with("gitea.") || host.starts_with("forgejo.")
 }
 

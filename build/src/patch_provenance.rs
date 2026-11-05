@@ -9,10 +9,16 @@ mod header;
 #[cfg(test)]
 mod header_tests;
 mod reason;
+mod status;
+#[cfg(test)]
+mod status_tests;
 
 pub use detect::{OriginInputs, OriginRead, classify_url, read_origin};
 pub use header::{Claim, spec_with_comment, with_header};
 pub use reason::{cut, fold_field, reason_from_changes, reason_of, sanitize};
+pub use status::{
+    Containment, ForgeNet, PrState, PrStatus, containment_of, diff_url, parse_state, state_url,
+};
 
 /// What kind of upstream change a patch is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
