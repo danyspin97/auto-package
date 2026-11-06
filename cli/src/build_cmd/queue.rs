@@ -32,7 +32,7 @@ pub(super) struct Build<'a> {
 
 /// Builds the dependencies queued so far, and those they bring with them,
 /// until the queue is empty.
-pub(super) fn drain_dep_queue(b: Build<'_>) -> color_eyre::Result<()> {
+pub(super) fn drain_dep_queue(b: Build<'_>, repeats: &mut RepeatMemory) -> color_eyre::Result<()> {
     let Build {
         project,
         distro,
@@ -560,6 +560,7 @@ pub(super) fn drain_dep_queue(b: Build<'_>) -> color_eyre::Result<()> {
             dep_drops: &dep_drops,
             pkg_reporter: &pkg_reporter,
             max_dep_attempts,
+            repeats,
         }
         .record(handles);
         if ap_build::proc::abort_reason().is_some() {

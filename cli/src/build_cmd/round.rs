@@ -10,6 +10,7 @@ pub(super) struct Round<'a> {
     pub(super) rx: &'a std::sync::mpsc::Receiver<(String, String, PipelineResult)>,
     pub(super) in_flight: &'a mut Vec<String>,
     pub(super) fail_counts: &'a mut std::collections::HashMap<String, usize>,
+    pub(super) repeats: &'a mut RepeatMemory,
     pub(super) rate_limited_counts: &'a mut std::collections::HashMap<String, usize>,
     pub(super) give_ups: &'a mut std::collections::BTreeMap<String, String>,
     pub(super) permanently_failed: &'a mut std::collections::HashSet<String>,
@@ -52,6 +53,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
         rx,
         in_flight,
         fail_counts,
+        repeats,
         rate_limited_counts,
         give_ups,
         permanently_failed,
@@ -276,6 +278,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
 
         if !(Frontier {
             fail_counts: fail_counts,
+            repeats: repeats,
             rate_limited_counts: rate_limited_counts,
             give_ups: give_ups,
             permanently_failed: permanently_failed,

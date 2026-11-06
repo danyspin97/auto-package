@@ -14,6 +14,7 @@ pub(super) struct DepLedger<'a> {
     pub(super) dep_drops: &'a DepDrops,
     pub(super) pkg_reporter: &'a dyn Fn(&str) -> Arc<dyn Reporter + Send + Sync>,
     pub(super) max_dep_attempts: usize,
+    pub(super) repeats: &'a mut RepeatMemory,
 }
 
 pub(super) type DepHandle = (
@@ -36,6 +37,8 @@ impl DepLedger<'_> {
             match result {
                 PipelineResult::Built { .. } => {
                     ap_core::diag!("built dep {dep_rpm}");
+                    self.repeats.builds += 1;
+                    self.repeats.last.remove(&dep_rpm);
                     self.dep_drops.note_outcome(
                         &dep_rpm,
                         "it was built this run, yet the package that needs it still \
@@ -88,7 +91,23 @@ impl DepLedger<'_> {
                     // attempt count.
                     let rounds = self.dep_rounds.entry(key.clone()).or_insert(0);
                     *rounds += 1;
-                    let retry = dep_failure_retries(kind, *rounds, self.max_dep_attempts);
+                    // The same ordinary failure with no build since is not
+                    // run again: it would repeat the same failure.
+                    let repeated = identical_stop_applies(kind)
+                        && repeats_without_change(
+                            self.repeats.last.get(&dep_rpm),
+                            &reason,
+                            self.repeats.builds,
+                        );
+                    self.repeats.last.insert(
+                        dep_rpm.clone(),
+                        LastFailure {
+                            reason: reason.clone(),
+                            builds: self.repeats.builds,
+                        },
+                    );
+                    let retry =
+                        dep_failure_retries(kind, *rounds, self.max_dep_attempts) && !repeated;
                     if retry {
                         self.attempted_deps.remove(&key);
                         self.retrying.insert(key);

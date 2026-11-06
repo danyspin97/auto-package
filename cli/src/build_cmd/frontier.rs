@@ -17,6 +17,47 @@ pub(super) struct Frontier<'a> {
     pub(super) state_root: &'a Path,
     pub(super) pkg_reporter: &'a dyn Fn(&str) -> Arc<dyn Reporter + Send + Sync>,
     pub(super) max_target_retries: usize,
+    pub(super) repeats: &'a mut RepeatMemory,
+}
+
+/// What a package last failed with, and how many builds of the run had
+/// finished by then. A failure with the same reason and no build since has
+/// no new input that could change its outcome.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct LastFailure {
+    pub(super) reason: String,
+    pub(super) builds: usize,
+}
+
+/// Per run: the last failure of each package, and how many packages have
+/// been built so far (a build may be a dependency a failure was waiting on).
+#[derive(Default)]
+pub(super) struct RepeatMemory {
+    pub(super) builds: usize,
+    pub(super) last: std::collections::HashMap<String, LastFailure>,
+}
+
+/// Whether a failure of this kind can repeat identically. An ordinary failure
+/// (`Other`) can. Transient, disk, quota, busy and agent-side failures are
+/// retried up to the cap, since their next attempt may well differ.
+pub(super) fn identical_stop_applies(kind: FailureKind) -> bool {
+    kind == FailureKind::Other
+}
+
+/// Whether a failure with `reason` repeats the previous failure of the same
+/// package with no build finished in between: a retry would start from the
+/// same inputs and fail the same way.
+pub(super) fn repeats_without_change(
+    prev: Option<&LastFailure>,
+    reason: &str,
+    builds: usize,
+) -> bool {
+    prev.is_some_and(|p| p.reason == reason && p.builds == builds)
+}
+
+/// Whether a package that has failed `count` times has used up its `limit`.
+pub(super) fn cap_reached(count: usize, limit: usize) -> bool {
+    count >= limit
 }
 
 impl Frontier<'_> {
@@ -34,6 +75,8 @@ impl Frontier<'_> {
             PipelineResult::Built { .. } => {
                 ap_core::diag!("built {rpm_name} {version}");
                 self.fail_counts.remove(rpm_name);
+                self.repeats.builds += 1;
+                self.repeats.last.remove(rpm_name);
             }
             PipelineResult::AlreadyBuilt { .. } => {
                 ap_core::diag!("{rpm_name} {version} already built");
@@ -173,12 +216,28 @@ impl Frontier<'_> {
                     self.fail_counts.entry(rpm_name.clone()).or_insert(0)
                 };
                 *count += 1;
+                // The same ordinary failure, with no build since the last
+                // one, is not retried: the next attempt would start from the
+                // same inputs and end the same way. It is a human's to decide.
+                let repeated = identical_stop_applies(kind)
+                    && repeats_without_change(
+                        self.repeats.last.get(rpm_name),
+                        &reason,
+                        self.repeats.builds,
+                    );
+                self.repeats.last.insert(
+                    rpm_name.clone(),
+                    LastFailure {
+                        reason: reason.clone(),
+                        builds: self.repeats.builds,
+                    },
+                );
                 let limit = if rate_limited {
                     MAX_RATE_LIMITED_ROUNDS
                 } else {
                     self.max_target_retries
                 };
-                if exhausted || *count >= limit {
+                if exhausted || repeated || cap_reached(*count, limit) {
                     self.permanently_failed.insert(rpm_name.clone());
                     self.give_ups.insert(
                         rpm_name.clone(),
@@ -186,6 +245,11 @@ impl Frontier<'_> {
                             format!("every resolution rung failed ({reason})")
                         } else if exhausted {
                             format!("it spent its full budget/attempt allowance ({reason})")
+                        } else if repeated {
+                            format!(
+                                "it failed again with the same reason and no build since, \
+                                 so it needs a human ({reason})"
+                            )
                         } else {
                             format!("it failed {count} times in a row (last: {reason})")
                         },
@@ -206,6 +270,14 @@ impl Frontier<'_> {
                                  ({reason}) — another round would just repeat the same \
                                  fix loop with a fresh budget; anything depending on it \
                                  stays blocked, but the rest of the closure keeps going"
+                            )
+                        } else if repeated {
+                            format!(
+                                "giving up on {rpm_name}: it failed again with the same \
+                                 reason ({reason}) and no dependency was built since, so \
+                                 another attempt would repeat it; it needs a human. \
+                                 Anything depending on it stays blocked, but the rest of \
+                                 the closure keeps going"
                             )
                         } else {
                             format!(
@@ -246,5 +318,72 @@ mod tests {
         assert!(settles_as_skip(FailureKind::Excluded));
         assert!(!settles_as_skip(FailureKind::Other));
         assert!(!settles_as_skip(FailureKind::NeedsMaintainer));
+    }
+
+    fn last(reason: &str, builds: usize) -> LastFailure {
+        LastFailure {
+            reason: reason.to_string(),
+            builds,
+        }
+    }
+
+    #[test]
+    fn the_same_reason_twice_with_nothing_built_between_stops() {
+        let prev = last("needs a human: 1 patch", 4);
+        assert!(repeats_without_change(
+            Some(&prev),
+            "needs a human: 1 patch",
+            4
+        ));
+    }
+
+    #[test]
+    fn a_first_failure_is_never_a_repeat() {
+        assert!(!repeats_without_change(None, "needs a human", 0));
+    }
+
+    #[test]
+    fn a_changed_reason_is_retried() {
+        let prev = last("needs a human: 1 patch", 4);
+        assert!(!repeats_without_change(
+            Some(&prev),
+            "needs a human: 2 patches",
+            4
+        ));
+    }
+
+    #[test]
+    fn a_dependency_built_in_between_is_retried() {
+        let prev = last("not started: OBS baseline", 4);
+        assert!(!repeats_without_change(
+            Some(&prev),
+            "not started: OBS baseline",
+            5
+        ));
+    }
+
+    #[test]
+    fn only_ordinary_failures_use_the_identical_stop() {
+        assert!(identical_stop_applies(FailureKind::Other));
+        for kind in [
+            FailureKind::Transient,
+            FailureKind::DiskFull,
+            FailureKind::RateLimited,
+            FailureKind::Busy,
+            FailureKind::AgentFailed,
+            FailureKind::ConditionUnmet,
+        ] {
+            assert!(!identical_stop_applies(kind), "{kind:?} must be retried");
+        }
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried_up_to_the_cap() {
+        // Transient failures never take the identical stop, so only the cap
+        // decides: retry while under the limit, give up once it is reached.
+        assert!(!identical_stop_applies(FailureKind::Transient));
+        assert!(!cap_reached(1, 3));
+        assert!(!cap_reached(2, 3));
+        assert!(cap_reached(3, 3));
     }
 }

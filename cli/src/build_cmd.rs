@@ -244,6 +244,8 @@ pub(crate) fn cmd_build(
     // own, much higher, limit instead of using up the real-failure budget.
     let mut rate_limited_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
+    // The last failure of each package, to stop a retry that would repeat it.
+    let mut repeats = RepeatMemory::default();
     // Why each package in `permanently_failed` was given up on.
     let mut give_ups: std::collections::BTreeMap<String, String> = Default::default();
     let mut permanently_failed: std::collections::HashSet<String> =
@@ -275,33 +277,36 @@ pub(crate) fn cmd_build(
         // batch (see `retry_group` below). The most recent group runs first
         // once nothing else is pending: it waits on the newest packages, and a
         // package queued behind it may wait on it in turn.
-        drain_dep_queue(Build {
-            project,
-            distro,
-            arch,
-            rpm_name: &rpm_name,
-            version: &version,
-            cover_flavors: &cover_flavors,
-            branch,
-            state_root,
-            reporter: &reporter,
-            pkg_reporter: &pkg_reporter,
-            tui_ctrl: &tui_ctrl,
-            sem: &sem,
-            run_dir,
-            dep_drops: &dep_drops,
-            patch_requests: &patch_requests,
-            native_names: &native_names,
-            outdated_names: &outdated_names,
-            attempted_deps: &mut attempted_deps,
-            deferred_once: &mut deferred_once,
-            retrying: &mut retrying,
-            dep_rounds: &mut dep_rounds,
-            stuck_seeds: &mut stuck_seeds,
-            pending_deps: &mut pending_deps,
-            config: &mut config,
-            max_dep_attempts,
-        })?;
+        drain_dep_queue(
+            Build {
+                project,
+                distro,
+                arch,
+                rpm_name: &rpm_name,
+                version: &version,
+                cover_flavors: &cover_flavors,
+                branch,
+                state_root,
+                reporter: &reporter,
+                pkg_reporter: &pkg_reporter,
+                tui_ctrl: &tui_ctrl,
+                sem: &sem,
+                run_dir,
+                dep_drops: &dep_drops,
+                patch_requests: &patch_requests,
+                native_names: &native_names,
+                outdated_names: &outdated_names,
+                attempted_deps: &mut attempted_deps,
+                deferred_once: &mut deferred_once,
+                retrying: &mut retrying,
+                dep_rounds: &mut dep_rounds,
+                stuck_seeds: &mut stuck_seeds,
+                pending_deps: &mut pending_deps,
+                config: &mut config,
+                max_dep_attempts,
+            },
+            &mut repeats,
+        )?;
 
         if source_repo.is_some() {
             match single_repo_build(Build {
@@ -376,6 +381,7 @@ pub(crate) fn cmd_build(
                 rx: &rx,
                 in_flight: &mut in_flight,
                 fail_counts: &mut fail_counts,
+                repeats: &mut repeats,
                 rate_limited_counts: &mut rate_limited_counts,
                 give_ups: &mut give_ups,
                 permanently_failed: &mut permanently_failed,
@@ -420,6 +426,7 @@ pub(crate) fn cmd_build(
                 rx: &rx,
                 in_flight: &mut in_flight,
                 fail_counts: &mut fail_counts,
+                repeats: &mut repeats,
                 rate_limited_counts: &mut rate_limited_counts,
                 give_ups: &mut give_ups,
                 permanently_failed: &mut permanently_failed,
