@@ -178,7 +178,7 @@ fn check_checkout(name: &str, state: &PkgState, ws: &Workspace, checkout: &Path)
 /// `foo-1.0-docs.tar.gz` names another archive. The NVIDIA main archives
 /// (`…-13.8.0.4-archive.tar.xz`, `…-9.27.0.42_cuda13-archive.tar.xz`) are also
 /// accepted.
-fn names_version(archive: &str, version: &str) -> bool {
+pub(crate) fn names_version(archive: &str, version: &str) -> bool {
     let bare = version.replace('~', "");
     let is_wheel = archive.ends_with(".whl");
     [version, bare.as_str()].iter().any(|v| {

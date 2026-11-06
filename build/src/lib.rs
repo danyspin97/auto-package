@@ -19,6 +19,7 @@ pub mod explain;
 pub mod fix_flags;
 pub mod flaky;
 pub mod flavors;
+pub mod heal;
 pub mod http;
 pub mod log;
 pub mod maintenance;
