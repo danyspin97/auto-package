@@ -203,6 +203,8 @@ fn swept_package(c: &ap_build::update::Candidate) -> ap_core::sweep_event::Swept
 /// The sweep of a project for newer releases, running on its own thread so
 /// that the packages it finds can be branched and built while it goes on with
 /// the rest. Each package that has an update arrives on `updates`.
+/// `queue`, when given, is told each one is queued as soon as its check
+/// finds it (see `update_project::queue_found`).
 pub(super) struct Sweep {
     pub(super) updates: std::sync::mpsc::Receiver<ap_build::update::Candidate>,
     handle: std::thread::JoinHandle<Result<PlanReport, String>>,
@@ -214,6 +216,7 @@ impl Sweep {
         only: &[String],
         exclude: &[String],
         reporter: Arc<dyn Reporter + Send + Sync>,
+        queue: Option<Arc<dyn Reporter + Send + Sync>>,
     ) -> Self {
         let (tx, updates) = std::sync::mpsc::channel();
         let (project, only, exclude) = (project.to_string(), only.to_vec(), exclude.to_vec());
@@ -229,6 +232,9 @@ impl Sweep {
                         &c.decision,
                         ap_build::update::Decision::Update { ecosystem, .. } if ecosystem.can_build()
                     );
+                    if is_update && let Some(queue) = &queue {
+                        update_project::queue_found(queue.as_ref(), &project, &c, &exclude);
+                    }
                     // A closed channel means the run gave up: stop checking.
                     !is_update || tx.send(c).is_ok()
                 },

@@ -19,7 +19,7 @@ pub(crate) fn row_name(item: &Item) -> Option<String> {
 
 /// A reporter that reaches the TUI only: the plain output and the run log
 /// do not list a package before its build starts.
-fn tui_only(ctx: &Ctx<'_>) -> Option<Arc<dyn Reporter + Send + Sync>> {
+pub(super) fn tui_only(ctx: &Ctx<'_>) -> Option<Arc<dyn Reporter + Send + Sync>> {
     let t = ctx.tui_ctrl.as_ref()?;
     Some(t.tap(Arc::new(NullReporter), None))
 }
@@ -27,14 +27,51 @@ fn tui_only(ctx: &Ctx<'_>) -> Option<Arc<dyn Reporter + Send + Sync>> {
 /// Show `item` as queued under `row` in the TUI.
 pub(super) fn queue_row(ctx: &Ctx<'_>, row: &str, item: &Item) {
     if let Some(r) = tui_only(ctx) {
-        r.report(&Event::TargetSelected {
-            pkg: row.to_string(),
-            version: item.new_version.clone(),
-            reason: SelectionReason::RequestedRoot,
-            blocked_by: vec![],
-            from_version: Some(item.old_version.clone()),
-        });
+        report_queued(r.as_ref(), row, item);
     }
+}
+
+fn report_queued(r: &dyn Reporter, row: &str, item: &Item) {
+    r.report(&Event::TargetSelected {
+        pkg: row.to_string(),
+        version: item.new_version.clone(),
+        reason: SelectionReason::RequestedRoot,
+        blocked_by: vec![],
+        from_version: Some(item.old_version.clone()),
+    });
+}
+
+/// Show the update the sweep of `origin` found in `c` as queued on `queue`
+/// (a [`tui_only`] reporter), as soon as the check finds it: preparing the
+/// packages found before it can take a while, and the row must not wait for
+/// that. A package the preparation drops is closed by [`close_dropped`].
+pub(crate) fn queue_found(
+    queue: &dyn Reporter,
+    origin: &str,
+    c: &ap_build::update::Candidate,
+    exclude: &[String],
+) {
+    let items = up::items_from_plan(origin, std::slice::from_ref(c), exclude);
+    if let Some((item, row)) = items.first().and_then(|i| Some((i, row_name(i)?))) {
+        report_queued(queue, &row, item);
+    }
+}
+
+/// Close the rows of `queued` (rows [`queue_found`] queued) whose item has a
+/// result among `results[*seen..]`: the preparation dropped it, so no build
+/// will close it. `seen` moves past the results looked at.
+pub(super) fn close_dropped(
+    ctx: &Ctx<'_>,
+    results: &[ItemResult],
+    seen: &mut usize,
+    queued: &mut HashSet<String>,
+) {
+    for r in results.iter().skip(*seen) {
+        if let Some(row) = row_name(&r.item).filter(|row| queued.remove(row)) {
+            close_row(ctx, &row, &r.item, &r.outcome);
+        }
+    }
+    *seen = results.len();
 }
 
 /// Close `row` in the TUI with what its item ended with.
@@ -147,6 +184,56 @@ mod tests {
         watch.report(&finished("foo"));
         assert!(watch.finished());
         assert_eq!(sink.finished().len(), 2);
+    }
+
+    /// Keeps the rows of the `TargetSelected` events it is given.
+    #[derive(Default)]
+    struct Selected(std::sync::Mutex<Vec<String>>);
+
+    impl Reporter for Selected {
+        fn report(&self, event: &Event) {
+            if let Event::TargetSelected { pkg, .. } = event {
+                self.0.lock().unwrap().push(pkg.clone());
+            }
+        }
+    }
+
+    #[test]
+    fn a_found_update_is_queued_under_its_build_row_and_nothing_else_is() {
+        use ap_build::update::{Candidate, Decision};
+        let queue = Selected::default();
+        let found = |name: &str, ecosystem| Candidate {
+            rpm_name: name.to_string(),
+            decision: Decision::Update {
+                ecosystem,
+                old_version: "1.0".into(),
+                new_version: "2.0".into(),
+                upstream_tag: None,
+            },
+            notes: Vec::new(),
+        };
+        let pypi = found(
+            "python-APScheduler",
+            Ecosystem::Pypi {
+                pypi_name: "APScheduler".into(),
+            },
+        );
+        queue_found(&queue, "devel:languages:python", &pypi, &[]);
+        // Excluded, and not buildable: no row is queued.
+        queue_found(
+            &queue,
+            "devel:languages:python",
+            &pypi,
+            &["python-APScheduler".to_string()],
+        );
+        let repology = found(
+            "foo",
+            Ecosystem::Repology {
+                project: "foo".into(),
+            },
+        );
+        queue_found(&queue, "devel:languages:python", &repology, &[]);
+        assert_eq!(*queue.0.lock().unwrap(), ["python-apscheduler"]);
     }
 
     #[test]

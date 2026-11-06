@@ -71,7 +71,7 @@ pub(crate) use request::prepare_request;
 pub use run::*;
 pub(crate) use submit::{review_gate, yes_refusal};
 pub(crate) use tidy::confirm_with;
-pub(crate) use tui_row::row_name;
+pub(crate) use tui_row::{queue_found, row_name};
 
 use audit::*;
 use build_work::*;

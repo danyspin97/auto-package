@@ -106,6 +106,8 @@ fn prepare(
     // and built as it turns up, while the thread goes on with the others.
     let mut mechanical: HashSet<String> = HashSet::new();
     let (mut sweep, mut audit) = (None, None);
+    // Whether the sweep queues each update's row when it finds it.
+    let mut sweep_queues = false;
     // A maintenance backport or a bug fix builds each package at the version it
     // has: no sweep, the items come straight from the source's specs.
     let backports: Option<std::cell::RefCell<VecDeque<Item>>> =
@@ -129,11 +131,15 @@ fn prepare(
             ctx.reporter.clone(),
         ));
     } else {
+        // A dry run queues nothing: its rows stay as the check found them.
+        let queue = (!a.dry_run).then(|| tui_row::tui_only(ctx)).flatten();
+        sweep_queues = queue.is_some();
         sweep = Some(Sweep::start(
             &a.source,
             &a.only,
             &a.exclude,
             ctx.reporter.clone(),
+            queue,
         ));
     }
     // The next package to work on, in the order it was found, and whether its
@@ -155,6 +161,10 @@ fn prepare(
             }
         }
     };
+    // The rows the sweep queued, until a build or the preparation closes them,
+    // and how many results the preparation has had closed so far.
+    let mut sweep_rows: HashSet<String> = HashSet::new();
+    let mut closed_upto = report.results.len();
 
     // Branch, then make each package's BuildRequires reachable. With
     // `--update-deps` a dependency from another project that has a newer
@@ -169,6 +179,7 @@ fn prepare(
     let mut branch_checked = false;
     let mut open_requests = requested::OpenRequests::default();
     loop {
+        tui_row::close_dropped(ctx, &report.results, &mut closed_upto, &mut sweep_rows);
         let mut item = match queue.pop_front() {
             Some(item) => item,
             None => {
@@ -180,6 +191,9 @@ fn prepare(
                 let Some((item, style_only)) = incoming() else {
                     break;
                 };
+                if sweep_queues && let Some(row) = row_name(&item) {
+                    sweep_rows.insert(row);
+                }
                 if style_only {
                     mechanical.insert(item.pkg.clone());
                 }
@@ -401,6 +415,7 @@ fn prepare(
         }
         ready.push(Job::new(item, first_key, after));
     }
+    tui_row::close_dropped(ctx, &report.results, &mut closed_upto, &mut sweep_rows);
 
     if let Some(sweep) = sweep.take() {
         let plan = match sweep.finish() {

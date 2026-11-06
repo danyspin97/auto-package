@@ -343,7 +343,7 @@ fn cmd_update(
 ) -> color_eyre::Result<()> {
     // The project may call the distribution by another name than `--distro`.
     let distro = &ap_build::osc::resolve_repository(project, distro, arch);
-    let sweep = Sweep::start(project, only, exclude, reporter.clone());
+    let sweep = Sweep::start(project, only, exclude, reporter.clone(), None);
     // `--check` only reports the plan: the sweep runs to its end and nothing
     // is built.
     let updates: Box<dyn Iterator<Item = ap_build::update::Candidate>> = if check {
