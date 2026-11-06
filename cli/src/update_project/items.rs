@@ -349,18 +349,24 @@ fn report_no_provider(
 }
 
 /// The dependencies of `parent` that live in another project and have a newer
-/// upstream release, as items to branch from that project.
+/// upstream release, as items to branch from that project, each with what
+/// becomes of it given `parent`'s requirements `reqs` (see
+/// [`choose_dependency`]).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn dependency_items(
     a: &UpdateProjectArgs,
     branch: &str,
     parent: &Item,
+    reqs: &[ap_build::spec::Requirement],
     verdicts: &[depreach::DepVerdict],
     adds: &[PathAddition],
     ctx: &Ctx<'_>,
     emit: Emit<'_>,
-) -> Vec<Item> {
+) -> Vec<(Item, DepChoice)> {
     let mut out = Vec::new();
-    for origin in depreach::dependency_origins(verdicts, adds, branch, &a.source) {
+    for origin in
+        depreach::dependency_origins(verdicts, adds, branch, &a.source, !a.test_against_updates)
+    {
         let (project, pkg) = (origin.project, origin.package);
         let key = osc::fuzzy_key(&pkg);
         let plan = update::plan_where(
@@ -379,7 +385,15 @@ pub(super) fn dependency_items(
                         continue;
                     }
                     item.dependency_of = Some(parent.pkg.clone());
-                    out.push(item);
+                    let choice = choose_dependency(
+                        a.test_against_updates,
+                        reqs,
+                        &origin.names,
+                        &item,
+                        &parent.pkg,
+                        branch,
+                    );
+                    out.push((item, choice));
                 }
             }
             Err(e) => ctx.warn(format!(

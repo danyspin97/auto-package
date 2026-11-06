@@ -37,7 +37,7 @@ fn a_provider_in_the_origin_that_misses_the_bound_makes_the_origin_a_dependency_
         ),
         "{verdicts:?}"
     );
-    let origins = dependency_origins(&verdicts, &[], OWN, "Base:System");
+    let origins = dependency_origins(&verdicts, &[], OWN, "Base:System", true);
     assert_eq!(
         origins,
         vec![DependencyOrigin {
@@ -46,4 +46,6 @@ fn a_provider_in_the_origin_that_misses_the_bound_makes_the_origin_a_dependency_
             names: vec!["pkgconfig(foo) >= 2.1".into()],
         }]
     );
+    // --test-against-updates keeps the origins it had: a missed bound adds none.
+    assert!(dependency_origins(&verdicts, &[], OWN, "Base:System", false).is_empty());
 }

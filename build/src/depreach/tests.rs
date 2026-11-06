@@ -438,7 +438,7 @@ fn only_non_distro_non_personal_projects_are_candidates_for_updating_a_dependenc
         .check(&[pkg("cmake"), pkg("libfoo-devel"), pkg("onlyhome")])
         .unwrap();
     let adds = choose_paths(&v);
-    let origins = dependency_origins(&v, &adds, BRANCH, "Base:System");
+    let origins = dependency_origins(&v, &adds, BRANCH, "Base:System", true);
     // cmake is Factory's (a distro project), onlyhome is personal.
     assert_eq!(
         origins,
@@ -449,7 +449,7 @@ fn only_non_distro_non_personal_projects_are_candidates_for_updating_a_dependenc
         }]
     );
     // The project being updated from is not an origin of its own dependency.
-    assert!(dependency_origins(&v, &adds, BRANCH, "devel:languages:c_c++").is_empty());
+    assert!(dependency_origins(&v, &adds, BRANCH, "devel:languages:c_c++", true).is_empty());
 }
 
 #[test]
@@ -585,7 +585,7 @@ fn a_dependency_origin_lists_every_name_it_is_required_by() {
         reachable("libfoo-tools"),
         reachable("libfoo-devel"),
     ];
-    let origins = dependency_origins(&v, &[], BRANCH, "Base:System");
+    let origins = dependency_origins(&v, &[], BRANCH, "Base:System", true);
     assert_eq!(origins.len(), 1);
     assert_eq!(origins[0].names, ["libfoo-devel", "libfoo-tools"]);
 }

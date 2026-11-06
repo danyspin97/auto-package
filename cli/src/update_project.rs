@@ -40,6 +40,9 @@ mod build_work;
 mod cmd;
 mod context;
 mod deprecated;
+mod deps;
+#[cfg(test)]
+mod deps_tests;
 mod dry_run;
 mod existing;
 mod existing_lint;
@@ -78,6 +81,7 @@ use audit::*;
 use build_work::*;
 use cmd::*;
 use context::*;
+use deps::*;
 use dry_run::*;
 use items::*;
 use maintenance::*;

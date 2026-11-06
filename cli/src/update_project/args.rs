@@ -60,6 +60,14 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false)]
     pub update_deps: bool,
 
+    /// With `--update-deps`: branch and build first every such dependency
+    /// that has a newer release, so the package is tested against the
+    /// updates. Without it, a dependency is updated first only when the
+    /// package's BuildRequires need a newer version than its origin has; the
+    /// others are used as the origin publishes them.
+    #[arg(long, default_value_t = false, requires = "update_deps")]
+    pub test_against_updates: bool,
+
     /// Branch from a package's devel project, when it has one, instead of
     /// from the project named by SOURCE; its submit request then goes to the
     /// devel project. Without this the package is branched from SOURCE as

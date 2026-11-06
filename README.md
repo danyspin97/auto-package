@@ -155,7 +155,15 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
   cannot be combined with `--submit`, `--branch-project`, `--update-deps` or
   `--follow-devel`.
 - `--update-deps`: also branch and update dependencies that live in another
-  project and have a newer release themselves (see below).
+  project and that the package's BuildRequires need newer than that project
+  has (see below). Dependencies are chosen when the package is prepared, from
+  the spec as the branch has it before the update, so a bound that the new
+  upstream release adds is only seen on the next run (a known limit).
+- `--test-against-updates`: with `--update-deps`, branch and update every such
+  dependency that has a newer release, so the package is tested against the
+  updates instead of the origin's binaries (see below). A capability bound
+  (`pkgconfig(x) >= V`) is compared with the source package's version, not with
+  the version its `Provides:` gives (a known limit).
 - `--min-free-gb`: as for `build` (default: 3, 0 = off).
 - `--local`, `--local-root`, `--local-min-free-gib`: as for `build`; `--local` cannot be combined with `--submit` or `--maintenance`.
 - `--nvidia <wheel|redist>` / `--nvidia-redist`: as for `build` (default: `wheel`, or what the work directory last used).
@@ -323,8 +331,24 @@ With `--update-deps`, a dependency that the build will use from a project other
 than the source, the branch project, a distribution project (`openSUSE:`,
 `SUSE:`) or a personal one, and that has a newer upstream release, is branched
 and updated too, into the same branch project and ahead of the package that
-needs it. Its submit request goes to its own origin project. Without the flag,
-such a dependency is only referenced through a build path and never touched.
+needs it, when the package's BuildRequires need it: a bound (`>=`, `>`, `=`)
+the version its origin has misses and the new version meets. The
+requirements read are those of the branch's spec when the package is prepared:
+the origin's for a fresh branch, the updated one for a branch an earlier run
+updated. Any other dependency is used as its origin publishes it, through the
+build path, and the run says so. The package's submit request names the update
+it requires and the dependency's branch package, and the dependency's request
+goes to its own origin project. Without the flag, such a dependency is only referenced through
+a build path and never touched.
+
+A branched dependency is the branch project's own package: until it has built,
+dependents in the branch project do not see the origin's binaries (OBS shows
+them `blocked`, or `unresolvable` if it fails). So the package waits for the
+build of each dependency it requires, and also for one this run branches for
+another package. `--test-against-updates` goes back to branching every such
+dependency with a newer release ahead of the package, which tests it against
+all the updates at the cost of those waits and of the rebuilds each branched
+dependency triggers in the branch project.
 
 #### Other architectures
 

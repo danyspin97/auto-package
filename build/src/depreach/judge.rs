@@ -276,14 +276,16 @@ pub struct DependencyOrigin {
 /// The projects the dependencies will be built against that are not distro
 /// projects, personal projects, `own` or `exclude`: the places a dependency
 /// could itself be updated. Reachable dependencies count by the project the
-/// build finds them in; missing ones by the project `added` points at. A
-/// capability a provider in a project does not meet its bound (`NoProvider`)
-/// counts by that project, where the update the bound may need comes from.
+/// build finds them in; missing ones by the project `added` points at. With
+/// `misses`, a capability a provider in a project does not meet its bound
+/// (`NoProvider`) counts by that project, where the update the bound may need
+/// comes from. Without it, only the capabilities a provider meets are origins.
 pub fn dependency_origins(
     verdicts: &[DepVerdict],
     added: &[PathAddition],
     own: &str,
     exclude: &str,
+    misses: bool,
 ) -> Vec<DependencyOrigin> {
     let usable =
         |p: &str| !is_distro_project(p) && !p.starts_with("home:") && p != own && p != exclude;
@@ -314,7 +316,7 @@ pub fn dependency_origins(
         match &v.state {
             DepState::Reachable { provider }
             | DepState::Capability(CapState::Provided { provider }) => push(provider, &v.name),
-            DepState::Capability(CapState::NoProvider { found, .. }) => {
+            DepState::Capability(CapState::NoProvider { found, .. }) if misses => {
                 for f in found {
                     let provider = Hit {
                         project: f.project.clone(),

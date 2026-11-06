@@ -412,22 +412,16 @@ fn prepare(
                         }
                     };
                 if a.update_deps {
-                    for dep in dependency_items(a, branch, &item, &verdicts, &adds, ctx, emit) {
-                        // Built before this item, also when an earlier item queued it.
-                        after.push(visit_key(&dep));
-                        if dependency_count >= MAX_DEPENDENCY_ITEMS {
-                            ctx.warn(format!(
-                                "--update-deps: not updating {} too, the limit is {MAX_DEPENDENCY_ITEMS}",
-                                dep.pkg
-                            ));
-                        } else if visited.insert(visit_key(&dep)) {
-                            dependency_count += 1;
-                            ctx.say(format!(
-                                "{} needs {} from {}, which has a newer release ({} -> {})",
-                                item.pkg, dep.pkg, dep.origin, dep.old_version, dep.new_version
-                            ));
-                            queue.push_back(dep);
-                        }
+                    let reqs = ap_build::spec::build_requirements(&spec);
+                    let mut deps = DepQueue {
+                        queue: &mut queue,
+                        visited: &mut visited,
+                        count: &mut dependency_count,
+                    };
+                    let found =
+                        dependency_items(a, branch, &item, &reqs, &verdicts, &adds, ctx, emit);
+                    for (dep, choice) in found {
+                        deps.add(&mut item, dep, choice, &mut after, ctx.reporter.as_ref());
                     }
                 }
             }
