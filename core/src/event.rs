@@ -489,6 +489,17 @@ pub enum Event {
         pkg: String,
         reason: String,
     },
+    /// The sweep of an `update` for newer releases, as far as it has got: how
+    /// many packages it has compared so far and what it found. `finished`
+    /// once every package is compared.
+    SweepProgress {
+        checked: usize,
+        to_update: usize,
+        up_to_date: usize,
+        skipped: usize,
+        #[serde(default)]
+        finished: bool,
+    },
     /// The other-architecture check of an updated package: one entry per
     /// checked `(repo, arch)`, the failing ones with their detail.
     ArchCheck {

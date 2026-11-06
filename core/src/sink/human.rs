@@ -32,6 +32,7 @@ impl HumanSink {
             | Event::NotesUsage { .. }
             | Event::FailedTurnUsage { .. }
             | Event::Progress { .. }
+            | Event::SweepProgress { .. }
             | Event::HostAllowed { .. }
             | Event::ZigVendor { .. }
             | Event::PatchReviewed { .. }
