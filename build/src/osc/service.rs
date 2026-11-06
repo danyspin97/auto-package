@@ -8,26 +8,37 @@ use super::*;
 /// commit`). `osc status` prints one line per changed file and nothing when
 /// the working copy is clean.
 pub fn has_local_changes(checkout_dir: &Path, emit: Emit<'_>) -> bool {
+    status_text(checkout_dir, emit).is_none_or(|text| !text.trim().is_empty())
+}
+
+/// [`has_local_changes`] that leaves out the tool's own `series` scratch when
+/// OBS does not track it (see [`crate::heal::has_user_changes`]): what the
+/// start-up reconcile asks before it takes OBS's RPMs.
+pub fn has_user_changes(checkout_dir: &Path, emit: Emit<'_>) -> bool {
+    status_text(checkout_dir, emit).is_none_or(|text| {
+        crate::heal::has_user_changes(&text, &publish::tracked_files(checkout_dir))
+    })
+}
+
+/// The output of `osc status` in `checkout_dir`, or `None` when it could not be
+/// read (the answer is then "has changes").
+fn status_text(checkout_dir: &Path, emit: Emit<'_>) -> Option<String> {
     let Ok(out) = proc::capture("osc", &["status"], checkout_dir, emit) else {
-        return true;
+        return None;
     };
     if out.success() {
-        return !out.stdout.trim().is_empty();
+        return Some(out.stdout);
     }
     if is_inconsistent_wc_error(&out.stderr) && repair_wc(checkout_dir, emit).is_ok() {
         return proc::capture("osc", &["status"], checkout_dir, emit)
-            .map(|out| !out.stdout.trim().is_empty())
-            .unwrap_or(true);
+            .ok()
+            .map(|out| out.stdout);
     }
     // `osc status` failed for a reason other than the one recognized,
     // repairable case (a network/server hiccup, say), or `repair_wc` itself
-    // failed — either way `out.stdout` is from a failed invocation and
-    // almost certainly empty, which must not read as an actually-clean
-    // checkout ("no local changes"). The caller
-    // uses this to gate skipping a rebuild (see the `AlreadyBuilt` fast path
-    // in pipeline.rs), so treat "couldn't tell" as "has changes" — silently
+    // failed: "couldn't tell", which the callers read as "has changes". Silently
     // skipping a needed rebuild is far worse than running an unnecessary one.
-    true
+    None
 }
 
 /// Whether an `osc` command failed because the working copy's `.osc/`

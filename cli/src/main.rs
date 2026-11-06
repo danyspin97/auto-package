@@ -473,7 +473,7 @@ pub(crate) fn init_disk_guard(
             &work_dir.join(project),
             &rpms_dir,
             &lower,
-            |checkout| ap_build::osc::has_local_changes(checkout, ap_build::proc::Emit::quiet()),
+            |checkout| ap_build::osc::has_user_changes(checkout, ap_build::proc::Emit::quiet()),
             |name| {
                 ap_build::osc::download_built_rpms(
                     project,
@@ -501,7 +501,7 @@ pub(crate) fn init_disk_guard(
     }
     // The self-check: what the checkouts, state.json and OBS disagree about.
     let local_changes = |checkout: &std::path::Path| {
-        ap_build::osc::has_local_changes(checkout, ap_build::proc::Emit::quiet())
+        ap_build::osc::has_user_changes(checkout, ap_build::proc::Emit::quiet())
     };
     for finding in ap_build::doctor::run(
         &work_dir.join("state"),

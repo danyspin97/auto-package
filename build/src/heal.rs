@@ -41,6 +41,16 @@ pub fn is_stale_review(reviewed: Option<&str>, spec_version: Option<&str>) -> bo
     matches!((reviewed, spec_version), (Some(r), Some(v)) if r != v)
 }
 
+/// Whether the output of `osc status` shows a change the user made. The tool's
+/// own quilt `series` scratch is not one while OBS does not track it: the
+/// publish plan leaves it out of every commit anyway.
+pub fn has_user_changes(status: &str, tracked: &[String]) -> bool {
+    status
+        .lines()
+        .filter_map(|line| line.split_whitespace().last())
+        .any(|name| !(name == "series" && !tracked.iter().any(|t| t == name)))
+}
+
 /// What the OBS comparison of one package decides.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ObsDecision {
@@ -342,6 +352,19 @@ mod tests {
             matches!(&never, ObsDecision::Decline(r) if r.contains("nothing")),
             "{never:?}"
         );
+    }
+
+    #[test]
+    fn the_tools_series_scratch_is_not_a_user_change_unless_obs_holds_it() {
+        let none: Vec<String> = Vec::new();
+        assert!(!has_user_changes("", &none));
+        assert!(!has_user_changes("A    series\n", &none));
+        assert!(has_user_changes("A    series\n", &["series".to_string()]));
+        assert!(has_user_changes("M    pyenv.spec\n", &none));
+        assert!(has_user_changes(
+            "?    pyenv-2.8.14.tar.gz\nA    series\n",
+            &none
+        ));
     }
 
     #[test]
