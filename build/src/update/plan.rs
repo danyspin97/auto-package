@@ -425,6 +425,13 @@ pub fn plan_each(
         .map_err(|e| format!("could not list packages of {project}: {e}"))?;
     let mut names: Vec<String> = sources.iter().filter(|n| wanted(n)).cloned().collect();
     names.sort();
+    let (names, dropped) = spellings::one_spelling_each(names);
+    for (dropped, kept) in dropped {
+        emit.reporter.report(&Event::Warning {
+            step: emit.step,
+            message: format!("{project} lists {dropped} and {kept}: only {kept} is checked"),
+        });
+    }
 
     // Enumerate the package's files instead of guessing `<pkg>.spec`.
     // AppCo's versioned-library convention gives one OBS package per

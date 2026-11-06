@@ -43,6 +43,7 @@ mod lookups;
 mod pins;
 mod requested;
 mod siblings;
+mod spellings;
 pub use requested::{AlreadyRequested, clean_version};
 mod plan;
 mod planned_specs;
