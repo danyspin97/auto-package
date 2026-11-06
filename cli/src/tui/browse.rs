@@ -1,5 +1,21 @@
 use super::*;
 
+/// Keeps `selected` on its package wherever the package now sorts, or moves
+/// it to the first visible row when the package is no longer shown. The
+/// selected package's index in the visible rows.
+pub(super) fn sync_selection(state: &TuiState, selected: &mut Option<String>) -> Option<usize> {
+    let visible = state.visible_order();
+    if selected
+        .as_deref()
+        .is_none_or(|s| !visible.iter().any(|n| n.as_str() == s))
+    {
+        *selected = visible.first().map(|n| (*n).clone());
+    }
+    selected
+        .as_ref()
+        .and_then(|s| visible.iter().position(|n| n.as_str() == s))
+}
+
 pub(super) fn select_next(selected: &mut Option<String>, state: &TuiState) {
     let visible = state.visible_order();
     if visible.is_empty() {

@@ -181,20 +181,7 @@ fn event_loop(
             }
         }
 
-        {
-            let visible = state.visible_order();
-            if selected
-                .as_deref()
-                .is_none_or(|s| !visible.iter().any(|n| n.as_str() == s))
-            {
-                selected = visible.first().map(|n| (*n).clone());
-            }
-            table_state.select(
-                selected
-                    .as_ref()
-                    .and_then(|s| visible.iter().position(|n| n.as_str() == s)),
-            );
-        }
+        table_state.select(sync_selection(&state, &mut selected));
         // Lines that arrived since the last frame push a scrolled view up so
         // it keeps showing the same content; a view at the tail follows.
         let log_seq = selected

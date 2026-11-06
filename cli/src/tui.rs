@@ -95,6 +95,8 @@ mod filter_esc_tests;
 #[cfg(test)]
 mod header_tests;
 #[cfg(test)]
+mod order_tests;
+#[cfg(test)]
 mod prompt_tests;
 #[cfg(test)]
 mod render_death_tests;

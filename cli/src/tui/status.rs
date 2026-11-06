@@ -150,6 +150,24 @@ impl PkgStatus {
         }
     }
 
+    /// Where the row sorts in the table, lowest first: what is being worked
+    /// on, then what is queued or waits for it, then what ended, the
+    /// failures before the successes, and last what was only checked.
+    pub(super) fn sort_rank(&self) -> u8 {
+        match self {
+            PkgStatus::Running | PkgStatus::Between | PkgStatus::Retrying | PkgStatus::Checking => {
+                0
+            }
+            PkgStatus::Queued => 1,
+            PkgStatus::MissingDeps => 2,
+            PkgStatus::NeedsUpdate => 3,
+            PkgStatus::Failed | PkgStatus::NoSpace => 4,
+            PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt => 5,
+            PkgStatus::Skipped | PkgStatus::CheckSkipped => 6,
+            PkgStatus::UpToDate => 7,
+        }
+    }
+
     /// Whether the row is only what the sweep's check found: nothing was
     /// queued for it, so the run does not wait on it to end.
     pub(super) fn is_check_only(&self) -> bool {

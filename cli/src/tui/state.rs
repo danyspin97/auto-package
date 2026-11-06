@@ -96,14 +96,23 @@ impl TuiState {
     /// them is only the default — `show_all` (toggled with `a`) lets you
     /// spot-check a specific package that already succeeded instead of
     /// having to trust the aggregate count with no way to see which ones.
+    ///
+    /// The rows are sorted by their status (see [`PkgStatus::sort_rank`]):
+    /// running first, then queued, then the ones that ended. Rows of one
+    /// rank keep the order they first appeared in, so a long queue does not
+    /// reshuffle; the selection follows its package by name (see
+    /// `sync_selection`).
     pub(super) fn visible_order(&self) -> Vec<&String> {
-        self.order
+        let mut rows: Vec<&String> = self
+            .order
             .iter()
             .filter(|name| {
                 let status = &self.packages[*name].status;
                 self.show_all || !(status.is_built() || *status == PkgStatus::UpToDate)
             })
-            .collect()
+            .collect();
+        rows.sort_by_key(|name| self.packages[*name].status.sort_rank());
+        rows
     }
 
     /// The rows a build was queued for: every row but the ones that are only
