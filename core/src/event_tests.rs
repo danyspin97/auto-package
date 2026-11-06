@@ -109,3 +109,39 @@ fn a_finding_fix_event_round_trips_and_prints_one_line() {
         "  request 1394662 finding files.leftover (tool): fixed: removed a.orig"
     );
 }
+
+#[test]
+fn sweep_progress_names_its_package_and_old_logs_still_parse() {
+    use crate::sweep_event::{SweepVerdict, SweptPackage};
+    let e = Event::SweepProgress {
+        checked: 1,
+        to_update: 1,
+        up_to_date: 0,
+        skipped: 0,
+        finished: false,
+        package: Some(SweptPackage {
+            name: "python-foo".into(),
+            verdict: SweepVerdict::Update {
+                from: "1.0".into(),
+                to: "2.0".into(),
+            },
+        }),
+    };
+    assert_eq!(
+        serde_json::to_string(&e).unwrap(),
+        r#"{"event":"sweep_progress","checked":1,"to_update":1,"up_to_date":0,"skipped":0,"finished":false,"package":{"name":"python-foo","verdict":{"kind":"update","from":"1.0","to":"2.0"}}}"#
+    );
+    let old: Event = serde_json::from_str(
+        r#"{"event":"sweep_progress","checked":3,"to_update":0,"up_to_date":3,"skipped":0}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        old,
+        Event::SweepProgress {
+            checked: 3,
+            finished: false,
+            package: None,
+            ..
+        }
+    ));
+}

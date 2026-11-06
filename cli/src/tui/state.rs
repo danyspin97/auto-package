@@ -149,6 +149,7 @@ impl TuiState {
                 up_to_date,
                 skipped,
                 finished,
+                ..
             } => {
                 self.sweep = Some(SweepCounts {
                     checked: *checked,

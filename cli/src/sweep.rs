@@ -111,16 +111,22 @@ impl PlanReport {
                 message: format!("[note]    {}  ({note})", c.rpm_name),
             });
         }
-        self.report_progress(reporter, false);
+        self.report_progress(reporter, false, Some(swept_package(c)));
     }
 
-    fn report_progress(&self, reporter: &(dyn Reporter + Send + Sync), finished: bool) {
+    fn report_progress(
+        &self,
+        reporter: &(dyn Reporter + Send + Sync),
+        finished: bool,
+        package: Option<ap_core::sweep_event::SweptPackage>,
+    ) {
         reporter.report(&Event::SweepProgress {
             checked: self.total(),
             to_update: self.n_update + self.n_found_only,
             up_to_date: self.n_uptodate,
             skipped: self.n_skipped,
             finished,
+            package,
         });
     }
 
@@ -136,7 +142,7 @@ impl PlanReport {
     }
 
     pub(super) fn finish(&self, reporter: &(dyn Reporter + Send + Sync)) {
-        self.report_progress(reporter, true);
+        self.report_progress(reporter, true, None);
         let stopped = self.by_reason.contains_key("stopped") || ap_build::proc::shutting_down();
         let head = if stopped {
             "update plan, stopped before the end"
@@ -162,6 +168,36 @@ impl PlanReport {
             ),
         });
     }
+}
+
+/// What the check of `c` found, under the name the package is reported by
+/// from here on: an update the pipeline builds takes the name of its build's
+/// row (see `update_project::row_name`), so its later events land on the row.
+fn swept_package(c: &ap_build::update::Candidate) -> ap_core::sweep_event::SweptPackage {
+    use ap_build::update::Decision;
+    use ap_core::sweep_event::{SweepVerdict, SweptPackage};
+    let verdict = match &c.decision {
+        Decision::Update {
+            old_version,
+            new_version,
+            ..
+        } => SweepVerdict::Update {
+            from: old_version.clone(),
+            to: new_version.clone(),
+        },
+        Decision::UpToDate { version, .. } => SweepVerdict::UpToDate {
+            version: version.clone(),
+        },
+        Decision::Skipped(reason) => SweepVerdict::Skipped {
+            reason: reason.to_string(),
+        },
+    };
+    let built = ap_build::update_project::items_from_plan("", std::slice::from_ref(c), &[]);
+    let name = built
+        .first()
+        .and_then(update_project::row_name)
+        .unwrap_or_else(|| c.rpm_name.clone());
+    SweptPackage { name, verdict }
 }
 
 /// The sweep of a project for newer releases, running on its own thread so
@@ -394,5 +430,80 @@ mod tests {
         assert_eq!(plan.unreadable.len(), 1);
         assert!(plan.unreadable[0].starts_with("mailchariot: "));
         assert_eq!(plan.n_skipped, 2);
+    }
+}
+
+#[cfg(test)]
+mod swept_package_tests {
+    use super::swept_package;
+    use ap_build::update::{Candidate, Decision, Ecosystem, SkipReason};
+    use ap_core::sweep_event::SweepVerdict;
+
+    fn candidate(name: &str, decision: Decision) -> Candidate {
+        Candidate {
+            rpm_name: name.to_string(),
+            decision,
+            notes: Vec::new(),
+        }
+    }
+
+    fn update(ecosystem: Ecosystem) -> Decision {
+        Decision::Update {
+            ecosystem,
+            old_version: "1.0".into(),
+            new_version: "2.0".into(),
+            upstream_tag: None,
+        }
+    }
+
+    #[test]
+    fn an_update_the_pipeline_builds_is_named_as_its_build_row() {
+        let pypi = candidate(
+            "python-APScheduler",
+            update(Ecosystem::Pypi {
+                pypi_name: "APScheduler".into(),
+            }),
+        );
+        let swept = swept_package(&pypi);
+        assert_eq!(swept.name, "python-apscheduler");
+        assert_eq!(
+            swept.verdict,
+            SweepVerdict::Update {
+                from: "1.0".into(),
+                to: "2.0".into()
+            }
+        );
+        // Not buildable: there is no build row, the OBS name stays.
+        let repology = candidate(
+            "Foo",
+            update(Ecosystem::Repology {
+                project: "foo".into(),
+            }),
+        );
+        assert_eq!(swept_package(&repology).name, "Foo");
+    }
+
+    #[test]
+    fn a_current_or_skipped_package_keeps_its_obs_name() {
+        let current = candidate(
+            "Foo",
+            Decision::UpToDate {
+                ecosystem: Ecosystem::Pypi {
+                    pypi_name: "foo".into(),
+                },
+                version: "1.0".into(),
+            },
+        );
+        let swept = swept_package(&current);
+        assert_eq!(swept.name, "Foo");
+        assert_eq!(
+            swept.verdict,
+            SweepVerdict::UpToDate {
+                version: "1.0".into()
+            }
+        );
+        let skipped = swept_package(&candidate("bar", Decision::Skipped(SkipReason::NoSpec)));
+        assert_eq!(skipped.name, "bar");
+        assert!(matches!(skipped.verdict, SweepVerdict::Skipped { .. }));
     }
 }

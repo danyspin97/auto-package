@@ -491,7 +491,8 @@ pub enum Event {
     },
     /// The sweep of an `update` for newer releases, as far as it has got: how
     /// many packages it has compared so far and what it found. `finished`
-    /// once every package is compared.
+    /// once every package is compared. `package` is the package whose check
+    /// this report counts, when it is for one.
     SweepProgress {
         checked: usize,
         to_update: usize,
@@ -499,6 +500,8 @@ pub enum Event {
         skipped: usize,
         #[serde(default)]
         finished: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        package: Option<crate::sweep_event::SweptPackage>,
     },
     /// The other-architecture check of an updated package: one entry per
     /// checked `(repo, arch)`, the failing ones with their detail.

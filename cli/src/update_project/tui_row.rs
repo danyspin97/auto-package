@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// The row `cmd_build` reports `item` under: the pipeline's name of a PyPI
 /// package, the lowercased name of a repository or release one. `None` for a
 /// package the pipeline cannot build, which never gets a row.
-pub(super) fn row_name(item: &Item) -> Option<String> {
+pub(crate) fn row_name(item: &Item) -> Option<String> {
     match &item.ecosystem {
         Ecosystem::Pypi { pypi_name } => Some(osc::rpm_name(pypi_name)),
         Ecosystem::GitRepo { .. } | Ecosystem::Index { .. } => Some(item.pkg.to_lowercase()),

@@ -18,5 +18,6 @@ pub mod sandbox;
 pub mod sink;
 pub mod skills;
 pub mod step;
+pub mod sweep_event;
 
 pub use error::{Error, Result};

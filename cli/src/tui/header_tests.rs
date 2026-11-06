@@ -109,6 +109,7 @@ fn progress(checked: usize, finished: bool) -> Msg {
             up_to_date: 30,
             skipped: 5,
             finished,
+            package: None,
         },
     }
 }
