@@ -97,13 +97,39 @@ pub(super) enum Input<'a> {
     },
 }
 
+/// The group a status is counted in by the header.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Stage {
+    Queued,
+    Running,
+    Done,
+    Failed,
+    /// Parked until the dependencies it is missing are built.
+    Waiting,
+    Skipped,
+}
+
 impl PkgStatus {
+    /// The header group this status counts in.
+    pub(super) fn stage(&self) -> Stage {
+        match self {
+            PkgStatus::Queued => Stage::Queued,
+            PkgStatus::Running | PkgStatus::Between | PkgStatus::Retrying => Stage::Running,
+            PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt => Stage::Done,
+            PkgStatus::Failed | PkgStatus::NoSpace => Stage::Failed,
+            PkgStatus::MissingDeps => Stage::Waiting,
+            PkgStatus::Skipped => Stage::Skipped,
+        }
+    }
+
+    /// Whether the package is built (here, locally, or already before).
+    pub(super) fn is_built(&self) -> bool {
+        self.stage() == Stage::Done
+    }
+
     /// Whether the package's time runs: only while it is worked on.
     pub(super) fn timer_runs(&self) -> bool {
-        matches!(
-            self,
-            PkgStatus::Running | PkgStatus::Between | PkgStatus::Retrying
-        )
+        self.stage() == Stage::Running
     }
 
     /// The status after `input`. This is the only place a row's status is
@@ -175,5 +201,34 @@ impl Clock {
                 Some(banked.unwrap_or_default() + since.map_or(Duration::ZERO, |s| s.elapsed()))
             }
         }
+    }
+}
+
+/// How many rows are in each [`Stage`], for the header.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(super) struct StageCounts {
+    pub(super) queued: usize,
+    pub(super) running: usize,
+    pub(super) done: usize,
+    pub(super) failed: usize,
+    pub(super) waiting: usize,
+    pub(super) skipped: usize,
+}
+
+impl StageCounts {
+    pub(super) fn of<'a>(statuses: impl IntoIterator<Item = &'a PkgStatus>) -> Self {
+        let mut counts = StageCounts::default();
+        for status in statuses {
+            let slot = match status.stage() {
+                Stage::Queued => &mut counts.queued,
+                Stage::Running => &mut counts.running,
+                Stage::Done => &mut counts.done,
+                Stage::Failed => &mut counts.failed,
+                Stage::Waiting => &mut counts.waiting,
+                Stage::Skipped => &mut counts.skipped,
+            };
+            *slot += 1;
+        }
+        counts
     }
 }

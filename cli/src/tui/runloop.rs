@@ -64,14 +64,10 @@ pub(super) fn run_is_done(state: &TuiState, work_left: usize) -> bool {
     if state.packages.is_empty() {
         return matches!(state.run_outcome, Some(RunOutcome::Success));
     }
-    state.packages.values().all(|p| {
-        p.finished
-            && !p.retry_requested
-            && matches!(
-                p.status,
-                PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt
-            )
-    })
+    state
+        .packages
+        .values()
+        .all(|p| p.finished && !p.retry_requested && p.status.is_built())
 }
 
 /// Whether the run has nothing left to do, built or not: `work_left` is zero

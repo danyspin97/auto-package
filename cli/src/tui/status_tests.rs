@@ -153,3 +153,19 @@ fn a_clock_banks_its_time_when_it_stops_and_goes_on_from_there() {
     clock.follow(true);
     assert!(clock.elapsed().unwrap() >= banked);
 }
+
+#[test]
+fn each_status_counts_in_one_header_group() {
+    let counts = StageCounts::of(ALL.iter());
+    assert_eq!(
+        counts,
+        StageCounts {
+            queued: 1,
+            running: 3,
+            done: 3,
+            failed: 2,
+            waiting: 1,
+            skipped: 1,
+        }
+    );
+}

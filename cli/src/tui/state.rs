@@ -97,24 +97,14 @@ impl TuiState {
     pub(super) fn visible_order(&self) -> Vec<&String> {
         self.order
             .iter()
-            .filter(|name| {
-                self.show_all
-                    || !matches!(
-                        self.packages[*name].status,
-                        PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt
-                    )
-            })
+            .filter(|name| self.show_all || !self.packages[*name].status.is_built())
             .collect()
     }
 
-    /// Packages still to build: rows that are neither finished nor parked on
-    /// missing deps after a failure. Derived on every call, like `done`, so it
-    /// cannot drift from the rows the way a stored counter could.
-    pub(super) fn pending_count(&self) -> usize {
-        self.packages
-            .values()
-            .filter(|p| !p.finished && p.status != PkgStatus::MissingDeps)
-            .count()
+    /// The rows in each stage, counted from their statuses on every call so
+    /// the header cannot drift from the table.
+    pub(super) fn stage_counts(&self) -> StageCounts {
+        StageCounts::of(self.packages.values().map(|p| &p.status))
     }
 
     pub(super) fn pkg_mut(&mut self, name: &str) -> &mut PkgState {

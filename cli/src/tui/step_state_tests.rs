@@ -61,13 +61,13 @@ fn missing_deps_sets_waiting_on_and_a_later_build_clears_it() {
 }
 
 #[test]
-fn pending_counts_only_rows_still_to_build() {
+fn the_stage_counts_follow_each_row_status() {
     let mut state = TuiState::new(RunScope::default());
     state.pkg_mut("running");
     state.pkg_mut("built");
     state.pkg_mut("parked");
     state.pkg_mut("failed");
-    assert_eq!(state.pending_count(), 4);
+    assert_eq!(state.stage_counts().queued, 4);
     let fin = |pkg: &str, outcome| Event::PackageFinished {
         pkg: pkg.to_string(),
         version: "1".to_string(),
@@ -88,7 +88,17 @@ fn pending_counts_only_rows_still_to_build() {
             },
         ),
     ));
-    assert_eq!(state.pending_count(), 1);
+    let counts = state.stage_counts();
+    assert_eq!(
+        counts,
+        StageCounts {
+            queued: 1,
+            done: 1,
+            waiting: 1,
+            failed: 1,
+            ..StageCounts::default()
+        }
+    );
 }
 
 #[test]

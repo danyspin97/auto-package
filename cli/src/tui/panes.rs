@@ -28,24 +28,9 @@ pub(super) fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
 pub(super) fn summary_counters(state: &TuiState) -> Vec<String> {
     let done = state.packages.values().filter(|p| p.finished).count();
     let total = state.order.len();
-    let pending = state.pending_count();
-    // Live, not the `ResolveFinished` snapshot: that event only fires once
-    // per batch re-resolution of a root's own pip closure, which the far
-    // more frequent ad hoc dependency builds never trigger — trusting it
-    // here left this reading "0 built" for most of a long run even as
-    // packages visibly succeeded in the table below. `in_distro` has no
-    // live equivalent (a distro-satisfied dependency never becomes a row
-    // here at all), so that one is still the last snapshot.
-    let built = state
-        .packages
-        .values()
-        .filter(|p| {
-            matches!(
-                p.status,
-                PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt
-            )
-        })
-        .count();
+    let counts = state.stage_counts();
+    let pending = counts.queued + counts.running;
+    let built = counts.done;
     let elapsed = state.run_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
     let cost = state.total_cost_usd();
     let sweep = state
