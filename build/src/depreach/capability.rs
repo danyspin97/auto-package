@@ -150,11 +150,11 @@ pub fn provided_within(req: &Requirement, capability: &str, provides: &[String])
 }
 
 /// `version` without its release: `1.2.3-4` is `1.2.3`, `2:1.0-1` is `2:1.0`.
-fn strip_release(version: &str) -> &str {
+pub(super) fn strip_release(version: &str) -> &str {
     version.rsplit_once('-').map_or(version, |(v, _)| v)
 }
 
-fn accepts(op: &str, ord: std::cmp::Ordering) -> bool {
+pub(super) fn accepts(op: &str, ord: std::cmp::Ordering) -> bool {
     use std::cmp::Ordering::*;
     match op {
         ">=" => ord != Less,

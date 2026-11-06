@@ -44,9 +44,13 @@ mod requirements_tests;
 mod resolver;
 #[cfg(test)]
 mod tests;
+mod update_first;
+#[cfg(test)]
+mod update_first_tests;
 
 pub use capability::*;
 pub use flags::*;
 pub use judge::*;
 pub use obs::*;
 pub use resolver::*;
+pub use update_first::*;
