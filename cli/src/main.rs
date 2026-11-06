@@ -455,7 +455,9 @@ pub(crate) fn init_disk_guard(
     for (name, outcome) in ap_build::pipeline::reconcile_state(&work_dir.join("state")) {
         ap_core::diag!("note: {name} was left unfinished; now {outcome}");
     }
-    // What OBS shows for the project, asked once for the reconcile and the self-check.
+    // Stale leftovers and reviews are healed from the checkouts alone; OBS is
+    // asked once, for the RPM fetch and the self-check.
+    let mut healed = ap_build::heal::checkouts(&work_dir.join("state"), &work_dir.join(project));
     let statuses = ap_build::osc::get_project_build_statuses(project, distro, arch).ok();
     // A package state.json calls unfinished while OBS shows it built gets its
     // RPMs fetched and its state corrected.
@@ -466,7 +468,7 @@ pub(crate) fn init_disk_guard(
             .collect();
         let rpms_dir = work_dir.join("rpms");
         let _ = std::fs::create_dir_all(&rpms_dir);
-        for (name, what) in ap_build::pipeline::reconcile_with_obs(
+        for (name, result) in ap_build::pipeline::reconcile_with_obs(
             &work_dir.join("state"),
             &work_dir.join(project),
             &rpms_dir,
@@ -483,8 +485,9 @@ pub(crate) fn init_disk_guard(
                 )
             },
         ) {
-            match what {
+            match result {
                 Ok(lint) => {
+                    healed.push((name.clone(), "took OBS's RPMs".to_string()));
                     for warning in lint {
                         ap_core::diag!("note: {name}: {warning}");
                     }
@@ -492,6 +495,9 @@ pub(crate) fn init_disk_guard(
                 Err(problem) => ap_core::diag!("note: {name}: {problem}"),
             }
         }
+    }
+    if let Some(line) = ap_build::heal::summary_line(&healed) {
+        ap_core::diag!("{line}");
     }
     // The self-check: what the checkouts, state.json and OBS disagree about.
     let local_changes = |checkout: &std::path::Path| {

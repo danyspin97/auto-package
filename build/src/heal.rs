@@ -183,6 +183,39 @@ fn is_wheel_spec(spec: &str) -> bool {
     })
 }
 
+/// The one line that says what the start-up reconcile changed, one entry per
+/// package with what was done to it (`changes` is `(package, what)`), or `None`
+/// when nothing changed. Names are sorted and each appears once.
+pub fn summary_line(changes: &[(String, String)]) -> Option<String> {
+    let mut names: Vec<&str> = changes.iter().map(|(n, _)| n.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        return None;
+    }
+    let items: Vec<String> = names
+        .iter()
+        .map(|name| {
+            let whats: Vec<&str> = changes
+                .iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, w)| w.as_str())
+                .collect();
+            format!("{name} ({})", whats.join("; "))
+        })
+        .collect();
+    let noun = if names.len() == 1 {
+        "package"
+    } else {
+        "packages"
+    };
+    Some(format!(
+        "note: reconciled {} {noun} with OBS: {}",
+        names.len(),
+        items.join(", ")
+    ))
+}
+
 /// Append one line saying what was reconciled in a package's state directory.
 pub(crate) fn record(ws: &crate::workspace::Workspace, what: &str) {
     use std::io::Write;
@@ -308,6 +341,36 @@ mod tests {
         assert!(
             matches!(&never, ObsDecision::Decline(r) if r.contains("nothing")),
             "{never:?}"
+        );
+    }
+
+    #[test]
+    fn the_summary_names_each_package_once_with_what_was_done() {
+        assert_eq!(summary_line(&[]), None);
+        let changes = [
+            (
+                "pyenv".to_string(),
+                "removed the stale archive pyenv-2.8.4.tar.gz".to_string(),
+            ),
+            ("cookiecutter".to_string(), "took OBS's RPMs".to_string()),
+            (
+                "pyenv".to_string(),
+                "dropped the review of 2.8.4 (the spec says 2.8.14)".to_string(),
+            ),
+        ];
+        assert_eq!(
+            summary_line(&changes).as_deref(),
+            Some(
+                "note: reconciled 2 packages with OBS: cookiecutter (took OBS's RPMs), pyenv \
+                 (removed the stale archive pyenv-2.8.4.tar.gz; dropped the review of 2.8.4 \
+                 (the spec says 2.8.14))"
+            )
+        );
+        let one = [("eric".to_string(), "took OBS's RPMs".to_string())];
+        assert!(
+            summary_line(&one)
+                .unwrap()
+                .starts_with("note: reconciled 1 package with OBS: eric")
         );
     }
 
