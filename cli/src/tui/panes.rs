@@ -119,7 +119,7 @@ pub(super) fn render_table(
                 Some(mark) => Cell::from(Line::from(mark.span())),
                 None => Cell::from(pkg.step_text()),
             };
-            let elapsed = pkg.started.elapsed().as_secs();
+            let elapsed = pkg.elapsed_secs();
             let tries = if pkg.max_tries > 0 {
                 format!("{}/{}", pkg.tries, pkg.max_tries)
             } else {

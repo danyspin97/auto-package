@@ -178,7 +178,10 @@ pub(super) struct PkgState {
     pub(super) input_tokens: u64,
     pub(super) output_tokens: u64,
     pub(super) cost_usd: f64,
+    /// When the package left the queue (its first step), or was queued again.
     pub(super) started: Instant,
+    /// When `PackageFinished` came in: the package's time stops there.
+    pub(super) ended: Option<Instant>,
     pub(super) finished: bool,
     /// Current/max agent fix-attempt count within this `run_package` call
     /// (`Task::FixAfterBuild`'s `attempt`/`max_attempts`). Stays `0`/`0`
@@ -227,6 +230,20 @@ impl PkgState {
     /// The status cell's text: the status, or for a built package that fails
     /// on another arch `built ⚠`. The names of the failing arches are in the
     /// package's log, the column has no room for them.
+    /// Seconds the package has been worked on: none while it is queued, live
+    /// while it runs, frozen once it finished.
+    pub(super) fn elapsed_secs(&self) -> u64 {
+        if self.status == PkgStatus::Queued {
+            return 0;
+        }
+        self.ended
+            .map_or_else(
+                || self.started.elapsed(),
+                |e| e.duration_since(self.started),
+            )
+            .as_secs()
+    }
+
     pub(super) fn status_cell(&self) -> String {
         match (
             self.status == PkgStatus::Succeeded,
@@ -253,6 +270,7 @@ impl PkgState {
             output_tokens: 0,
             cost_usd: 0.0,
             started: Instant::now(),
+            ended: None,
             finished: false,
             tries: 0,
             max_tries: 0,
@@ -321,7 +339,9 @@ impl PkgState {
             (PkgStatus::Between, Some((outcome, elapsed))) => {
                 let marker = match outcome {
                     StepOutcome::Ok => "✓",
-                    StepOutcome::Failed => "✗",
+                    // The package is not finished: the pipeline is still on
+                    // its tries, so the failed step is not the package's end.
+                    StepOutcome::Failed => "↻",
                     StepOutcome::Skipped => "⇥",
                 };
                 format!("{marker} {label} {}", fmt_dur(*elapsed))

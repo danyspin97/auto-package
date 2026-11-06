@@ -194,6 +194,7 @@ impl TuiState {
                 state.arch_fails.clear();
                 state.status = PkgStatus::Queued;
                 state.started = Instant::now();
+                state.ended = None;
                 state.step = None;
                 state.fail_reason = None;
                 state.skipped.clear();
@@ -223,6 +224,7 @@ impl TuiState {
                     state.version = version.clone();
                 }
                 state.finished = true;
+                state.ended = Some(Instant::now());
                 state.retry_requested = false;
                 state.waiting_on = match outcome {
                     PackageOutcome::MissingDeps { deps } => {
@@ -328,6 +330,12 @@ impl TuiState {
                 }
                 // The notes turn only runs after a successful build, so the package
                 // is already done; showing it as running would hide that.
+                if state.status == PkgStatus::Queued {
+                    state.started = Instant::now();
+                }
+                if *kind != StepKind::PackageNotes {
+                    state.ended = None;
+                }
                 state.status = if *kind == StepKind::PackageNotes {
                     PkgStatus::Succeeded
                 } else {

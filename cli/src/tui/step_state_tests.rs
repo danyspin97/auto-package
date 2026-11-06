@@ -292,3 +292,18 @@ fn a_skipped_step_is_recorded_without_replacing_the_current_step() {
     assert_eq!(pkg.skipped, [(StepKind::OscService, SkipReason::NotRust)]);
     assert_eq!(pkg.step.as_ref().unwrap().kind, StepKind::Checkout);
 }
+
+#[test]
+fn a_package_time_runs_only_between_its_first_step_and_its_end() {
+    use std::time::Duration;
+    let mut pkg = PkgState::new("1.0".into());
+    pkg.started = Instant::now() - Duration::from_secs(90);
+    // Queued: no time yet, however long it waited.
+    assert_eq!(pkg.elapsed_secs(), 0);
+    pkg.status = PkgStatus::Running;
+    assert!(pkg.elapsed_secs() >= 90);
+    // Finished: the time stops at the end.
+    pkg.status = PkgStatus::Failed;
+    pkg.ended = Some(pkg.started + Duration::from_secs(30));
+    assert_eq!(pkg.elapsed_secs(), 30);
+}
