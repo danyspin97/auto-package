@@ -4,6 +4,13 @@
 use super::*;
 use crate::osc::ci_retry::*;
 
+/// The name endings of a source archive, as `publish_plan` and the discard of
+/// stale archives read them.
+pub const ARCHIVE_SUFFIXES: &[&str] = &[
+    ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar", ".tgz", ".tbz", ".txz", ".zip", ".crate",
+    ".whl",
+];
+
 /// What a checkout publishes to OBS, split by [`publish_plan`].
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PublishPlan {
@@ -274,12 +281,8 @@ fn is_publishable(
     // An archive no `Source:` line names (the previous release's tarball or
     // vendor archive, the 784 MB source tarball of a switched recipe) is not
     // needed by `%prep`. Only judged when the spec names sources at all.
-    const ARCHIVES: &[&str] = &[
-        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar", ".tgz", ".tbz", ".txz", ".zip",
-        ".crate", ".whl",
-    ];
     if !sources.is_empty()
-        && ARCHIVES.iter().any(|s| name.ends_with(s))
+        && ARCHIVE_SUFFIXES.iter().any(|s| name.ends_with(s))
         && !sources.iter().any(|p| matches_source_name(p, name))
     {
         return false;
@@ -310,7 +313,7 @@ fn is_publishable(
     // (`foo.spec.orig`) is not published.
     let archive_original = name
         .strip_suffix(".orig")
-        .is_some_and(|base| ARCHIVES.iter().any(|s| base.ends_with(s)));
+        .is_some_and(|base| ARCHIVE_SUFFIXES.iter().any(|s| base.ends_with(s)));
     if FIXED.contains(&name)
         || archive_original
         || SUFFIXES.iter().any(|s| name.ends_with(s))
@@ -473,17 +476,13 @@ pub fn discard_untracked_archives(
     skipped: &[String],
     named: &[String],
 ) -> Vec<String> {
-    const ARCHIVES: &[&str] = &[
-        ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar", ".tgz", ".tbz", ".txz", ".zip",
-        ".crate", ".whl",
-    ];
     let tracked = tracked_files(checkout_dir);
     let mut gone = Vec::new();
     for name in skipped {
         if tracked.contains(name)
             || named.contains(name)
             || !is_safe_file_arg(name)
-            || !ARCHIVES.iter().any(|s| name.ends_with(s))
+            || !ARCHIVE_SUFFIXES.iter().any(|s| name.ends_with(s))
         {
             continue;
         }
