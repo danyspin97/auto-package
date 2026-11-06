@@ -128,7 +128,7 @@ fn render_at(state: &TuiState, w: u16, h: u16) -> Terminal<TestBackend> {
 
 #[test]
 fn the_header_names_the_project_and_targets_when_there_is_room() {
-    let terminal = render_at(&state_with_history(), 120, 30);
+    let terminal = render_at(&state_with_history(), 200, 30);
     assert!(row_text(&terminal, 1).contains("project: home:foo:bar | target: foo, bar, baz"));
     // Narrower, but still a boxed header: the project survives the cut.
     let terminal = render_at(&state_with_history(), 80, 30);

@@ -61,15 +61,20 @@ fn a_wide_header_shows_the_full_scope_before_the_full_counters() {
 }
 
 #[test]
-fn a_narrow_header_drops_the_scope_before_the_counters_it_cannot_share_room_with() {
+fn a_narrow_header_drops_the_scope_before_it_shortens_the_counters() {
+    let line = header_line(&scope_labels(&scope(&["pkg1", "pkg2"])), counters(), 60);
+    assert_eq!(line, " 3/10 done, 7 pending │ elapsed 12s │ $0.12 ");
     let line = header_line(&scope_labels(&scope(&["pkg1", "pkg2"])), counters(), 40);
     assert_eq!(line, " 3/10 done │ $0.12 ");
 }
 
 #[test]
 fn the_targets_are_dropped_before_the_project() {
-    let line = header_line(&scope_labels(&scope(&["pkg1", "pkg2"])), counters(), 60);
-    assert_eq!(line, "project: home:foo:bar │ 3/10 done │ $0.12 ");
+    let line = header_line(&scope_labels(&scope(&["pkg1", "pkg2"])), counters(), 70);
+    assert_eq!(
+        line,
+        "project: home:foo:bar │ 3/10 done, 7 pending │ elapsed 12s │ $0.12 "
+    );
 }
 
 #[test]

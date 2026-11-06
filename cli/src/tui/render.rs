@@ -288,17 +288,20 @@ pub(super) fn scope_labels(scope: &RunScope) -> Vec<String> {
     labels
 }
 
-/// The summary line: the scope in front of the counters. Every combination is
-/// tried with the scope first, so the project and targets keep their place
-/// while there is room for them beside the counters, and the counters shrink
-/// before the scope does. Counters alone come last, for terminals too narrow
-/// for both. Whatever is picked is cut to `width` as a last resort.
+/// The summary line: the scope in front of the counters. The counters come
+/// first: each counter title, widest first, is tried with every scope label
+/// (fullest first) and then alone, so the scope gives way before the counters
+/// shrink. Whatever is picked is cut to `width` as a last resort.
 pub(super) fn header_line(scope: &[String], counters: Vec<String>, width: usize) -> String {
-    let mut options: Vec<String> = scope
+    let options: Vec<String> = counters
         .iter()
-        .flat_map(|s| counters.iter().map(move |c| format!("{s} │{c}")))
+        .flat_map(|c| {
+            scope
+                .iter()
+                .map(move |s| format!("{s} │{c}"))
+                .chain(std::iter::once(c.clone()))
+        })
         .collect();
-    options.extend(counters);
     let line = first_fitting(options, width, |t| t.width()).unwrap_or_default();
     truncate_with_ellipsis(&line, width)
 }
