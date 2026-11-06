@@ -61,6 +61,7 @@ mod reporter;
 mod runloop;
 mod screen;
 mod state;
+mod status;
 mod sweep_counts;
 mod terminal;
 mod text;
@@ -77,6 +78,7 @@ use pkg::*;
 use render::*;
 use runloop::*;
 use state::*;
+use status::*;
 use sweep_counts::*;
 use text::*;
 
@@ -106,6 +108,8 @@ mod run_end_tests;
 mod run_pane_tests;
 #[cfg(test)]
 mod seq_tests;
+#[cfg(test)]
+mod status_tests;
 #[cfg(test)]
 mod step_state_tests;
 #[cfg(test)]

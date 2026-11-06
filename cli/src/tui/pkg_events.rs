@@ -28,11 +28,9 @@ impl TuiState {
                 if *kind != StepKind::PackageNotes {
                     state.ended = None;
                 }
-                state.status = if *kind == StepKind::PackageNotes {
-                    PkgStatus::Succeeded
-                } else {
-                    PkgStatus::Running
-                };
+                state.status = state.status.next(Input::StepStarted {
+                    notes: *kind == StepKind::PackageNotes,
+                });
                 state.step = Some(StepInfo {
                     kind: *kind,
                     attempt: *attempt,
@@ -80,16 +78,14 @@ impl TuiState {
                 // The notes turn is the last thing a successful package does: once it
                 // ends, the row is done and must not keep showing the notes step
                 // (a missing PackageFinished would otherwise leave that text).
-                if state
+                let notes = state
                     .step
                     .as_ref()
-                    .is_some_and(|s| s.kind == StepKind::PackageNotes)
-                {
+                    .is_some_and(|s| s.kind == StepKind::PackageNotes);
+                if notes {
                     state.step = None;
-                    state.status = PkgStatus::Succeeded;
-                } else {
-                    state.status = PkgStatus::Between;
                 }
+                state.status = state.status.next(Input::StepFinished { notes });
             }
             Event::BuildFailed { classification, .. } => {
                 state.add_log(LogLevel::Error, format!("Build failed: {classification:?}"));

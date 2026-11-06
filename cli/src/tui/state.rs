@@ -211,7 +211,7 @@ impl TuiState {
                 // A new attempt: the arches the last build failed on are not
                 // known until its check runs again.
                 state.arch_fails.clear();
-                state.status = PkgStatus::Queued;
+                state.status = state.status.next(Input::Selected);
                 state.started = Instant::now();
                 state.ended = None;
                 state.step = None;
@@ -254,21 +254,10 @@ impl TuiState {
                     }
                     _ => Vec::new(),
                 };
-                state.status = match outcome {
-                    PackageOutcome::Built => PkgStatus::Succeeded,
-                    PackageOutcome::BuiltLocally => PkgStatus::BuiltLocally,
-                    PackageOutcome::AlreadyBuilt => PkgStatus::AlreadyBuilt,
-                    PackageOutcome::MissingDeps { .. } => PkgStatus::MissingDeps,
-                    PackageOutcome::Failed { disk_full, .. } => {
-                        if state.disk_full_detected || *disk_full {
-                            PkgStatus::NoSpace
-                        } else {
-                            PkgStatus::Failed
-                        }
-                    }
-                    PackageOutcome::NeedsMaintainer { .. } => PkgStatus::Failed,
-                    PackageOutcome::Skipped { .. } => PkgStatus::Skipped,
-                };
+                state.status = state.status.next(Input::Finished {
+                    outcome,
+                    disk_full: state.disk_full_detected,
+                });
                 match outcome {
                     PackageOutcome::Failed { reason, .. }
                     | PackageOutcome::NeedsMaintainer { reason } => {
