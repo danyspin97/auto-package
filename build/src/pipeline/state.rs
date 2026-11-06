@@ -313,11 +313,12 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
 /// A package whose `state.json` records an unfinished outcome although OBS shows
 /// its build succeeded is fixed here, before the run builds on it: the RPMs are
 /// downloaded (`download(name)`, the number fetched) and the outcome becomes
-/// `success`. Only for a package whose checkout holds the version the state
-/// last worked on and has no local changes, so an OBS success of an older
-/// source is not taken for this one. `statuses` is keyed by lower-case package
-/// name. `download` gets the package's OBS name. Returns `(name, what was done)`
-/// for each package looked at that could not be fixed or was.
+/// `success`. The decision is [`crate::heal::obs_built_decision`]: only the
+/// version the state last built, with a clean checkout, is taken. `statuses`
+/// is keyed by lower-case package name. `download` gets the package's OBS name.
+/// Returns `(name, Ok(rpmlint warnings))` for each package fixed and
+/// `(name, Err(problem))` for each that OBS built but could not be fixed; a
+/// package that is declined is not listed (its `doctor` finding says why).
 pub fn reconcile_with_obs(
     state_root: &Path,
     checkout_root: &Path,
@@ -325,29 +326,13 @@ pub fn reconcile_with_obs(
     statuses: &std::collections::HashMap<String, osc::BuildStatus>,
     local_changes: impl Fn(&Path) -> bool,
     download: impl Fn(&str) -> Result<usize, osc::Error>,
-) -> Vec<(String, String)> {
+) -> Vec<(String, Result<Vec<String>, String>)> {
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(state_root) else {
-        return out;
-    };
-    let mut names: Vec<String> = rd
-        .flatten()
-        .filter(|e| e.path().join("state.json").is_file())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .collect();
-    names.sort();
-    for name in names {
+    for name in crate::heal::package_names(state_root) {
         let Some(ws) = Workspace::find_existing(state_root, &[&name]) else {
             continue;
         };
         let state = PkgState::load(&ws);
-        if !matches!(
-            state.last_outcome.as_deref(),
-            Some("failed" | "interrupted" | "missing_deps")
-        ) || statuses.get(&name.to_lowercase()) != Some(&osc::BuildStatus::Succeeded)
-        {
-            continue;
-        }
         // The checkout and the OBS download are named by the OBS name the state
         // records; a state written before that field is the name itself.
         let obs = state.obs_name.clone().unwrap_or_else(|| name.clone());
@@ -355,36 +340,46 @@ pub fn reconcile_with_obs(
         let spec_version = std::fs::read_to_string(checkout.join(format!("{obs}.spec")))
             .ok()
             .and_then(|t| crate::spec::parse_header(&t).map(|h| h.version));
-        if spec_version.is_none()
-            || spec_version != state.last_built_version
-            || local_changes(&checkout)
-        {
+        let decision = crate::heal::obs_built_decision(
+            state.last_outcome.as_deref(),
+            statuses.get(&name.to_lowercase()),
+            spec_version.as_deref(),
+            state.last_built_version.as_deref(),
+            || local_changes(&checkout),
+        );
+        let (crate::heal::ObsDecision::Fetch, Some(version)) = (decision, spec_version) else {
             continue;
-        }
+        };
         match download(&obs) {
             Ok(n) if n > 0 => {
-                let version = spec_version.unwrap_or_default();
                 // The rpmlint log of what was fetched, as a normal download does.
                 let lint = record_rpmlint_logs(rpms_dir, &obs, &version, &ws).warnings;
+                let what = format!("recorded success: OBS built {version}, fetched {n} RPM(s)");
                 let saved = PkgState::update(&ws, |st| {
-                    st.last_built_version = Some(version);
+                    st.last_built_version = Some(version.clone());
                     st.last_outcome = Some("success".to_string());
                     st.last_failure_reason = None;
                 });
-                let mut what = match saved {
-                    Ok(_) => format!("OBS built it; fetched {n} RPM(s) and recorded success"),
-                    Err(e) => format!("OBS built it; fetched {n} RPM(s), state not saved: {e}"),
-                };
-                for w in lint {
-                    what.push_str("; ");
-                    what.push_str(&w);
+                match saved {
+                    Ok(_) => {
+                        crate::heal::record(&ws, &what);
+                        out.push((name, Ok(lint)));
+                    }
+                    Err(e) => out.push((
+                        name,
+                        Err(format!(
+                            "OBS built it; fetched {n} RPM(s), state not saved: {e}"
+                        )),
+                    )),
                 }
-                out.push((name, what));
             }
-            Ok(_) => out.push((name, "OBS built it but no RPMs were downloaded".to_string())),
+            Ok(_) => out.push((
+                name,
+                Err("OBS built it but no RPMs were downloaded".to_string()),
+            )),
             Err(e) => out.push((
                 name,
-                format!("OBS built it but fetching its RPMs failed: {e}"),
+                Err(format!("OBS built it but fetching its RPMs failed: {e}")),
             )),
         }
     }

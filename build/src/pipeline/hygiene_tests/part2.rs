@@ -92,7 +92,7 @@ fn a_failed_state_that_obs_built_is_reconciled_by_downloading_its_rpms() {
     assert!(
         again
             .iter()
-            .all(|(_, m)| m.contains("fetching its RPMs failed")),
+            .all(|(_, m)| matches!(m, Err(e) if e.contains("fetching its RPMs failed"))),
         "{again:?}"
     );
 }

@@ -184,7 +184,7 @@ fn is_wheel_spec(spec: &str) -> bool {
 }
 
 /// Append one line saying what was reconciled in a package's state directory.
-fn record(ws: &crate::workspace::Workspace, what: &str) {
+pub(crate) fn record(ws: &crate::workspace::Workspace, what: &str) {
     use std::io::Write;
     let path = ws.dir().join("reconciled.log");
     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -197,7 +197,7 @@ fn record(ws: &crate::workspace::Workspace, what: &str) {
 }
 
 /// The names of the packages with a `state.json` under `state_root`, sorted.
-fn package_names(state_root: &std::path::Path) -> Vec<String> {
+pub(crate) fn package_names(state_root: &std::path::Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(state_root)
         .into_iter()
         .flatten()

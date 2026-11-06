@@ -483,7 +483,14 @@ pub(crate) fn init_disk_guard(
                 )
             },
         ) {
-            ap_core::diag!("note: {name}: {what}");
+            match what {
+                Ok(lint) => {
+                    for warning in lint {
+                        ap_core::diag!("note: {name}: {warning}");
+                    }
+                }
+                Err(problem) => ap_core::diag!("note: {name}: {problem}"),
+            }
         }
     }
     // The self-check: what the checkouts, state.json and OBS disagree about.
