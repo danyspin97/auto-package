@@ -337,8 +337,9 @@ requirements read are those of the branch's spec when the package is prepared:
 the origin's for a fresh branch, the updated one for a branch an earlier run
 updated. Any other dependency is used as its origin publishes it, through the
 build path, and the run says so. The package's submit request names the update
-it requires and the dependency's branch package, and the dependency's request
-goes to its own origin project. Without the flag, such a dependency is only referenced through
+it requires (`Requires the update of <dependency> (request #N)`, or its branch
+package while it has no request; `--submit` creates the dependency's request
+first), and the dependency's request goes to its own origin project. Without the flag, such a dependency is only referenced through
 a build path and never touched.
 
 A branched dependency is the branch project's own package: until it has built,

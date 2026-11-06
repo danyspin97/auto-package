@@ -188,6 +188,14 @@ pub(crate) fn prepare_request(
             )));
         }
     }
+    // The dependency updates it requires are named by their open request.
+    let mut item = item.clone();
+    for r in item.requires.iter_mut().filter(|r| r.request.is_none()) {
+        if let Ok(open) = osc::open_submit_requests(branch, &r.pkg, &r.origin, emit) {
+            r.request = open.first().map(|o| o.id.clone());
+        }
+    }
+    let item = &item;
     Ok(osc::SubmitRequest {
         source_project: branch.to_string(),
         source_package: item.pkg.clone(),

@@ -239,9 +239,15 @@ pub(super) fn submit_requests(
         return Ok(());
     }
 
-    for (idx, sr) in pending {
+    // A dependency's request is made first, so the request of a package that
+    // requires its update can name it.
+    pending.sort_by_key(|(i, _)| results[*i].item.dependency_of.is_none());
+    let mut created: Vec<(String, String)> = Vec::new();
+    for (idx, mut sr) in pending {
+        sr.description = name_created(&sr.description, &results[idx].item.requires, &created);
         results[idx].sr = match osc::create_submit_request(&sr, emit) {
             Ok(id) => {
+                created.push((sr.source_package.clone(), id.clone()));
                 ctx.say(format!(
                     "created request {id}: {}/{} -> {}/{}",
                     sr.source_project, sr.source_package, sr.target_project, sr.target_package
@@ -259,6 +265,28 @@ pub(super) fn submit_requests(
         };
     }
     Ok(())
+}
+
+/// `description` with each required update that it names by its branch
+/// package named by its request instead, when `created` (package, request id)
+/// has one for it.
+pub(super) fn name_created(
+    description: &str,
+    requires: &[up::RequiredUpdate],
+    created: &[(String, String)],
+) -> String {
+    let mut out = description.to_string();
+    for r in requires.iter().filter(|r| r.request.is_none()) {
+        let Some((_, id)) = created.iter().find(|(pkg, _)| *pkg == r.pkg) else {
+            continue;
+        };
+        let with_id = up::RequiredUpdate {
+            request: Some(id.clone()),
+            ..r.clone()
+        };
+        out = out.replace(&r.line(), &with_id.line());
+    }
+    out
 }
 
 /// The packages among `pkgs` whose change needs a review (it has risk flags
@@ -324,4 +352,34 @@ pub(crate) fn yes_refusal(yes: bool, gate: &ReviewGate) -> Option<Vec<String>> {
 /// `NotSubmitted`, so `main` exits 5 and nothing was submitted.
 pub(super) fn refused_by_yes(lines: &[String]) -> color_eyre::Report {
     crate::session::NotSubmitted(lines[0].clone()).into()
+}
+
+#[cfg(test)]
+mod name_created_tests {
+    use super::*;
+
+    fn libbar(request: Option<&str>) -> up::RequiredUpdate {
+        up::RequiredUpdate {
+            pkg: "libbar".into(),
+            branch_package: "home:u:branches:B/libbar".into(),
+            requirement: "libbar-devel >= 2".into(),
+            origin: "devel:libraries".into(),
+            origin_version: "1".into(),
+            request: request.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_request_created_in_the_batch_replaces_the_branch_package() {
+        let text = format!("Update libfoo to 2 (was 1).\n\n{}", libbar(None).line());
+        let created = [("libbar".to_string(), "77".to_string())];
+        let out = name_created(&text, &[libbar(None)], &created);
+        assert!(
+            out.contains("Requires the update of libbar (request #77)"),
+            "{out}"
+        );
+        assert!(!out.contains("branch package"), "{out}");
+        // Nothing created for it: the branch package stays.
+        assert_eq!(name_created(&text, &[libbar(None)], &[]), text);
+    }
 }
