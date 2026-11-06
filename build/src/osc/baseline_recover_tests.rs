@@ -318,3 +318,37 @@ fn a_commit_landing_during_the_restore_keeps_the_baseline() {
     );
     assert!(why.contains("the baseline is kept in"), "{why}");
 }
+
+/// OBS holds the empty package, which no attempt committed: the restore goes
+/// ahead over it, and puts the baseline's tracked file back.
+#[test]
+fn an_empty_obs_revision_is_restored_over_not_refused() {
+    let co = checkout_at("aaa");
+    let base = attempted(co.path());
+    let empty = format!(r#"<directory name="foo" rev="3" srcmd5="{EMPTY_SRCMD5}"></directory>"#);
+    fs::write(co.path().join(".osc/_files"), &empty).unwrap();
+    let commits = RefCell::new(Vec::new());
+    let out = restore(base.path(), co.path(), &empty, &commits);
+    assert_eq!(out, Ok(Restored::Undone));
+    assert_eq!(commits.borrow().len(), 1);
+    assert!(commits.borrow()[0].starts_with(RESTORE_MESSAGE));
+    assert_eq!(
+        fs::read_to_string(co.path().join("foo.spec")).unwrap(),
+        "Name: foo\n"
+    );
+}
+
+/// The decision alone: the empty revision goes ahead when the checkout holds
+/// it, and an unknown non-empty revision never does.
+#[test]
+fn only_the_empty_or_an_attempts_revision_may_be_restored_over() {
+    let attempts = vec!["bbb".to_string()];
+    assert!(may_restore_over(EMPTY_SRCMD5, EMPTY_SRCMD5, &[]));
+    assert!(may_restore_over("bbb", "bbb", &attempts));
+    // An unknown non-empty revision, held by the checkout too, is refused.
+    assert!(!may_restore_over("ccc", "ccc", &attempts));
+    assert!(!may_restore_over("ccc", "ccc", &[]));
+    // The empty revision the checkout does not hold is refused.
+    assert!(!may_restore_over(EMPTY_SRCMD5, "aaa", &[]));
+    assert!(!may_restore_over("bbb", "ccc", &attempts));
+}

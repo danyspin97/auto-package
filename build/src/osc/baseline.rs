@@ -323,12 +323,26 @@ pub fn obs_still_at_checkout(checkout: &Path, dir: &Path) -> Result<(), String> 
     head_matches_checkout(checkout, dir, &xml, source_history)
 }
 
+/// The srcmd5 of a package with no files (the md5 of the empty string), which OBS
+/// lists for an empty package, such as a new one before its first commit.
+pub const EMPTY_SRCMD5: &str = "d41d8cd98f00b204e9800998ecf8427e";
+
+/// Whether a restore may go ahead over OBS's revision `head`, given the
+/// checkout's revision `local` and the revisions the attempts of the baseline
+/// committed (`committed`). Yes when the checkout holds the same revision and
+/// either an attempt made it, or it is the empty package: no attempt keeps an
+/// empty package, so nothing an attempt sent is left on OBS to lose.
+pub fn may_restore_over(head: &str, local: &str, committed: &[String]) -> bool {
+    head == local && (head == EMPTY_SRCMD5 || committed.iter().any(|r| r == head))
+}
+
 /// [`obs_still_at_checkout`] for a listing already read (`listing_xml`). The
 /// restore goes ahead only when OBS holds a revision an attempt of this baseline
-/// committed, and the checkout holds that same revision. Equality alone is not
-/// ownership: a checkout refreshed from OBS (`osc up`) holds whatever OBS holds,
-/// including a commit made by someone else. The history is read (`history`)
-/// only when the restore is refused, to name the revision.
+/// committed, or the empty package (see [`may_restore_over`]), and the checkout
+/// holds that same revision. Equality alone is not ownership: a checkout
+/// refreshed from OBS (`osc up`) holds whatever OBS holds, including a commit
+/// made by someone else. The history is read (`history`) only when the restore
+/// is refused, to name the revision.
 pub fn head_matches_checkout(
     checkout: &Path,
     dir: &Path,
@@ -340,7 +354,7 @@ pub fn head_matches_checkout(
         .ok_or_else(|| format!("the checkout of {project}/{package} records no revision"))?;
     let head = expanded_revision(listing_xml)
         .ok_or_else(|| format!("OBS returned no revision for {project}/{package}"))?;
-    if head == local && committed_revisions(dir).contains(&head) {
+    if may_restore_over(&head, &local, &committed_revisions(dir)) {
         return Ok(());
     }
     let latest = history(&project, &package);
