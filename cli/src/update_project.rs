@@ -36,6 +36,7 @@ const MAX_DEPENDENCY_ITEMS: usize = 25;
 mod arch;
 mod args;
 mod audit;
+mod build_work;
 mod cmd;
 mod context;
 mod deprecated;
@@ -54,6 +55,9 @@ mod request;
 mod requested;
 mod rpmlint_audit;
 mod run;
+mod schedule;
+#[cfg(test)]
+mod schedule_tests;
 mod submit;
 mod tidy;
 
@@ -68,11 +72,13 @@ pub(crate) use submit::{review_gate, yes_refusal};
 pub(crate) use tidy::confirm_with;
 
 use audit::*;
+use build_work::*;
 use cmd::*;
 use context::*;
 use dry_run::*;
 use items::*;
 use maintenance::*;
 use request::*;
+use schedule::Scheduler;
 use submit::*;
 use tidy::*;

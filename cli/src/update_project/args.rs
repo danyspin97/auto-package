@@ -190,9 +190,10 @@ pub struct UpdateProjectArgs {
     #[command(flatten)]
     pub local_opts: crate::local_opts::LocalOpts,
 
-    /// Maximum number of packages to build concurrently (0 = unlimited). Each
-    /// build still runs its own dependency closure, so this bounds the
-    /// top-level loop, not every spawned sub-build.
+    /// Maximum number of packages to build concurrently (0 = unlimited). It
+    /// bounds both the packages of the project in flight, each on its own
+    /// thread, and the package builds they run, dependencies included. 1
+    /// builds one package at a time, in the order they are found.
     #[arg(long, default_value_t = ap_core::limits::DEFAULT_JOBS)]
     pub jobs: usize,
 

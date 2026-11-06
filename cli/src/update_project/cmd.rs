@@ -37,6 +37,70 @@ pub(super) fn cmd_update_project(
         }
     }
 
+    // A dry run reads the branch project as branching would leave it.
+    let resolver = {
+        let live = LiveObs {
+            reporter: ctx.reporter.clone(),
+        };
+        let resolver_for = |obs: Box<dyn depreach::Obs>| {
+            DepResolver::new(obs, ctx.reporter.clone(), branch, &a.arch)
+        };
+        let resolver = if a.dry_run && !a.in_place {
+            resolver_for(Box::new(DryRunObs {
+                inner: live,
+                branch_project: branch.to_string(),
+                branch_meta: depreach::synthetic_branch_meta(branch, &a.source, &source_info),
+            }))
+        } else {
+            resolver_for(Box::new(live))
+        };
+        // A maintenance incident builds against the code stream only: its
+        // branch gets no build path that the incident would not have.
+        if a.maintenance_source {
+            resolver.with_frozen_paths(ap_build::maintenance::FROZEN_PATHS_REASON)
+        } else {
+            resolver
+        }
+    };
+    let resolver = Arc::new(resolver);
+
+    // Each package is built on its own thread as soon as it is prepared, at
+    // most `--jobs` at a time; the run goes on preparing the next meanwhile.
+    let work = BuildWork::new(a, branch, &resolver, ctx);
+    let mut built = Vec::new();
+    let prepared = std::thread::scope(|s| {
+        let mut builds = Scheduler::new(s, &work, a.jobs);
+        let prepared = prepare(
+            a,
+            branch,
+            branch_meta.is_some(),
+            &resolver,
+            ctx,
+            &mut builds,
+            report,
+        );
+        built = builds.finish();
+        prepared
+    });
+    merge_built(report, built);
+    if prepared? && a.submit {
+        submit_requests(a, branch, &mut report.results, ctx)?;
+    }
+    Ok(())
+}
+
+/// Find the packages to work on, prepare each and hand it over to `builds`.
+/// `Ok(true)` when the run got to the end of its packages and may submit.
+fn prepare(
+    a: &UpdateProjectArgs,
+    branch: &str,
+    branch_exists: bool,
+    resolver: &Arc<DepResolver>,
+    ctx: &Ctx<'_>,
+    builds: &mut Builds<'_, '_, '_, '_>,
+    report: &mut Report,
+) -> color_eyre::Result<bool> {
+    let emit = Emit::run(ctx.reporter.as_ref());
     // `update` sweeps the source for newer releases and `lint` audits it, each
     // on its own thread. A package that has a release, or findings, is branched
     // and built as it turns up, while the thread goes on with the others.
@@ -92,33 +156,6 @@ pub(super) fn cmd_update_project(
         }
     };
 
-    // A dry run reads the branch project as branching would leave it.
-    let resolver = {
-        let live = LiveObs {
-            reporter: ctx.reporter.clone(),
-        };
-        let resolver_for = |obs: Box<dyn depreach::Obs>| {
-            DepResolver::new(obs, ctx.reporter.clone(), branch, &a.arch)
-        };
-        let resolver = if a.dry_run && !a.in_place {
-            resolver_for(Box::new(DryRunObs {
-                inner: live,
-                branch_project: branch.to_string(),
-                branch_meta: depreach::synthetic_branch_meta(branch, &a.source, &source_info),
-            }))
-        } else {
-            resolver_for(Box::new(live))
-        };
-        // A maintenance incident builds against the code stream only: its
-        // branch gets no build path that the incident would not have.
-        if a.maintenance_source {
-            resolver.with_frozen_paths(ap_build::maintenance::FROZEN_PATHS_REASON)
-        } else {
-            resolver
-        }
-    };
-    let resolver = Arc::new(resolver);
-
     // Branch, then make each package's BuildRequires reachable. With
     // `--update-deps` a dependency from another project that has a newer
     // release is queued behind the package that needs it.
@@ -126,7 +163,7 @@ pub(super) fn cmd_update_project(
     let mut visited: HashSet<String> = HashSet::new();
     // The packages handled so far, which a capability may be provided by.
     let mut run_packages: Vec<String> = Vec::new();
-    let mut ready: Vec<Item> = Vec::new();
+    let mut ready: Vec<Job> = Vec::new();
     let mut admitted = 0;
     let mut dependency_count = 0;
     let mut branch_checked = false;
@@ -138,7 +175,7 @@ pub(super) fn cmd_update_project(
                 // The package and what it needs are all prepared: build them
                 // now, then wait for the sweep to find the next.
                 if !a.dry_run {
-                    build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
+                    hand_over(&mut ready, &mechanical, builds, report);
                 }
                 let Some((item, style_only)) = incoming() else {
                     break;
@@ -167,6 +204,9 @@ pub(super) fn cmd_update_project(
                 item
             }
         };
+        // The name it was found under, which the items that need it wait for.
+        let first_key = visit_key(&item);
+        let mut after: Vec<String> = Vec::new();
         // A package that its own ExclusiveArch or ExcludeArch keeps off this
         // architecture would only end `excluded`: it is skipped before any branch.
         if let Some(why) = arch_exclusion(&item, &a.arch, ctx) {
@@ -194,7 +234,7 @@ pub(super) fn cmd_update_project(
         if a.in_place {
             // The package is already where it will be changed, and its
             // BuildRequires resolve: it builds there today.
-            ready.push(item);
+            ready.push(Job::new(item, first_key, after));
             continue;
         }
         // An origin whose spec cannot be read cannot be updated: it is reported,
@@ -319,29 +359,25 @@ pub(super) fn cmd_update_project(
                 if !run_packages.contains(&item.pkg) {
                     run_packages.push(item.pkg.clone());
                 }
-                let (adds, verdicts) = match reach_dependencies(
-                    a,
-                    &item,
-                    &spec,
-                    &resolver,
-                    &run_packages,
-                    ctx,
-                    report,
-                ) {
-                    Ok(found) => found,
-                    Err(e) => {
-                        let why = e.to_string();
-                        ctx.warn(format!("{}: {why}", item.pkg));
-                        report.results.push(ItemResult {
-                            item,
-                            outcome: ItemOutcome::Failed(why),
-                            sr: SrOutcome::NotRequested,
-                        });
-                        continue;
-                    }
-                };
+                let (adds, verdicts) =
+                    match reach_dependencies(a, &item, &spec, resolver, &run_packages, ctx, report)
+                    {
+                        Ok(found) => found,
+                        Err(e) => {
+                            let why = e.to_string();
+                            ctx.warn(format!("{}: {why}", item.pkg));
+                            report.results.push(ItemResult {
+                                item,
+                                outcome: ItemOutcome::Failed(why),
+                                sr: SrOutcome::NotRequested,
+                            });
+                            continue;
+                        }
+                    };
                 if a.update_deps {
                     for dep in dependency_items(a, branch, &item, &verdicts, &adds, ctx, emit) {
+                        // Built before this item, also when an earlier item queued it.
+                        after.push(visit_key(&dep));
                         if dependency_count >= MAX_DEPENDENCY_ITEMS {
                             ctx.warn(format!(
                                 "--update-deps: not updating {} too, the limit is {MAX_DEPENDENCY_ITEMS}",
@@ -363,7 +399,7 @@ pub(super) fn cmd_update_project(
                 item.pkg
             )),
         }
-        ready.push(item);
+        ready.push(Job::new(item, first_key, after));
     }
 
     if let Some(sweep) = sweep.take() {
@@ -372,7 +408,7 @@ pub(super) fn cmd_update_project(
             Err(e) => {
                 // Packages already branched and prepared are still built before the error is returned.
                 if !a.dry_run {
-                    build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
+                    hand_over(&mut ready, &mechanical, builds, report);
                 }
                 return Err(eyre!("{e}"));
             }
@@ -384,20 +420,20 @@ pub(super) fn cmd_update_project(
         if !plan.unreadable.is_empty() {
             // Packages already branched and prepared are still built before the error is returned.
             if !a.dry_run {
-                build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
+                hand_over(&mut ready, &mechanical, builds, report);
             }
             return Err(obs_unavailable(&plan.unreadable, &a.source));
         }
         if plan.total() == 0 {
             ctx.say(format!("no matching packages in {}", a.source));
-            return none_checked(&a.only, false);
+            return none_checked(&a.only, false).map(|()| false);
         }
         if plan.only_absent() {
-            return none_checked(&a.only, true);
+            return none_checked(&a.only, true).map(|()| false);
         }
         if plan.n_update == 0 {
             ctx.say("nothing to update");
-            return Ok(());
+            return Ok(false);
         }
     }
     if let Some(audit) = audit.take() {
@@ -406,7 +442,7 @@ pub(super) fn cmd_update_project(
             Err(e) => {
                 // Packages already branched and prepared are still built before the error is returned.
                 if !a.dry_run {
-                    build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
+                    hand_over(&mut ready, &mechanical, builds, report);
                 }
                 return Err(eyre!("{e}"));
             }
@@ -417,7 +453,7 @@ pub(super) fn cmd_update_project(
         if !end.unreadable.is_empty() {
             // Packages already branched and prepared are still built before the error is returned.
             if !a.dry_run {
-                build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
+                hand_over(&mut ready, &mechanical, builds, report);
             }
             return Err(obs_unavailable(&end.unreadable, &a.source));
         }
@@ -427,36 +463,25 @@ pub(super) fn cmd_update_project(
             && let Some(absent) = nothing_found(end.candidates, end.absent)
         {
             ctx.say(format!("no matching packages in {}", a.source));
-            return none_checked(&a.only, absent);
+            return none_checked(&a.only, absent).map(|()| false);
         }
         if end.items == 0 {
             ctx.say("nothing to improve");
-            return Ok(());
+            return Ok(false);
         }
     }
     if admitted == 0 {
-        return Ok(());
+        return Ok(false);
     }
 
     if a.dry_run {
-        say_dry_run(
-            a,
-            branch,
-            branch_meta.is_some(),
-            &ready,
-            &mechanical,
-            ctx,
-            report,
-        );
-        return Ok(());
+        let items: Vec<Item> = ready.into_iter().map(|j| j.item).collect();
+        say_dry_run(a, branch, branch_exists, &items, &mechanical, ctx, report);
+        return Ok(false);
     }
 
-    build_ready(a, branch, &mut ready, &mechanical, &resolver, ctx, report);
-
-    if a.submit {
-        submit_requests(a, branch, &mut report.results, ctx)?;
-    }
-    Ok(())
+    hand_over(&mut ready, &mechanical, builds, report);
+    Ok(true)
 }
 
 /// What a run that checked no package ends with: an error when `--only` named
