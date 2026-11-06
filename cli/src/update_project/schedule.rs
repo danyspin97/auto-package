@@ -1,13 +1,21 @@
 //! The builds of a project run: each job starts on its own thread as soon as
 //! it is handed over, once the jobs it waits for have ended, at most `jobs`
-//! at a time. With `jobs` 1 every job runs on the caller's thread when it is
-//! handed over, which is the sequential run.
+//! at a time. A job has two parts: the run, which holds one of the `jobs`
+//! slots, and the post step, which runs after the slot is released, on a
+//! separate pool of at most [`POST_JOBS`] threads. A job counts as ended when
+//! its run ends, so the jobs that wait for it do not wait for its post step.
+//! With `jobs` 1 every job runs on the caller's thread when it is handed over,
+//! run and post step in turn, which is the sequential run.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{Scope, ScopedJoinHandle};
 
 use crate::build_cmd::{Permit, Semaphore, make_semaphore, panic_message};
+
+/// How many post steps run at once, whatever `jobs` is: they wait on other
+/// machines, so they do not take the slots the runs use.
+pub(super) const POST_JOBS: usize = 8;
 
 /// What the scheduler runs: the builds of a run, or a fake in the tests.
 pub(super) trait Work: Sync {
@@ -19,14 +27,21 @@ pub(super) trait Work: Sync {
     fn after(job: &Self::Job) -> Vec<String>;
     /// Told on the caller's thread when `job` is handed over.
     fn queued(&self, job: &Self::Job);
+    /// The run of `job`: it holds one of the `jobs` slots.
     fn run(&self, job: Self::Job) -> Self::Out;
     /// What `job` ends with when it is not run, or its run panicked: `why`.
     fn not_run(&self, job: Self::Job, why: String) -> Self::Out;
+    /// The post step of `job`, given what its run ended with. It runs once the
+    /// slot is released and the jobs waiting for the run have started, so it
+    /// may take long. Default: nothing to do.
+    fn post(&self, out: Self::Out) -> Self::Out {
+        out
+    }
     /// Whether the run is stopping: a job that has not started is not run.
     fn stopping(&self) -> bool;
 }
 
-/// Set once a job has ended, however it ended.
+/// Set once a job's run has ended, however it ended.
 #[derive(Default)]
 struct Ended {
     ended: Mutex<bool>,
@@ -34,6 +49,11 @@ struct Ended {
 }
 
 impl Ended {
+    fn set(&self) {
+        *self.ended.lock().unwrap_or_else(|p| p.into_inner()) = true;
+        self.cvar.notify_all();
+    }
+
     fn wait(&self) {
         let mut ended = self.ended.lock().unwrap_or_else(|p| p.into_inner());
         while !*ended {
@@ -47,8 +67,7 @@ struct SetOnDrop(Arc<Ended>);
 
 impl Drop for SetOnDrop {
     fn drop(&mut self) {
-        *self.0.ended.lock().unwrap_or_else(|p| p.into_inner()) = true;
-        self.0.cvar.notify_all();
+        self.0.set();
     }
 }
 
@@ -69,6 +88,7 @@ pub(super) struct Scheduler<'scope, 'env, W: Work> {
     scope: &'scope Scope<'scope, 'env>,
     work: &'env W,
     gate: Option<Semaphore>,
+    post_gate: Option<Semaphore>,
     inline: bool,
     by_key: HashMap<String, usize>,
     entries: Vec<Entry<'scope, W::Job, W::Out>>,
@@ -86,6 +106,7 @@ where
             scope,
             work,
             gate: make_semaphore(jobs),
+            post_gate: make_semaphore(POST_JOBS),
             inline: jobs == 1,
             by_key: HashMap::new(),
             entries: Vec::new(),
@@ -128,18 +149,32 @@ where
             let fallback = job.clone();
             let state = if self.inline {
                 let _set = SetOnDrop(ended.clone());
-                State::Done(run_one(self.work, job))
+                let copy = job.clone();
+                let out = run_one(self.work, job);
+                ended.set();
+                State::Done(post_one(self.work, copy, out))
             } else {
                 let work = self.work;
                 let gate = self.gate.clone();
+                let post_gate = self.post_gate.clone();
                 let set = SetOnDrop(ended.clone());
+                let early = ended.clone();
                 State::Running(self.scope.spawn(move || {
                     let _set = set;
                     for w in &waits {
                         w.wait();
                     }
-                    let _permit = Permit::acquire(&gate);
-                    run_one(work, job)
+                    let copy = job.clone();
+                    let out = {
+                        let _permit = Permit::acquire(&gate);
+                        run_one(work, job)
+                    };
+                    // The run is over: the slot is free and the jobs that
+                    // wait for this one may start, while the post step waits
+                    // for its own bound.
+                    early.set();
+                    let _post = Permit::acquire(&post_gate);
+                    post_one(work, copy, out)
                 }))
             };
             self.entries.push(Entry {
@@ -182,6 +217,16 @@ fn run_one<W: Work>(work: &W, job: W::Job) -> W::Out {
         work.not_run(
             copy,
             format!("build panicked: {}", panic_message(p.as_ref())),
+        )
+    })
+}
+
+/// The post step of `job`; a panic in it is that job's failure.
+fn post_one<W: Work>(work: &W, job: W::Job, out: W::Out) -> W::Out {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work.post(out))).unwrap_or_else(|p| {
+        work.not_run(
+            job,
+            format!("post-build step panicked: {}", panic_message(p.as_ref())),
         )
     })
 }

@@ -1,7 +1,7 @@
-use super::schedule::{Scheduler, Work, batch_order, interleave};
-use std::sync::Mutex;
+use super::schedule::{POST_JOBS, Scheduler, Work, batch_order, interleave};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// A job of the fake: its name, the names it waits for, and how long it runs.
 #[derive(Clone)]
@@ -26,6 +26,9 @@ struct Fake {
     most: AtomicUsize,
     stop: AtomicBool,
     threads: Mutex<Vec<(&'static str, std::thread::ThreadId)>>,
+    /// Set by `release`: the post steps of the `held-` jobs wait for it.
+    released: Mutex<bool>,
+    released_cvar: Condvar,
 }
 
 impl Fake {
@@ -36,6 +39,30 @@ impl Fake {
     fn at(&self, line: &str) -> usize {
         self.log().iter().position(|l| l == line).unwrap()
     }
+
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.released_cvar.notify_all();
+    }
+
+    fn wait_released(&self) {
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.released_cvar.wait(released).unwrap();
+        }
+    }
+}
+
+/// Waits for `line` to be logged, for a few seconds: false when it is not.
+fn wait_for(fake: &Fake, line: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if fake.log().iter().any(|l| l == line) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    false
 }
 
 impl Work for Fake {
@@ -68,6 +95,27 @@ impl Work for Fake {
             panic!("boom in {}", job.name);
         }
         format!("built {}", job.name)
+    }
+    fn post(&self, out: String) -> String {
+        // The name is the output's first word before any `:`, without `built`.
+        let name = out
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("built ")
+            .to_string();
+        if !(name.starts_with("held-") || name.starts_with("post-panic")) {
+            return out;
+        }
+        self.log.lock().unwrap().push(format!("post {name}"));
+        if name.starts_with("held-") {
+            self.wait_released();
+        }
+        if name.starts_with("post-panic") {
+            panic!("boom in post {name}");
+        }
+        self.log.lock().unwrap().push(format!("post end {name}"));
+        out
     }
     fn not_run(&self, job: Job, why: String) -> String {
         format!("{}: {why}", job.name)
@@ -282,4 +330,115 @@ fn outputs_go_back_where_their_jobs_were_handed_over() {
         interleave(Vec::<&str>::new(), vec![(5, vec!["x"])]),
         vec!["x"]
     );
+}
+
+#[test]
+fn a_post_step_does_not_hold_a_job_slot() {
+    let fake = Fake::default();
+    let (started, held, out) = std::thread::scope(|s| {
+        let mut sched = Scheduler::new(s, &fake, 2);
+        sched.submit(
+            vec![
+                job("held-a", &[], 0),
+                job("held-b", &[], 0),
+                job("c", &[], 0),
+            ],
+            0,
+        );
+        // Both slots are free again once the first two runs end, so `c` runs
+        // while their post steps still wait.
+        let started = wait_for(&fake, "start c");
+        let held = fake.log().contains(&"post held-a".to_string())
+            && fake.log().contains(&"post held-b".to_string())
+            && !fake.log().contains(&"post end held-a".to_string());
+        fake.release();
+        (started, held, sched.finish())
+    });
+    assert!(started && held, "{:?}", fake.log());
+    let out: Vec<String> = out.into_iter().map(|(_, o)| o).collect();
+    assert_eq!(out, vec!["built held-a", "built held-b", "built c"]);
+    assert!(fake.most.load(Ordering::SeqCst) <= 2);
+}
+
+#[test]
+fn a_dependency_waits_for_the_run_of_its_dependency_not_the_post_step() {
+    let fake = Fake::default();
+    let (started, held) = std::thread::scope(|s| {
+        let mut sched = Scheduler::new(s, &fake, 2);
+        sched.submit(vec![job("held-d", &[], 0), job("p", &["held-d"], 0)], 0);
+        let started = wait_for(&fake, "start p");
+        let held = !fake.log().contains(&"post end held-d".to_string());
+        fake.release();
+        sched.finish();
+        (started, held)
+    });
+    assert!(started && held, "{:?}", fake.log());
+}
+
+#[test]
+fn results_stay_in_hand_over_order_when_post_steps_end_out_of_order() {
+    let fake = Fake::default();
+    let (b_done, out) = std::thread::scope(|s| {
+        let mut sched = Scheduler::new(s, &fake, 2);
+        sched.submit(vec![job("held-a", &[], 0), job("b", &[], 0)], 0);
+        // `b` ends while the earlier `held-a` still waits in its post step.
+        let b_done =
+            wait_for(&fake, "end b") && !fake.log().contains(&"post end held-a".to_string());
+        fake.release();
+        (b_done, sched.finish())
+    });
+    assert!(b_done, "{:?}", fake.log());
+    let out: Vec<String> = out.into_iter().map(|(_, o)| o).collect();
+    assert_eq!(out, vec!["built held-a", "built b"]);
+}
+
+#[test]
+fn post_steps_are_bounded_apart_from_the_run_slots() {
+    let names = [
+        "held-0", "held-1", "held-2", "held-3", "held-4", "held-5", "held-6", "held-7", "held-8",
+        "held-9", "held-10", "held-11", "held-12", "held-13", "held-14", "held-15",
+    ];
+    let count = |fake: &Fake| {
+        fake.log()
+            .iter()
+            .filter(|l| l.starts_with("post held-"))
+            .count()
+    };
+    let fake = Fake::default();
+    let total = POST_JOBS + 2;
+    let batch: Vec<Job> = names[..total].iter().map(|n| job(*n, &[], 0)).collect();
+    let (at_bound, out) = std::thread::scope(|s| {
+        // No limit on the runs: only the post steps are bounded.
+        let mut sched = Scheduler::new(s, &fake, 0);
+        sched.submit(batch, 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while count(&fake) < POST_JOBS && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        let at_bound = count(&fake);
+        fake.release();
+        (at_bound, sched.finish())
+    });
+    assert_eq!(at_bound, POST_JOBS, "{:?}", fake.log());
+    assert_eq!(out.len(), total);
+}
+
+#[test]
+fn a_panicking_post_step_is_that_jobs_failure_only() {
+    for jobs in [1, 2] {
+        let fake = Fake::default();
+        let out = run(
+            &fake,
+            jobs,
+            vec![vec![job("post-panic-a", &[], 0), job("b", &[], 0)]],
+        );
+        assert_eq!(
+            out,
+            vec![
+                "post-panic-a: post-build step panicked: boom in post post-panic-a",
+                "built b"
+            ]
+        );
+    }
 }
