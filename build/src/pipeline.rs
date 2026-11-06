@@ -447,6 +447,7 @@ pub use archive::*;
 mod gen_spec;
 use gen_spec::*;
 mod carry;
+mod carry_fallback;
 #[cfg(test)]
 mod commit_gate_tests;
 #[cfg(test)]

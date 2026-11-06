@@ -250,13 +250,22 @@ fn carry_forward_repo_spec(
     let mut fetched: Vec<PathBuf> = Vec::new();
     // Old files replaced by this run, removed after the spec is written.
     let mut superseded: Vec<String> = Vec::new();
+    // The `.changes` bullet for a source moved to another address, added once
+    // the spec is written.
+    let mut moved_bullet: Option<&'static str> = None;
     for (i, source) in sources.iter().enumerate() {
         if old_sources.get(i).is_some_and(|o| o.url == source.url) {
             continue;
         }
         let dest = checkout_dir.join(&source.file);
-        crate::sources::fetch_archive_to(&source.url, &dest)
-            .map_err(|e| format!("downloading {}: {e}", source.url))?;
+        if let Err(e) = crate::sources::fetch_archive_to(&source.url, &dest) {
+            let (spec, bullet) = crate::pipeline::carry_fallback::after_failed_download(
+                config, &bumped, i, source, &dest, &e,
+            )
+            .map_err(|more| format!("downloading {}: {e}{more}", source.url))?;
+            bumped = spec;
+            moved_bullet = Some(bullet);
+        }
         fetched.push(dest);
         // The old file this slot had is removed only when no source of the new
         // spec is named that: sources can be reordered or shifted, and the
@@ -284,6 +293,13 @@ fn carry_forward_repo_spec(
     // have succeeded: a failure above must leave the old sources in place.
     for old_file in &superseded {
         let _ = std::fs::remove_file(checkout_dir.join(old_file));
+    }
+    if let Some(bullet) = moved_bullet {
+        warn_if_err(
+            reporter,
+            "adding the .changes entry for the source address",
+            osc::add_changes_entry(checkout_dir, bullet, Emit::new(reporter, step.id)),
+        );
     }
     write_or_warn(step.file("spec.generated"), &bumped);
     Ok(GenSpecResult {
