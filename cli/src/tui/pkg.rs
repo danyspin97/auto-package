@@ -130,6 +130,10 @@ pub(super) struct PkgState {
     /// are ignored until the package's status changes, so holding or
     /// repeating the key doesn't queue duplicate builds.
     pub(super) retry_requested: bool,
+    /// The update preparation closed the row before any build (see
+    /// `Event::PackageDropped`): no build is waited for, so the run does not
+    /// wait on it. A build that takes the row over clears it.
+    pub(super) dropped: bool,
     /// Dependencies named by the last `PackageOutcome::MissingDeps`, sorted
     /// and deduplicated; empty once the package is retried or finishes any
     /// other way. Kept apart from the log so the Queued list can show it.
@@ -221,6 +225,7 @@ impl PkgState {
             max_tries: 0,
             disk_full_detected: false,
             retry_requested: false,
+            dropped: false,
             waiting_on: Vec::new(),
             sr: None,
             spec_diffs: Vec::new(),

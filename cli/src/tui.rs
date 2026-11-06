@@ -89,6 +89,8 @@ mod browse_tests;
 #[cfg(test)]
 mod check_rows_tests;
 #[cfg(test)]
+mod dropped_rows_tests;
+#[cfg(test)]
 mod expand_tests;
 #[cfg(test)]
 mod filter_esc_tests;

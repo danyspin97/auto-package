@@ -116,9 +116,11 @@ impl TuiState {
     }
 
     /// The rows a build was queued for: every row but the ones that are only
-    /// what the sweep's check found.
+    /// what the sweep's check found, and the ones the preparation dropped.
     pub(super) fn build_rows(&self) -> impl Iterator<Item = &PkgState> {
-        self.packages.values().filter(|p| !p.status.is_check_only())
+        self.packages
+            .values()
+            .filter(|p| !p.status.is_check_only() && !p.dropped)
     }
 
     /// The rows in each stage, counted from their statuses on every call so
@@ -253,6 +255,7 @@ impl TuiState {
                 // known until its check runs again.
                 state.arch_fails.clear();
                 state.advance(Input::Selected);
+                state.dropped = false;
                 state.step = None;
                 state.fail_reason = None;
                 state.skip_reason = None;
@@ -277,12 +280,19 @@ impl TuiState {
                 pkg,
                 version,
                 outcome,
+            }
+            | Event::PackageDropped {
+                pkg,
+                version,
+                outcome,
             } => {
+                let dropped = matches!(msg.event, Event::PackageDropped { .. });
                 let state = self.pkg_mut(pkg);
                 if state.version.is_empty() {
                     state.version = version.clone();
                 }
                 state.finished = true;
+                state.dropped = dropped;
                 state.retry_requested = false;
                 state.waiting_on = match outcome {
                     PackageOutcome::MissingDeps { deps } => {
