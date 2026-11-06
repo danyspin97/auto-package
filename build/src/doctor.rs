@@ -2,6 +2,7 @@
 //! about, found before the run builds on it. Every finding is a warning, never
 //! an error: the run goes on, and the finding says what it will do about it.
 
+use crate::heal::{self, ObsDecision};
 use crate::osc::BuildStatus;
 use crate::pipeline::PkgState;
 use crate::workspace::Workspace;
@@ -16,6 +17,7 @@ pub fn run(
     state_root: &Path,
     checkout_root: &Path,
     statuses: impl FnOnce() -> Option<HashMap<String, BuildStatus>>,
+    local_changes: impl Fn(&Path) -> bool,
 ) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(state_root)
         .into_iter()
@@ -48,8 +50,20 @@ pub fn run(
         // pipeline and `reconcile_with_obs` name it; `rpm_name` otherwise.
         let checkout = checkout_root.join(state.obs_name.as_deref().unwrap_or(&name));
         own.extend(check_checkout(&name, &state, &ws, &checkout));
+        let spec_version = std::fs::read_to_string(checkout.join(format!(
+            "{}.spec",
+            state.obs_name.as_deref().unwrap_or(&name)
+        )))
+        .ok()
+        .and_then(|t| crate::spec::parse_header(&t).map(|h| h.version));
         if let Some(statuses) = &statuses
-            && let Some(f) = check_obs(&name, &state, statuses.get(&name.to_lowercase()))
+            && let Some(f) = check_obs(
+                &name,
+                &state,
+                statuses.get(&name.to_lowercase()),
+                spec_version.as_deref(),
+                || local_changes(&checkout),
+            )
         {
             own.push(f);
         }
@@ -254,8 +268,16 @@ fn source_archives(checkout: &Path) -> Vec<String> {
     found
 }
 
-/// Whether OBS and `state.json` disagree about one package.
-fn check_obs(name: &str, state: &PkgState, obs: Option<&BuildStatus>) -> Option<String> {
+/// Whether OBS and `state.json` disagree about one package. A package OBS built
+/// that the state records as unfinished is no finding when the start-up
+/// reconcile takes its RPMs; otherwise the finding says why it did not.
+fn check_obs(
+    name: &str,
+    state: &PkgState,
+    obs: Option<&BuildStatus>,
+    spec_version: Option<&str>,
+    dirty: impl FnOnce() -> bool,
+) -> Option<String> {
     let obs = obs?;
     let outcome = state.last_outcome.as_deref()?;
     let bad = matches!(
@@ -267,17 +289,24 @@ fn check_obs(name: &str, state: &PkgState, obs: Option<&BuildStatus>) -> Option<
             "{name}: state.json says it built, but OBS shows {obs:?}; it is checked again"
         ));
     }
-    if matches!(
-        outcome,
-        "failed" | "interrupted" | "missing_deps" | "skipped"
-    ) && *obs == BuildStatus::Succeeded
-    {
+    if outcome == "skipped" && *obs == BuildStatus::Succeeded {
         return Some(format!(
-            "{name}: state.json says {outcome}, but OBS shows it built (the start-up \
-             reconcile fetches its RPMs when the checkout is clean and at the recorded version)"
+            "{name}: state.json says skipped, but OBS shows it built; check which is right"
         ));
     }
-    None
+    match heal::obs_built_decision(
+        Some(outcome),
+        Some(obs),
+        spec_version,
+        state.last_built_version.as_deref(),
+        dirty,
+    ) {
+        ObsDecision::Decline(reason) => Some(format!(
+            "{name}: state.json says {outcome}, but OBS shows it built and its RPMs are not \
+             taken: {reason}"
+        )),
+        ObsDecision::Fetch | ObsDecision::NotApplicable => None,
+    }
 }
 
 #[cfg(test)]

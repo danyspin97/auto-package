@@ -31,7 +31,7 @@ fn the_doctor_finds_what_the_parts_disagree_about() {
         ("python-a".to_string(), BuildStatus::Failed),
         ("Python-B".to_string(), BuildStatus::Succeeded),
     ]);
-    let found = run(&state_root, &checkouts, || Some(statuses));
+    let found = run(&state_root, &checkouts, || Some(statuses), |_| false);
     let all = found.join("\n");
     assert!(
         all.contains("not named by the spec") && all.contains("stray.bin"),
@@ -73,7 +73,7 @@ fn the_checkout_is_looked_up_under_the_obs_name_the_state_records() {
         s.last_outcome = Some("success".into());
         s.last_built_version = Some("1.0".into());
     });
-    let all = run(&state_root, &checkouts, || None).join("\n");
+    let all = run(&state_root, &checkouts, || None, |_| false).join("\n");
     assert!(
         all.contains("state.json records a successful build of 1.0 but the spec says 2.0"),
         "{all}"
@@ -82,7 +82,7 @@ fn the_checkout_is_looked_up_under_the_obs_name_the_state_records() {
     assert!(!all.contains("the next commit"), "{all}");
     // Without obs_name the rpm name is the checkout: nothing is there to find.
     write(&state_root, "python-apscheduler", |s| s.obs_name = None);
-    let all = run(&state_root, &checkouts, || None).join("\n");
+    let all = run(&state_root, &checkouts, || None, |_| false).join("\n");
     assert!(!all.contains("python-apscheduler"), "{all}");
 }
 
@@ -105,7 +105,7 @@ fn the_tools_own_files_in_a_checkout_are_not_findings() {
     write(&state_root, "python-q", |s| {
         s.last_outcome = Some("failed".into())
     });
-    let found = run(&state_root, &checkouts, || None).join("\n");
+    let found = run(&state_root, &checkouts, || None, |_| false).join("\n");
     assert!(found.contains("stray.bin not named"), "{found}");
     assert!(!found.contains("series"), "{found}");
 }
@@ -127,7 +127,7 @@ fn a_stale_archive_and_an_unreadable_state_file_are_found() {
     });
     std::fs::create_dir_all(state_root.join("python-b")).unwrap();
     std::fs::write(state_root.join("python-b/state.json"), "{not json").unwrap();
-    let all = run(&state_root, &checkouts, || None).join("\n");
+    let all = run(&state_root, &checkouts, || None, |_| false).join("\n");
     assert!(
         all.contains("the spec says 2.0 but the checkout's source archive(s) are a-1.0.tar.gz"),
         "{all}"
@@ -136,7 +136,7 @@ fn a_stale_archive_and_an_unreadable_state_file_are_found() {
     // The matching archive is no finding.
     std::fs::write(checkouts.join("python-a/a-2.0.tar.gz"), "x").unwrap();
     assert!(
-        !run(&state_root, &checkouts, || None)
+        !run(&state_root, &checkouts, || None, |_| false)
             .join("\n")
             .contains("the spec says")
     );
@@ -206,7 +206,7 @@ fn archive_names_match_the_spec_version_and_wheel_leftovers_are_not_noise() {
     write(&state_root, "python-w", |s| {
         s.last_outcome = Some("failed".into())
     });
-    let found = run(&state_root, &checkouts, || None).join("\n");
+    let found = run(&state_root, &checkouts, || None, |_| false).join("\n");
     // One finding for the leftovers a wheel switch makes, one for the stray file.
     assert!(found.contains("stray.bin not named"), "{found}");
     assert!(
@@ -250,7 +250,7 @@ fn an_archive_the_spec_names_under_another_spelling_of_its_version_is_not_stale(
             s.last_outcome = Some("failed".into());
         });
     }
-    let all = run(&state_root, &checkouts, || None).join("\n");
+    let all = run(&state_root, &checkouts, || None, |_| false).join("\n");
     assert!(!all.contains("dmraid: the spec says"), "{all}");
     assert!(!all.contains("popt: the spec says"), "{all}");
     assert!(
@@ -276,9 +276,9 @@ fn an_unknown_obs_status_skips_the_obs_comparison_and_a_clean_package_has_no_fin
         s.last_outcome = Some("success".into());
         s.last_built_version = Some("1.0".into());
     });
-    assert!(run(&state_root, &checkouts, || None).is_empty());
+    assert!(run(&state_root, &checkouts, || None, |_| false).is_empty());
     let ok = HashMap::from([("python-a".to_string(), BuildStatus::Succeeded)]);
-    assert!(run(&state_root, &checkouts, || Some(ok)).is_empty());
+    assert!(run(&state_root, &checkouts, || Some(ok), |_| false).is_empty());
 }
 
 #[test]
@@ -287,8 +287,50 @@ fn a_skip_that_obs_built_is_a_disagreement() {
         last_outcome: Some("skipped".into()),
         ..Default::default()
     };
-    assert!(check_obs("pkg", &state, Some(&BuildStatus::Succeeded)).is_some());
-    assert!(check_obs("pkg", &state, Some(&BuildStatus::Excluded)).is_none());
+    let never = || panic!("a skip is decided without the checkout");
+    assert!(check_obs("pkg", &state, Some(&BuildStatus::Succeeded), None, never).is_some());
+    assert!(check_obs("pkg", &state, Some(&BuildStatus::Excluded), None, never).is_none());
+}
+
+#[test]
+fn an_obs_build_the_reconcile_declines_says_why() {
+    let failed = PkgState {
+        last_outcome: Some("failed".into()),
+        last_built_version: Some("1.0".into()),
+        ..Default::default()
+    };
+    let built = Some(&BuildStatus::Succeeded);
+    let other = check_obs("pkg", &failed, built, Some("2.0"), || false).unwrap();
+    assert!(
+        other.starts_with(
+            "pkg: state.json says failed, but OBS shows it built and its RPMs are not taken:"
+        ) && other.contains("the spec says 2.0")
+            && other.contains("run update for it"),
+        "{other}"
+    );
+    let dirty = check_obs("pkg", &failed, built, Some("1.0"), || true).unwrap();
+    assert!(dirty.contains("discard or commit them"), "{dirty}");
+    // A clean checkout at the built version is what the reconcile takes: no finding.
+    assert!(check_obs("pkg", &failed, built, Some("1.0"), || false).is_none());
+}
+
+#[test]
+fn a_stale_review_is_no_finding_because_start_up_drops_it() {
+    let root = tempfile::tempdir().unwrap();
+    let state_root = root.path().join("state");
+    let checkouts = root.path().join("proj");
+    std::fs::create_dir_all(checkouts.join("python-g")).unwrap();
+    std::fs::write(
+        checkouts.join("python-g/python-g.spec"),
+        "Name: python-g\nVersion: 0.7.11\n",
+    )
+    .unwrap();
+    write(&state_root, "python-g", |s| {
+        s.reviewed_version = Some("0.7.12".into());
+        s.last_outcome = Some("success".into());
+        s.last_built_version = Some("0.7.11".into());
+    });
+    assert!(run(&state_root, &checkouts, || None, |_| false).is_empty());
 }
 
 #[test]
@@ -317,7 +359,7 @@ fn an_old_archive_obs_holds_is_no_finding_and_a_tracked_file_the_spec_does_not_n
     write(&state_root, "python-t", |s| {
         s.last_outcome = Some("failed".into())
     });
-    let found = run(&state_root, &checkouts, || None).join("\n");
+    let found = run(&state_root, &checkouts, || None, |_| false).join("\n");
     assert!(!found.contains("t-1.0.tar.gz"), "{found}");
     assert!(
         found.contains("OBS holds notes.txt, which the spec does not name"),

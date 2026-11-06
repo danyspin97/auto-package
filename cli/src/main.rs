@@ -494,9 +494,15 @@ pub(crate) fn init_disk_guard(
         }
     }
     // The self-check: what the checkouts, state.json and OBS disagree about.
-    for finding in ap_build::doctor::run(&work_dir.join("state"), &work_dir.join(project), || {
-        statuses
-    }) {
+    let local_changes = |checkout: &std::path::Path| {
+        ap_build::osc::has_local_changes(checkout, ap_build::proc::Emit::quiet())
+    };
+    for finding in ap_build::doctor::run(
+        &work_dir.join("state"),
+        &work_dir.join(project),
+        || statuses,
+        local_changes,
+    ) {
         ap_core::diag!("warning: {finding}");
     }
 }
