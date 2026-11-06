@@ -107,7 +107,8 @@ baseline)` (a port failure Factory has no result of, which blocks), `unresolvabl
 `broken`, `excluded`, `not testable` (a port that cannot resolve its build
 dependencies, never a failure), `not final (...)` (a port still going at the
 bound, never blocking) or `still ...` for any other result still scheduled,
-blocked or building at the bound; written by `update` after the package built,
+blocked or building at the bound (the bound is shared by the run's packages,
+see `--arch-wait-minutes`; such a result does not hold a submit); written by `update` after the package built,
 absent with `--no-arch-check` or `--local`, and absent from older logs). A
 result's state is a label: a log that predates a label reads as before. Its
 failures are also in the summary's `Other architectures` section and in a

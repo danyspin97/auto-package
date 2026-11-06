@@ -214,7 +214,7 @@ fn the_gate_reads_a_missing_baseline_as_no_result_and_passes_with_a_note() {
     assert!(failing.baseline.as_ref().unwrap().state.is_none());
     let verdict = gate_verdict("p", ("standard", "x86_64"), &rows, false, true);
     assert!(
-        matches!(&verdict, GateVerdict::Pass { notes } if notes.iter().any(|n| n.contains("s390x") && n.contains("has no result"))),
+        matches!(&verdict, GateVerdict::Pass { notes, .. } if notes.iter().any(|n| n.contains("s390x") && n.contains("has no result"))),
         "{verdict:?}"
     );
 }
@@ -315,7 +315,7 @@ mod gate_reads {
     }
 
     #[test]
-    fn an_arch_still_building_refuses_even_with_a_shared_failure() {
+    fn an_arch_still_building_is_not_final_and_does_not_hold_a_shared_failure() {
         let fake = fixture();
         with_branch_s390x(&fake);
         set_results(
@@ -331,7 +331,13 @@ mod gate_reads {
             ORIGIN,
             vec![entry("p", "standard", "s390x", "failed")],
         );
-        assert!(matches!(gate(&fake, true), GateVerdict::Refuse(_)));
+        // Not a failed overall status: the scheduled arch is not one.
+        let rows = gate_inputs(&fake, BRANCH, ORIGIN, "p").unwrap();
+        assert!(matches!(
+            gate_verdict("p", PRIMARY, &rows, false, false),
+            GateVerdict::Pass { ref not_final, .. }
+                if not_final == &["scheduled on s390x at submit time"]
+        ));
     }
 
     #[test]
@@ -351,7 +357,7 @@ mod gate_reads {
             ORIGIN,
             vec![entry("p", "standard", "s390x", "failed")],
         );
-        let GateVerdict::Pass { notes } = gate(&fake, false) else {
+        let GateVerdict::Pass { notes, .. } = gate(&fake, false) else {
             panic!("a shared non-primary failure passes");
         };
         assert_eq!(notes.len(), 1, "{notes:?}");

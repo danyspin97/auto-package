@@ -15,12 +15,12 @@ fn an_improvement_request_lists_the_findings_not_a_version_bump() {
         dependency_of: None,
         findings: vec!["no-check: the spec has no %check".into()],
     };
-    let d = sr_description(&i, None, &[], &[]);
+    let d = sr_description(&i, None, &[], &[], &[]);
     assert!(d.starts_with("Improve libfoo 1.0"), "{d}");
     assert!(d.contains("- no-check: the spec has no %check"));
     assert!(!d.contains("was 1.0"));
     i.findings.clear();
-    assert!(sr_description(&i, None, &[], &[]).starts_with("Update libfoo to 1.0 (was 1.0)"));
+    assert!(sr_description(&i, None, &[], &[], &[]).starts_with("Update libfoo to 1.0 (was 1.0)"));
 }
 
 fn update(name: &str, old: &str, new: &str) -> Candidate {
@@ -279,9 +279,9 @@ fn the_description_names_the_versions_and_carries_the_changelog() {
     let mut i = item("foo");
     i.old_version = "1.0".into();
     i.new_version = "2.0".into();
-    let d = sr_description(&i, Some("- Update to 2.0"), &[], &[]);
+    let d = sr_description(&i, Some("- Update to 2.0"), &[], &[], &[]);
     assert!(d.starts_with("Update foo to 2.0 (was 1.0).\n\nChangelog:\n- Update to 2.0"));
-    assert!(!sr_description(&i, None, &[], &[]).contains("Changelog"));
+    assert!(!sr_description(&i, None, &[], &[], &[]).contains("Changelog"));
 }
 
 #[test]
@@ -295,7 +295,7 @@ fn the_flags_come_right_after_the_summary_one_line_each() {
             wheel: "foo-2.0-py3-none-any.whl".into(),
         },
     ];
-    let d = sr_description(&i, Some("- Update to 2.0"), &flags, &[]);
+    let d = sr_description(&i, Some("- Update to 2.0"), &flags, &[], &[]);
     assert!(
         d.starts_with(
             "Update foo to 2.0 (was 1.0).\n\nFlagged for review:\n- FLAG: %check removed"
@@ -308,7 +308,7 @@ fn the_flags_come_right_after_the_summary_one_line_each() {
             ),
             "{d}"
         );
-    assert!(!sr_description(&i, None, &[], &[]).contains("Flagged"));
+    assert!(!sr_description(&i, None, &[], &[], &[]).contains("Flagged"));
 }
 
 #[test]
@@ -320,24 +320,24 @@ fn the_risks_follow_the_fix_flags_under_needs_review() {
     let risks = vec![RiskFlag::NewScriptlet {
         header: "%post".into(),
     }];
-    let d = sr_description(&i, Some("- Update to 2.0"), &flags, &risks);
+    let d = sr_description(&i, Some("- Update to 2.0"), &flags, &risks, &[]);
     assert!(
             d.contains(
                 "\n\nFlagged for review:\n- FLAG: %check removed or left without a test: the tests do not run\n\nNeeds review:\n- RISK: new scriptlet: %post\n\nChangelog:\n"
             ),
             "{d}"
         );
-    assert!(!sr_description(&i, None, &[], &[]).contains("Needs review"));
+    assert!(!sr_description(&i, None, &[], &[], &[]).contains("Needs review"));
 }
 
 #[test]
 fn the_changelog_in_the_description_has_no_control_characters_and_is_capped() {
     let i = item("foo");
-    let d = sr_description(&i, Some("- ok\x1b[31m red\r\n\x07bell\tTab"), &[], &[]);
+    let d = sr_description(&i, Some("- ok\x1b[31m red\r\n\x07bell\tTab"), &[], &[], &[]);
     assert!(d.contains("- ok[31m red\nbell Tab"), "{d:?}");
     assert!(!d.contains('\x1b') && !d.contains('\r') && !d.contains('\x07'));
     let long = "x".repeat(10_000);
-    let d = sr_description(&i, Some(&long), &[], &[]);
+    let d = sr_description(&i, Some(&long), &[], &[], &[]);
     assert!(d.len() < 2500, "{}", d.len());
     assert!(d.contains("[...]"));
 }
@@ -507,4 +507,21 @@ fn the_already_requested_section_is_listed_only_when_there_is_one() {
         requested_section(&one),
         "already requested (1):\n  foo: submit request 7 (new, by u) already brings 2.0 to foo\n"
     );
+}
+
+#[test]
+fn a_request_says_per_architecture_what_is_not_final() {
+    let i = item("foo");
+    let not_final = vec![
+        "scheduled on s390x at submit time".to_string(),
+        "blocked on openSUSE_Factory_RISCV/riscv64 at submit time".to_string(),
+    ];
+    let d = sr_description(&i, None, &[], &[], &not_final);
+    assert!(d.contains("Not final at submit time:"), "{d}");
+    assert!(d.contains("- scheduled on s390x at submit time"), "{d}");
+    assert!(
+        d.contains("- blocked on openSUSE_Factory_RISCV/riscv64 at submit time"),
+        "{d}"
+    );
+    assert!(!sr_description(&i, None, &[], &[], &[]).contains("Not final"));
 }

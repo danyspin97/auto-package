@@ -174,12 +174,14 @@ pub(super) fn sanitize_changelog(text: &str) -> String {
 /// package's fix loop changed (skipped tests, a wheel, a blocked turn); they
 /// come right after the summary, one line each, so a reviewer sees them first.
 /// `risks` (what the change adds that needs a look) follow them under
-/// "Needs review:".
+/// "Needs review:". `not_final` lists, per architecture, the results still
+/// going when the request is made (see `gate::not_final_text`).
 pub fn sr_description(
     item: &Item,
     changes: Option<&str>,
     flags: &[FixFlag],
     risks: &[RiskFlag],
+    not_final: &[String],
 ) -> String {
     let mut out = if item.findings.is_empty() {
         format!(
@@ -208,6 +210,14 @@ pub fn sr_description(
             .map(|r| format!("- {}", sanitize_changelog(&r.line())))
             .collect();
         out.push_str("\n\nNeeds review:\n");
+        out.push_str(&lines.join("\n"));
+    }
+    if !not_final.is_empty() {
+        let lines: Vec<String> = not_final
+            .iter()
+            .map(|n| format!("- {}", sanitize_changelog(n)))
+            .collect();
+        out.push_str("\n\nNot final at submit time:\n");
         out.push_str(&lines.join("\n"));
     }
     if let Some(c) = changes {

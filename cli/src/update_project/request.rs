@@ -78,12 +78,21 @@ pub(crate) fn prepare_request(
             .ok()
         })
         .flatten();
+    // The other-architecture results still going at submit time: the request
+    // says so, per architecture, and does not wait for them.
+    let mut not_final: Vec<String> = Vec::new();
+    let primary_label = format!("{primary_repo}/{arch}");
     let build = match overall {
         // A failure on another architecture is judged by the arch gate: the
         // origin's own failures do not count, and `--allow-arch-failures` lets
         // the rest through.
-        // Also on success: a port result that fails is not in the status.
-        Some((status, _)) if is_arch_failure(&status) || status.is_success() => {
+        // Also on success: a port result that fails is not in the status. A
+        // result still going on another architecture does not hold the submit.
+        Some((status, at))
+            if is_arch_failure(&status)
+                || status.is_success()
+                || is_pending_elsewhere(&status, at.as_deref(), &primary_label) =>
+        {
             let primary = (primary_repo.as_str(), arch);
             let failed = is_arch_failure(&status);
             match arch_gate(
@@ -95,8 +104,12 @@ pub(crate) fn prepare_request(
                 failed,
                 emit,
             ) {
-                Ok(GateVerdict::Pass { notes }) => {
+                Ok(GateVerdict::Pass {
+                    notes,
+                    not_final: pending,
+                }) => {
                     notes.into_iter().for_each(&say);
+                    not_final = pending;
                     Some(osc::BuildStatus::Succeeded)
                 }
                 Ok(GateVerdict::Refuse(why)) => {
@@ -185,6 +198,7 @@ pub(crate) fn prepare_request(
             newest_changes(branch, &item.pkg, emit).as_deref(),
             &ap_build::fix_flags::of_package(state_root, &item.pkg),
             &ap_build::risk_flags::of_package(state_root, &item.pkg),
+            &not_final,
         ),
         source_rev,
     })
@@ -234,6 +248,16 @@ pub(super) fn rdiff(
             if why.is_empty() { "no output" } else { why }
         ))
     }
+}
+
+/// Whether an overall status is a result still going (scheduled, blocked or
+/// building) on an architecture other than the primary `primary` (`at` is the
+/// `repo/arch` the status is from). Such a result is not final, not a failure.
+fn is_pending_elsewhere(status: &osc::BuildStatus, at: Option<&str>, primary: &str) -> bool {
+    matches!(
+        status,
+        osc::BuildStatus::Scheduled | osc::BuildStatus::Blocked | osc::BuildStatus::Building
+    ) && at.is_some_and(|a| a != primary)
 }
 
 /// Whether a blocking overall status is a failure on some architecture.

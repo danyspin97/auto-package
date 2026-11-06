@@ -170,7 +170,7 @@ mod gate_ports {
         let fake = fixture();
         branch_with_port(&fake, "failed");
         set_results(&fake, PORT, vec![entry("p", "standard", "s390x", "failed")]);
-        let GateVerdict::Pass { notes } = gate(&fake) else {
+        let GateVerdict::Pass { notes, .. } = gate(&fake) else {
             panic!("a failure Factory has too does not block");
         };
         assert!(
@@ -184,7 +184,7 @@ mod gate_ports {
         let fake = fixture();
         branch_with_port(&fake, "failed");
         set_results(&fake, PORT, vec![]);
-        let GateVerdict::Pass { notes } = gate(&fake) else {
+        let GateVerdict::Pass { notes, .. } = gate(&fake) else {
             panic!("a port failure Factory has no result for is a note");
         };
         assert!(

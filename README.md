@@ -334,6 +334,12 @@ check, and `--ports` adds the Factory ports. A failure there shows as
 `built (fails on <repo/arch>)` in the run summary and `explain`, and as a short
 `built ⚠ <arch>` in the TUI status column.
 
+The run waits for those builds for `--arch-wait-minutes` (30 by default) after
+its last build ends, shared by all its packages, so the waits do not add up.
+A build still going at that point is not final: it does not hold a submit, and
+the request's description says so per architecture (for example `scheduled on
+s390x at submit time`).
+
 A failure blocks `--submit` when the origin builds that architecture, or
 excludes or disables it (the update may have enabled it), and the origin does
 not fail it too. A failure on an architecture the origin has no result row for
@@ -348,7 +354,8 @@ package was branched from (which is not always the source project). It is
 deliberately conservative:
 
 - a package gets no request unless OBS reports its build in the branch project
-  as succeeded and the branch spec is at the new version; failed and skipped
+  as succeeded (a result still going on another architecture does not count
+  against it) and the branch spec is at the new version; failed and skipped
   packages never do;
 - a package with an open request (new or in review) from the branch project to
   that origin gets none; if the open requests cannot be read, none is created;

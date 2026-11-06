@@ -26,18 +26,23 @@ pub struct Baseline {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateVerdict {
     /// The submit may go ahead. `notes` say what was not counted against it.
-    Pass { notes: Vec<String> },
+    /// `not_final` says, per result, what is still going on another arch at
+    /// submit time (see [`not_final_text`]): it does not hold the submit.
+    Pass {
+        notes: Vec<String>,
+        not_final: Vec<String>,
+    },
     /// The submit is refused, with the reason.
     Refuse(String),
 }
 
 /// Decide the gate for `pkg`. `primary` is the `(repo, arch)` the package was
-/// built for: it must have succeeded. A result still pending refuses (the gate
-/// does not wait). A failure its baseline fails too, or has no result for, is
-/// not counted; any other failure refuses unless `allow`
-/// (`--allow-arch-failures`). When the overall
-/// build status is a failure (`overall_failed`), a status no result explains
-/// refuses. Port results that are not testable or not final do not block.
+/// built for: it must have succeeded. A result still pending does not refuse:
+/// it is not final, and the submit says so. A failure its baseline fails too,
+/// or has no result for, is not counted; any other failure refuses unless
+/// `allow` (`--allow-arch-failures`). When the overall build status is a
+/// failure (`overall_failed`), a status no result explains refuses. Port
+/// results that are not testable or not final do not block.
 pub fn gate_verdict(
     pkg: &str,
     primary: (&str, &str),
@@ -64,17 +69,11 @@ pub fn gate_verdict(
         Some(_) => {}
     }
     let others: Vec<&GateRow> = rows.iter().filter(|r| !is_primary(r)).collect();
-    let pending: Vec<String> = others
+    let not_final: Vec<String> = others
         .iter()
         .filter(|r| r.state.is_pending())
-        .map(|r| format!("{} ({})", name(r), r.state.label()))
+        .map(|r| not_final_text(r, primary.0))
         .collect();
-    if !pending.is_empty() {
-        return GateVerdict::Refuse(format!(
-            "it is still building on {}: its results are not final",
-            pending.join(", ")
-        ));
-    }
     let failing: Vec<&GateRow> = others
         .iter()
         .filter(|r| r.state.is_failure())
@@ -119,7 +118,7 @@ pub fn gate_verdict(
         }
     }));
     if blocking.is_empty() {
-        return GateVerdict::Pass { notes };
+        return GateVerdict::Pass { notes, not_final };
     }
     let names: Vec<String> = blocking
         .iter()
@@ -135,5 +134,21 @@ pub fn gate_verdict(
         "{pkg} fails on {}: submitted anyway (--allow-arch-failures)",
         names.join(", ")
     ));
-    GateVerdict::Pass { notes }
+    GateVerdict::Pass { notes, not_final }
+}
+
+/// A result still going on another architecture, as the submit request says
+/// it: `scheduled on s390x at submit time`. A result in another repository of
+/// the package names it as `repo/arch`, since the arch alone is then unclear.
+pub fn not_final_text(row: &GateRow, primary_repo: &str) -> String {
+    let at = if row.repo == primary_repo {
+        row.arch.clone()
+    } else {
+        format!("{}/{}", row.repo, row.arch)
+    };
+    let what = match &row.state {
+        ArchState::Pending(what) => what.clone(),
+        other => other.label(),
+    };
+    format!("{what} on {at} at submit time")
 }

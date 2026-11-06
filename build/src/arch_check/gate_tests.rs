@@ -36,7 +36,7 @@ fn a_primary_that_does_not_build_refuses_even_when_allowed() {
 }
 
 #[test]
-fn a_pending_arch_refuses_even_when_allowed() {
+fn a_pending_arch_does_not_refuse_and_is_listed_not_final() {
     let rows = vec![
         primary(),
         row(
@@ -45,18 +45,51 @@ fn a_pending_arch_refuses_even_when_allowed() {
             ArchState::Pending("building".into()),
             None,
         ),
-        row("ports", "ppc64le", failed(), Some(failed())),
     ];
-    let GateVerdict::Refuse(why) = gate_verdict("p", PRIMARY, &rows, true, true) else {
-        panic!("a pending arch must refuse");
+    let GateVerdict::Pass { not_final, .. } = gate_verdict("p", PRIMARY, &rows, false, false)
+    else {
+        panic!("a pending arch is not final, not a refusal");
     };
-    assert!(why.contains("ports/s390x"), "{why}");
+    assert_eq!(not_final, ["building on ports/s390x at submit time"]);
+}
+
+#[test]
+fn a_pending_arch_does_not_hide_an_unshared_failure() {
+    let rows = vec![
+        primary(),
+        row(
+            "ports",
+            "s390x",
+            ArchState::Pending("building".into()),
+            None,
+        ),
+        row("ports", "ppc64le", failed(), Some(ArchState::Succeeded)),
+    ];
+    let GateVerdict::Refuse(why) = gate_verdict("p", PRIMARY, &rows, false, true) else {
+        panic!("an unshared failure refuses, whatever is still going");
+    };
+    assert!(why.contains("ports/ppc64le"), "{why}");
+    assert!(!why.contains("s390x"), "{why}");
+}
+
+#[test]
+fn a_pending_arch_in_the_primary_repo_is_named_by_its_arch() {
+    let row = row(
+        "standard",
+        "s390x",
+        ArchState::Pending("scheduled".into()),
+        None,
+    );
+    assert_eq!(
+        not_final_text(&row, "standard"),
+        "scheduled on s390x at submit time"
+    );
 }
 
 #[test]
 fn a_failure_the_baseline_shares_passes_with_a_note() {
     let rows = vec![primary(), row("ports", "s390x", failed(), Some(failed()))];
-    let GateVerdict::Pass { notes } = gate_verdict("p", PRIMARY, &rows, false, true) else {
+    let GateVerdict::Pass { notes, .. } = gate_verdict("p", PRIMARY, &rows, false, true) else {
         panic!("a shared failure must pass");
     };
     assert_eq!(notes.len(), 1);
@@ -96,7 +129,7 @@ fn a_failure_the_baseline_has_no_result_for_passes_with_a_note() {
         }),
     };
     let rows = vec![primary(), no_result];
-    let GateVerdict::Pass { notes } = gate_verdict("p", PRIMARY, &rows, false, true) else {
+    let GateVerdict::Pass { notes, .. } = gate_verdict("p", PRIMARY, &rows, false, true) else {
         panic!("a failure the origin has no result for is a note, not a refusal");
     };
     assert!(
@@ -150,7 +183,7 @@ fn a_package_disabled_everywhere_else_passes_with_a_note_not_silently() {
         row("ports", "s390x", ArchState::Disabled, None),
         row("ports", "ppc64le", ArchState::Disabled, None),
     ];
-    let GateVerdict::Pass { notes } = gate_verdict("p", PRIMARY, &rows, false, false) else {
+    let GateVerdict::Pass { notes, .. } = gate_verdict("p", PRIMARY, &rows, false, false) else {
         panic!("a pass is expected: nothing fails");
     };
     assert_eq!(
@@ -168,7 +201,7 @@ fn a_checked_arch_gives_no_not_checked_note() {
         row("ports", "s390x", ArchState::Disabled, None),
         row("ports", "ppc64le", ArchState::Succeeded, None),
     ];
-    let GateVerdict::Pass { notes } = gate_verdict("p", PRIMARY, &rows, false, false) else {
+    let GateVerdict::Pass { notes, .. } = gate_verdict("p", PRIMARY, &rows, false, false) else {
         panic!("a pass is expected");
     };
     assert!(notes.is_empty(), "{notes:?}");
