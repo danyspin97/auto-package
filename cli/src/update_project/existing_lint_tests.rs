@@ -26,6 +26,7 @@ fn item(version: &str) -> Item {
         new_version: version.into(),
         upstream_tag: None,
         dependency_of: None,
+        requires: Vec::new(),
         findings: Vec::new(),
     }
 }

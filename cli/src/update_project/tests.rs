@@ -35,6 +35,7 @@ fn pkg_item(pkg: &str) -> Item {
         new_version: "2".into(),
         upstream_tag: None,
         dependency_of: None,
+        requires: Vec::new(),
         findings: Vec::new(),
     }
 }
@@ -345,18 +346,8 @@ fn the_update_command_names_its_source_with_project_and_has_no_update_project() 
 
 #[test]
 fn the_agent_is_told_the_findings_and_to_keep_the_version() {
-    let mut item = Item {
-        pkg: "libfoo".into(),
-        origin: "Base:System".into(),
-        ecosystem: Ecosystem::GitRepo {
-            url: "https://github.com/a/b".into(),
-        },
-        old_version: "1.0".into(),
-        new_version: "1.0".into(),
-        upstream_tag: None,
-        dependency_of: None,
-        findings: Vec::new(),
-    };
+    let mut item = pkg_item("libfoo");
+    (item.old_version, item.new_version) = ("1.0".into(), "1.0".into());
     assert_eq!(improve_problem(&item), None, "an update has no findings");
     item.findings = vec!["rpmlint-error: devel-file-in-non-devel-package x1".into()];
     let p = improve_problem(&item).unwrap();

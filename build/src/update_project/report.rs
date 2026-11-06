@@ -196,6 +196,15 @@ pub fn sr_description(
             item.findings.join("\n- ")
         )
     };
+    if !item.requires.is_empty() {
+        let lines: Vec<String> = item
+            .requires
+            .iter()
+            .map(|r| sanitize_changelog(&r.line()))
+            .collect();
+        out.push_str("\n\n");
+        out.push_str(&lines.join("\n"));
+    }
     if !flags.is_empty() {
         let lines: Vec<String> = flags
             .iter()
@@ -303,8 +312,12 @@ pub fn summary_text(
             .iter()
             .filter(|r| r.outcome == ItemOutcome::Updated)
             .map(|r| {
+                let requires = match required_names(&r.item).as_str() {
+                    "" => String::new(),
+                    names => format!(" (requires the update of {names})"),
+                };
                 format!(
-                    "{} {} -> {}",
+                    "{} {} -> {}{requires}",
                     r.item.pkg, r.item.old_version, r.item.new_version
                 )
             })

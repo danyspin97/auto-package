@@ -88,6 +88,7 @@ pub(super) fn submit(a: &FixArgs, c: SubmitCtx<'_>) -> color_eyre::Result<()> {
         new_version: c.branch_version.to_string(),
         upstream_tag: None,
         dependency_of: None,
+        requires: Vec::new(),
         findings: c
             .resolved
             .iter()

@@ -167,6 +167,7 @@ impl Audit {
                                     new_version: version,
                                     upstream_tag: None,
                                     dependency_of: None,
+                                    requires: Vec::new(),
                                     findings: fixable_lines(&findings),
                                 };
                                 // A closed channel means the run gave up.

@@ -14,9 +14,50 @@ pub struct Item {
     pub upstream_tag: Option<String>,
     /// The package this one was pulled in for (`--update-deps`).
     pub dependency_of: Option<String>,
+    /// The dependency updates its BuildRequires need (`--update-deps`).
+    pub requires: Vec<RequiredUpdate>,
     /// What `lint` found wrong with the package, one line each.
     /// Empty for an update, where `old_version` and `new_version` differ.
     pub findings: Vec<String>,
+}
+
+/// A dependency update a package's BuildRequires need: a bound the origin's
+/// version of the dependency misses and its new version meets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredUpdate {
+    /// The dependency's package name.
+    pub pkg: String,
+    /// The dependency's package in the branch project, `project/package`.
+    pub branch_package: String,
+    /// The requirement as the spec writes it: `libfoo-devel >= 2.1`.
+    pub requirement: String,
+    /// The project the dependency is branched from, and the version it has.
+    pub origin: String,
+    pub origin_version: String,
+    /// The dependency's submit request, once there is one.
+    pub request: Option<String>,
+}
+
+impl RequiredUpdate {
+    /// The line of a request text that names the update: its request, or its
+    /// branch package while it has none.
+    pub fn line(&self) -> String {
+        let at = match &self.request {
+            Some(id) => format!("request #{id}"),
+            None => format!("branch package {}", self.branch_package),
+        };
+        format!(
+            "Requires the update of {} ({at}): the spec needs {}; {} has {} {}.",
+            self.pkg, self.requirement, self.origin, self.pkg, self.origin_version
+        )
+    }
+}
+
+/// The names of the dependency updates `item` requires, comma separated, or
+/// an empty string.
+pub fn required_names(item: &Item) -> String {
+    let names: Vec<&str> = item.requires.iter().map(|r| r.pkg.as_str()).collect();
+    names.join(", ")
 }
 
 /// Whether `pkg` is named by `list`, compared the way the rest of the tool
@@ -61,6 +102,7 @@ pub fn items_from_plan(origin: &str, candidates: &[Candidate], exclude: &[String
             new_version: new_version.clone(),
             upstream_tag: upstream_tag.clone(),
             dependency_of: None,
+            requires: Vec::new(),
             findings: Vec::new(),
         });
     }
@@ -129,7 +171,7 @@ pub fn dry_run_lines(d: &DryRun<'_>) -> Vec<String> {
     ));
     for i in d.items {
         out.push(format!(
-            "  {}  {} -> {}  (from {}{}{})",
+            "  {}  {} -> {}  (from {}{}{}{})",
             i.pkg,
             i.old_version,
             i.new_version,
@@ -138,6 +180,10 @@ pub fn dry_run_lines(d: &DryRun<'_>) -> Vec<String> {
                 .as_ref()
                 .map(|p| format!(", needed by {p}"))
                 .unwrap_or_default(),
+            match required_names(i).as_str() {
+                "" => String::new(),
+                names => format!(", requires the update of {names}"),
+            },
             match crate::branch_revision::direction_note(&i.old_version, &i.new_version) {
                 "" => String::new(),
                 note => format!(", {note}"),

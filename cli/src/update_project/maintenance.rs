@@ -32,6 +32,7 @@ pub(super) fn backport_item(origin: &str, c: &update::Candidate) -> Result<Item,
         new_version: version.clone(),
         upstream_tag: None,
         dependency_of: None,
+        requires: Vec::new(),
         findings: Vec::new(),
     })
 }

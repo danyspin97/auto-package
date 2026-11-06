@@ -13,6 +13,7 @@ fn an_improvement_request_lists_the_findings_not_a_version_bump() {
         new_version: "1.0".into(),
         upstream_tag: None,
         dependency_of: None,
+        requires: Vec::new(),
         findings: vec!["no-check: the spec has no %check".into()],
     };
     let d = sr_description(&i, None, &[], &[], &[]);
@@ -49,6 +50,7 @@ fn item(pkg: &str) -> Item {
         new_version: "2".into(),
         upstream_tag: None,
         dependency_of: None,
+        requires: Vec::new(),
         findings: Vec::new(),
     }
 }
@@ -111,7 +113,7 @@ fn path(repo: &str, project: &str) -> PathAddition {
 
 #[test]
 fn the_dry_run_names_the_branch_the_paths_and_the_requests() {
-    let items = [item("libfoo"), {
+    let items = [needing_libbar(None), {
         let mut d = item("libbar");
         d.origin = "devel:languages:c_c++".into();
         d.dependency_of = Some("libfoo".into());
@@ -133,7 +135,7 @@ fn the_dry_run_names_the_branch_the_paths_and_the_requests() {
             "dry run: nothing is branched, built, edited or submitted; Base:System stays untouched",
             "branch project: home:u:branches:Base:System (would be created by the first branch)",
             "packages to branch and update (2):",
-            "  libfoo  1 -> 2  (from Base:System)",
+            "  libfoo  1 -> 2  (from Base:System, requires the update of libbar)",
             "  libbar  1 -> 2  (from devel:languages:c_c++, needed by libfoo)",
             "extra build paths (1):",
             "  openSUSE_Tumbleweed: + devel:languages:c_c++/openSUSE_Tumbleweed",
@@ -524,4 +526,52 @@ fn a_request_says_per_architecture_what_is_not_final() {
         "{d}"
     );
     assert!(!sr_description(&i, None, &[], &[], &[]).contains("Not final"));
+}
+
+/// libfoo, whose BuildRequires need libbar newer than its origin has.
+fn needing_libbar(request: Option<&str>) -> Item {
+    let mut i = item("libfoo");
+    i.requires.push(RequiredUpdate {
+        pkg: "libbar".into(),
+        branch_package: "home:u:branches:Base:System/libbar".into(),
+        requirement: "libbar-devel >= 2".into(),
+        origin: "devel:languages:c_c++".into(),
+        origin_version: "1".into(),
+        request: request.map(str::to_string),
+    });
+    i
+}
+
+#[test]
+fn a_request_names_the_dependency_update_it_requires() {
+    let d = sr_description(&needing_libbar(Some("4242")), None, &[], &[], &[]);
+    assert!(
+        d.contains(
+            "\n\nRequires the update of libbar (request #4242): the spec needs \
+             libbar-devel >= 2; devel:languages:c_c++ has libbar 1.\n"
+        ),
+        "{d}"
+    );
+    let d = sr_description(&needing_libbar(None), None, &[], &[], &[]);
+    assert!(
+        d.contains(
+            "Requires the update of libbar (branch package home:u:branches:Base:System/libbar)"
+        ),
+        "{d}"
+    );
+    assert!(!sr_description(&item("libfoo"), None, &[], &[], &[]).contains("Requires"));
+}
+
+#[test]
+fn the_summary_names_the_dependency_update_a_package_requires() {
+    let results = [ItemResult {
+        item: needing_libbar(None),
+        outcome: ItemOutcome::Updated,
+        sr: SrOutcome::NotRequested,
+    }];
+    let text = summary_text("b", &results, &[], &[], &[], false);
+    assert!(
+        text.contains("  libfoo 1 -> 2 (requires the update of libbar)\n"),
+        "{text}"
+    );
 }
