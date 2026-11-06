@@ -211,9 +211,7 @@ impl TuiState {
                 // A new attempt: the arches the last build failed on are not
                 // known until its check runs again.
                 state.arch_fails.clear();
-                state.status = state.status.next(Input::Selected);
-                state.started = Instant::now();
-                state.ended = None;
+                state.advance(Input::Selected);
                 state.step = None;
                 state.fail_reason = None;
                 state.skipped.clear();
@@ -243,7 +241,6 @@ impl TuiState {
                     state.version = version.clone();
                 }
                 state.finished = true;
-                state.ended = Some(Instant::now());
                 state.retry_requested = false;
                 state.waiting_on = match outcome {
                     PackageOutcome::MissingDeps { deps } => {
@@ -254,10 +251,8 @@ impl TuiState {
                     }
                     _ => Vec::new(),
                 };
-                state.status = state.status.next(Input::Finished {
-                    outcome,
-                    disk_full: state.disk_full_detected,
-                });
+                let disk_full = state.disk_full_detected;
+                state.advance(Input::Finished { outcome, disk_full });
                 match outcome {
                     PackageOutcome::Failed { reason, .. }
                     | PackageOutcome::NeedsMaintainer { reason } => {

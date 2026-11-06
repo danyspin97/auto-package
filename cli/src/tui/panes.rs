@@ -133,7 +133,6 @@ pub(super) fn render_table(
                 Some(mark) => Cell::from(Line::from(mark.span())),
                 None => Cell::from(pkg.step_text()),
             };
-            let elapsed = pkg.elapsed_secs();
             let tries = if pkg.max_tries > 0 {
                 format!("{}/{}", pkg.tries, pkg.max_tries)
             } else {
@@ -152,7 +151,7 @@ pub(super) fn render_table(
                 Cell::from(pkg.version_label()).style(Style::default().fg(Color::Gray)),
                 step_cell,
                 Cell::from(tries),
-                Cell::from(format!("{elapsed}s")),
+                Cell::from(pkg.time_cell()),
                 Cell::from(format!("${:.2}", pkg.cost_usd)),
             ];
             let kept = cells

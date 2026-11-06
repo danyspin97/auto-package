@@ -93,6 +93,11 @@ pub(super) enum Input<'a> {
 }
 
 impl PkgStatus {
+    /// Whether the package's time runs: only while it is worked on.
+    pub(super) fn timer_runs(&self) -> bool {
+        matches!(self, PkgStatus::Running | PkgStatus::Between)
+    }
+
     /// The status after `input`. This is the only place a row's status is
     /// decided; every handler that changes it goes through here.
     pub(super) fn next(&self, input: Input<'_>) -> PkgStatus {
@@ -118,6 +123,40 @@ impl PkgStatus {
                 }
                 PackageOutcome::Skipped { .. } => PkgStatus::Skipped,
             },
+        }
+    }
+}
+
+/// A package's time, banked whenever its status stops the clock.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Clock {
+    /// When the clock last started, while it runs.
+    pub(super) running_since: Option<Instant>,
+    /// The time counted before `running_since`; `None` until it first ran.
+    pub(super) banked: Option<Duration>,
+}
+
+impl Clock {
+    /// Starts the clock when `runs` and it is stopped; stops it, keeping the
+    /// time, when not.
+    pub(super) fn follow(&mut self, runs: bool) {
+        match (runs, self.running_since) {
+            (true, None) => self.running_since = Some(Instant::now()),
+            (false, Some(since)) => {
+                self.banked = Some(self.banked.unwrap_or_default() + since.elapsed());
+                self.running_since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// The time so far, or `None` if the clock never ran.
+    pub(super) fn elapsed(&self) -> Option<Duration> {
+        match (self.running_since, self.banked) {
+            (None, None) => None,
+            (since, banked) => {
+                Some(banked.unwrap_or_default() + since.map_or(Duration::ZERO, |s| s.elapsed()))
+            }
         }
     }
 }

@@ -294,16 +294,27 @@ fn a_skipped_step_is_recorded_without_replacing_the_current_step() {
 }
 
 #[test]
-fn a_package_time_runs_only_between_its_first_step_and_its_end() {
-    use std::time::Duration;
+fn a_package_time_runs_only_while_it_is_worked_on() {
     let mut pkg = PkgState::new("1.0".into());
-    pkg.started = Instant::now() - Duration::from_secs(90);
     // Queued: no time yet, however long it waited.
-    assert_eq!(pkg.elapsed_secs(), 0);
-    pkg.status = PkgStatus::Running;
-    assert!(pkg.elapsed_secs() >= 90);
+    assert_eq!(pkg.time_cell(), "-");
+    pkg.advance(Input::StepStarted { notes: false });
+    pkg.clock.running_since = Some(Instant::now() - Duration::from_secs(90));
+    assert!(pkg.clock.elapsed().unwrap() >= Duration::from_secs(90));
     // Finished: the time stops at the end.
-    pkg.status = PkgStatus::Failed;
-    pkg.ended = Some(pkg.started + Duration::from_secs(30));
-    assert_eq!(pkg.elapsed_secs(), 30);
+    let outcome = PackageOutcome::Failed {
+        reason: "boom".into(),
+        disk_full: false,
+    };
+    pkg.advance(Input::Finished {
+        outcome: &outcome,
+        disk_full: false,
+    });
+    let frozen = pkg.clock.elapsed().unwrap();
+    assert!(pkg.clock.running_since.is_none());
+    assert!(frozen >= Duration::from_secs(90));
+    assert_eq!(pkg.clock.elapsed(), Some(frozen));
+    // Queued again for a retry: the time starts over.
+    pkg.advance(Input::Selected);
+    assert_eq!(pkg.time_cell(), "-");
 }

@@ -20,15 +20,7 @@ impl TuiState {
                 if !kind.spec().keeps_disk_flag {
                     state.disk_full_detected = false;
                 }
-                // The notes turn only runs after a successful build, so the package
-                // is already done; showing it as running would hide that.
-                if state.status == PkgStatus::Queued {
-                    state.started = Instant::now();
-                }
-                if *kind != StepKind::PackageNotes {
-                    state.ended = None;
-                }
-                state.status = state.status.next(Input::StepStarted {
+                state.advance(Input::StepStarted {
                     notes: *kind == StepKind::PackageNotes,
                 });
                 state.step = Some(StepInfo {
@@ -85,7 +77,7 @@ impl TuiState {
                 if notes {
                     state.step = None;
                 }
-                state.status = state.status.next(Input::StepFinished { notes });
+                state.advance(Input::StepFinished { notes });
             }
             Event::BuildFailed { classification, .. } => {
                 state.add_log(LogLevel::Error, format!("Build failed: {classification:?}"));

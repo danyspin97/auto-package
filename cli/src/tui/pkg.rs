@@ -107,10 +107,9 @@ pub(super) struct PkgState {
     pub(super) input_tokens: u64,
     pub(super) output_tokens: u64,
     pub(super) cost_usd: f64,
-    /// When the package left the queue (its first step), or was queued again.
-    pub(super) started: Instant,
-    /// When `PackageFinished` came in: the package's time stops there.
-    pub(super) ended: Option<Instant>,
+    /// The time the package has been worked on, which runs only while its
+    /// status says so (see [`PkgState::advance`]).
+    pub(super) clock: Clock,
     pub(super) finished: bool,
     /// Current/max agent fix-attempt count within this `run_package` call
     /// (`Task::FixAfterBuild`'s `attempt`/`max_attempts`). Stays `0`/`0`
@@ -156,23 +155,28 @@ impl PkgState {
         }
     }
 
+    /// Moves the status on for `input` (see [`PkgStatus::next`]), and the
+    /// clock with it: a selection starts the package's time over, and the
+    /// time runs only while the status is one that runs it.
+    pub(super) fn advance(&mut self, input: Input<'_>) {
+        if matches!(input, Input::Selected) {
+            self.clock = Clock::default();
+        }
+        self.status = self.status.next(input);
+        self.clock.follow(self.status.timer_runs());
+    }
+
+    /// The Time column: `-` until the package first runs, then its time,
+    /// live while it runs and frozen otherwise.
+    pub(super) fn time_cell(&self) -> String {
+        self.clock
+            .elapsed()
+            .map_or_else(|| "-".to_string(), fmt_dur)
+    }
+
     /// The status cell's text: the status, or for a built package that fails
     /// on another arch `built ⚠`. The names of the failing arches are in the
     /// package's log, the column has no room for them.
-    /// Seconds the package has been worked on: none while it is queued, live
-    /// while it runs, frozen once it finished.
-    pub(super) fn elapsed_secs(&self) -> u64 {
-        if self.status == PkgStatus::Queued {
-            return 0;
-        }
-        self.ended
-            .map_or_else(
-                || self.started.elapsed(),
-                |e| e.duration_since(self.started),
-            )
-            .as_secs()
-    }
-
     pub(super) fn status_cell(&self) -> String {
         match (
             self.status == PkgStatus::Succeeded,
@@ -198,8 +202,7 @@ impl PkgState {
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: 0.0,
-            started: Instant::now(),
-            ended: None,
+            clock: Clock::default(),
             finished: false,
             tries: 0,
             max_tries: 0,

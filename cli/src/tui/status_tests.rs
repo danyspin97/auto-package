@@ -92,3 +92,32 @@ fn a_failure_is_out_of_space_when_the_outcome_or_an_earlier_step_says_so() {
     // Only a failure is blamed on the disk.
     assert!(finished(PackageOutcome::Built, true) == PkgStatus::Succeeded);
 }
+
+#[test]
+fn only_a_package_being_worked_on_runs_its_clock() {
+    for from in ALL {
+        let runs = matches!(from, PkgStatus::Running | PkgStatus::Between);
+        assert_eq!(from.timer_runs(), runs, "{}", from.label());
+    }
+}
+
+#[test]
+fn a_clock_banks_its_time_when_it_stops_and_goes_on_from_there() {
+    let mut clock = Clock::default();
+    assert_eq!(clock.elapsed(), None);
+    clock.follow(false);
+    assert_eq!(clock.elapsed(), None, "a clock that never ran has no time");
+    clock.follow(true);
+    clock.running_since = Some(Instant::now() - Duration::from_secs(5));
+    clock.follow(false);
+    let banked = clock.elapsed().unwrap();
+    assert!(banked >= Duration::from_secs(5));
+    clock.follow(false);
+    assert_eq!(
+        clock.elapsed(),
+        Some(banked),
+        "a stopped clock does not move"
+    );
+    clock.follow(true);
+    assert!(clock.elapsed().unwrap() >= banked);
+}
