@@ -151,6 +151,27 @@ pub(super) fn errors_not_in_origin(errors: &[String], origin: &[String]) -> Vec<
         .collect()
 }
 
+/// Splits the `E:` lines of a green build into those the fix turn is asked
+/// about and those an update leaves to the origin. Only an update excuses a
+/// line the origin's build reports too: a lint improves the package it ships,
+/// so it asks about every line.
+pub(super) fn split_origin_errors(
+    update: bool,
+    errors: &[String],
+    origin: &[String],
+) -> (Vec<String>, Vec<String>) {
+    if !update {
+        return (errors.to_vec(), Vec::new());
+    }
+    let fresh = errors_not_in_origin(errors, origin);
+    let excused = errors
+        .iter()
+        .filter(|e| !fresh.contains(e))
+        .cloned()
+        .collect();
+    (fresh, excused)
+}
+
 /// The `E:` lines of the origin's latest build log for the same repository
 /// and arch. Empty when the package is not a link, or the log cannot be read:
 /// then no line is excused and the turn is asked as before.
@@ -169,21 +190,21 @@ fn origin_rpmlint_errors(config: &PipelineConfig, obs_name: &str) -> Vec<String>
     .unwrap_or_default()
 }
 
-/// `errors` without the lines the origin's build reports too. The origin is
-/// asked only when there is a line to excuse and a turn could be asked.
+/// `errors` without the lines an update leaves to the origin, which are the
+/// lines its build reports too. The origin is asked only by an update, and only
+/// when there is a line to excuse and a turn could be asked.
 fn errors_to_ask(ctx: &RunCtx, build_step: &StepDir, errors: &[String]) -> Vec<String> {
     let config = ctx.config;
     if errors.is_empty() || config.no_agent || osc::local_build().is_some() {
         return errors.to_vec();
     }
-    let origin = origin_rpmlint_errors(config, &ctx.obs_name);
-    let fresh = errors_not_in_origin(errors, &origin);
-    if fresh.len() < errors.len() {
-        let excused: Vec<String> = errors
-            .iter()
-            .filter(|e| !fresh.contains(e))
-            .cloned()
-            .collect();
+    let origin = if config.update {
+        origin_rpmlint_errors(config, &ctx.obs_name)
+    } else {
+        Vec::new()
+    };
+    let (fresh, excused) = split_origin_errors(config.update, errors, &origin);
+    if !excused.is_empty() {
         ctx.reporter.report(&Event::Progress {
             step: Some(build_step.id),
             message: format!(

@@ -1,7 +1,8 @@
 use super::build_round::{record_rpmlint_logs, revert_warning};
 use super::rpmlint_fix::{
     RpmlintAsk, RpmlintGate, RpmlintTurn, errors_not_in_origin, load_rpmlint_shown,
-    persist_rpmlint_shown, rpmlint_after_turn, rpmlint_ask, rpmlint_key, turn_failure,
+    persist_rpmlint_shown, rpmlint_after_turn, rpmlint_ask, rpmlint_key, split_origin_errors,
+    turn_failure,
 };
 use super::*;
 use crate::pipeline::apply_turn::TurnEffect;
@@ -250,6 +251,39 @@ fn an_error_the_origin_build_reports_too_is_not_asked_of_the_update() {
     assert!(all_known.is_empty());
     assert_eq!(
         rpmlint_ask(&open_gate(), &all_known, &BTreeSet::new()),
+        RpmlintAsk::Build
+    );
+}
+
+/// eric's desktop-file error: its origin's build reports the same line.
+const ERIC_DESKTOP: &str = "eric.noarch: E: invalid-desktopfile /usr/share/applications/eric7_mpy.desktop value \"Qt;X-Python;Development;MicroPython;\" for key \"Categories\" in group \"Desktop Entry\" contains an unregistered value \"MicroPython\"; values extending the format should start with \"X-\"";
+
+#[test]
+fn a_lint_asks_about_an_error_the_origin_build_reports_too() {
+    let origin = lines(&[ERIC_DESKTOP]);
+    let build = lines(&[ERIC_DESKTOP, "cracklib.x86_64: E: new-rule /usr/lib/y"]);
+    let (fresh, excused) = split_origin_errors(false, &build, &origin);
+    assert_eq!(fresh, build);
+    assert!(excused.is_empty());
+    assert_eq!(
+        rpmlint_ask(&open_gate(), &fresh, &BTreeSet::new()),
+        RpmlintAsk::Ask(build)
+    );
+}
+
+#[test]
+fn an_update_excuses_only_the_error_the_origin_build_reports_too() {
+    let origin = lines(&[ERIC_DESKTOP]);
+    let build = lines(&[ERIC_DESKTOP, "cracklib.x86_64: E: new-rule /usr/lib/y"]);
+    let (fresh, excused) = split_origin_errors(true, &build, &origin);
+    assert_eq!(fresh, lines(&["cracklib.x86_64: E: new-rule /usr/lib/y"]));
+    assert_eq!(excused, lines(&[ERIC_DESKTOP]));
+    // An update whose only error is the origin's asks nothing: the build stands.
+    let (fresh, excused) = split_origin_errors(true, &lines(&[ERIC_DESKTOP]), &origin);
+    assert!(fresh.is_empty());
+    assert_eq!(excused, lines(&[ERIC_DESKTOP]));
+    assert_eq!(
+        rpmlint_ask(&open_gate(), &fresh, &BTreeSet::new()),
         RpmlintAsk::Build
     );
 }
