@@ -32,6 +32,10 @@ cache of upstream versions). Inside one (call it `$P`):
     `running` with no live process means the run died.
   - `notes.md`: one `## Attempt N - <task>` entry per agent turn
     (Reasoning, Evidence, Confidence). It accumulates across runs.
+  - `reconciled.log`: one line per change the start-up reconcile made to this
+    package without a run: a stale archive of another release deleted from
+    the checkout, a review of another version dropped, RPMs OBS built taken
+    and the state recorded as built. Nothing is written to OBS for these.
   - `build.log` (latest OBS log), `spec`, `sdist/` (unpacked sources),
     `conventions/` (the rules the agent was given).
 - `$P/runs/<run-id>/` one directory per invocation (`YYYYMMDD-HHMMSS-...`):
