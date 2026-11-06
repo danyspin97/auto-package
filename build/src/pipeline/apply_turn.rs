@@ -296,6 +296,7 @@ fn apply_turn_outcome_with(
                         message: format!("{rpm_name}: dropped the empty '{name}'"),
                     });
                 }
+                osc::drop_release_bullets(checkout_dir, &config.version, &outcome.drops_changelog);
                 add_edit_changes_entry(config, checkout_dir, reporter, step, &bullet_source);
             }
             Ok(if changed {

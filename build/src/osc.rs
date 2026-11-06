@@ -69,6 +69,8 @@ mod spec_file_name_tests;
 pub use changes::*;
 mod changes_normalise;
 pub use changes_normalise::*;
+mod changes_drop;
+pub use changes_drop::*;
 mod changes_merge;
 pub use changes_merge::*;
 mod changes_refresh;

@@ -448,6 +448,8 @@ pub struct TurnOutcome {
     pub reasoning: String,
     /// The `.changes` bullet the turn asked for; empty when it gave none.
     pub changelog: String,
+    /// Bullets of the release's `.changes` entry the turn's edit makes untrue.
+    pub drops_changelog: Vec<String>,
     pub evidence: Vec<String>,
     pub unresolvable_packages: Vec<String>,
     /// Dependencies to branch and patch rather than build (convention 62).

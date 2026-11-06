@@ -109,6 +109,7 @@ pub(super) fn pipeline_wheel_outcome(why: &str) -> crate::agent::TurnOutcome {
         },
         reasoning: why.to_string(),
         changelog: String::new(),
+        drops_changelog: Vec::new(),
         evidence: Vec::new(),
         unresolvable_packages: Vec::new(),
         patch_dependencies: Vec::new(),

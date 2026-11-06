@@ -550,6 +550,7 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
         action,
         reasoning: resp.reasoning,
         changelog: resp.changelog,
+        drops_changelog: resp.drops_changelog,
         evidence: resp.evidence,
         unresolvable_packages: resp.unresolvable_packages,
         patch_dependencies: resp.patch_dependencies,

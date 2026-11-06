@@ -267,6 +267,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         Some(note) => format!("## Context\n\n{note}\n\n"),
         None => String::new(),
     };
+    let context_section = format!("{context_section}{}", entry_section(req));
 
     let hint_section = if let Some(hint) = req.hint {
         let mut s = String::new();
@@ -557,4 +558,43 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         context = context_section,
         hint = hint_section,
     )
+}
+
+/// The bullets of the release's `.changes` entry so far, for a fix turn: its
+/// edit may make one of them untrue, and `drops_changelog` takes it back.
+fn entry_section(req: &TurnRequest<'_>) -> String {
+    if !matches!(
+        req.task,
+        Task::FixAfterBuild | Task::RpmlintFix | Task::FixAfterValidation
+    ) {
+        return String::new();
+    }
+    let Ok(spec) = std::fs::read_link(req.workspace.join("spec")) else {
+        return String::new();
+    };
+    let Some(dir) = spec.parent() else {
+        return String::new();
+    };
+    let bullets = crate::osc::newest_changes_file(dir)
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|t| crate::osc::release_entry_bullets(&t, req.version))
+        .unwrap_or_default();
+    let others: Vec<&String> = bullets
+        .iter()
+        .filter(|b| **b != format!("Update to {}", req.version))
+        .collect();
+    if others.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "## Changelog so far\n\nThe bullets of this release's `.changes` entry, written by \
+         earlier turns. When your edit replaces or undoes the change one of them describes, \
+         copy that bullet into `drops_changelog` so the entry stays true; say nothing of the \
+         others.\n\n",
+    );
+    for b in others {
+        s.push_str(&format!("- {b}\n"));
+    }
+    s.push('\n');
+    s
 }
