@@ -191,6 +191,14 @@ impl PkgState {
         }
     }
 
+    /// A row the sweep reports, before its check result is applied.
+    pub(super) fn checking() -> Self {
+        Self {
+            status: PkgStatus::Checking,
+            ..Self::new(String::new())
+        }
+    }
+
     pub(super) fn new(version: String) -> Self {
         Self {
             version,
@@ -258,7 +266,9 @@ impl PkgState {
     /// time — live while running, frozen once finished. A skipped package
     /// shows why it was skipped instead.
     pub(super) fn step_text(&self) -> String {
-        if let (PkgStatus::Skipped, Some(reason)) = (&self.status, &self.skip_reason) {
+        if let (PkgStatus::Skipped | PkgStatus::CheckSkipped, Some(reason)) =
+            (&self.status, &self.skip_reason)
+        {
             return reason.clone();
         }
         let Some(step) = &self.step else {

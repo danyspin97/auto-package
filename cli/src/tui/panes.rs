@@ -27,7 +27,7 @@ pub(super) fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
 /// and cost. The narrower titles shorten the words before they drop parts.
 pub(super) fn summary_counters(state: &TuiState) -> Vec<String> {
     let c = state.stage_counts();
-    let skipped = c.skipped + state.sweep.map_or(0, |s| s.skipped);
+    let skipped = c.skipped;
     let elapsed = fmt_dur(state.run_start.map_or(Duration::ZERO, |s| s.elapsed()));
     let cost = state.total_cost_usd();
     // A long queue is what `--jobs` makes of it: only so many build at once.
@@ -167,7 +167,13 @@ pub(super) fn render_table(
                 ))
                 .style(Style::default().fg(pkg.status.color())),
                 Cell::from(name.as_str()).style(
-                    if matches!(pkg.status, PkgStatus::Queued | PkgStatus::AlreadyBuilt) {
+                    if matches!(
+                        pkg.status,
+                        PkgStatus::Queued
+                            | PkgStatus::AlreadyBuilt
+                            | PkgStatus::UpToDate
+                            | PkgStatus::CheckSkipped
+                    ) {
                         Style::default().fg(Color::DarkGray)
                     } else {
                         Style::default().add_modifier(Modifier::BOLD)

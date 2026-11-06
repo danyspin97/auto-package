@@ -4,7 +4,6 @@ pub(super) struct SweepCounts {
     pub(super) checked: usize,
     pub(super) to_update: usize,
     pub(super) up_to_date: usize,
-    pub(super) skipped: usize,
     pub(super) finished: bool,
 }
 

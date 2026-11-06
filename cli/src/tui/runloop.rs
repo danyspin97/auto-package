@@ -52,7 +52,8 @@ pub(super) fn run(
 /// the targets are typed names and rows use rpm names, so matching them up is
 /// not reliable.
 ///
-/// A run with no rows at all is settled only once it has ended successfully:
+/// Rows that are only what the sweep's check found are left out: nothing was
+/// queued for them. A run with no other rows is settled only once it has ended successfully:
 /// `RunFinished` is reported after the root work is released, so until then a
 /// `build` that has not shown its first row yet stays open, while an `update`
 /// with nothing to do closes at once. A failure before anything started stays
@@ -61,13 +62,11 @@ pub(super) fn run_is_done(state: &TuiState, work_left: usize) -> bool {
     if work_left != 0 {
         return false;
     }
-    if state.packages.is_empty() {
+    let mut rows = state.build_rows().peekable();
+    if rows.peek().is_none() {
         return matches!(state.run_outcome, Some(RunOutcome::Success));
     }
-    state
-        .packages
-        .values()
-        .all(|p| p.finished && !p.retry_requested && p.status.is_built())
+    rows.all(|p| p.finished && !p.retry_requested && p.status.is_built())
 }
 
 /// Whether the run has nothing left to do, built or not: `work_left` is zero
@@ -77,12 +76,8 @@ pub(super) fn run_is_done(state: &TuiState, work_left: usize) -> bool {
 /// counts as finished here, since its attempt has ended and nothing will
 /// re-queue it once `work_left` is zero.
 pub(super) fn run_is_over(state: &TuiState, work_left: usize) -> bool {
-    work_left == 0
-        && !state.packages.is_empty()
-        && state
-            .packages
-            .values()
-            .all(|p| p.finished && !p.retry_requested)
+    let mut rows = state.build_rows().peekable();
+    work_left == 0 && rows.peek().is_some() && rows.all(|p| p.finished && !p.retry_requested)
 }
 
 /// The footer line for a run that is over but not settled, so the user knows

@@ -1,5 +1,6 @@
 use super::*;
 use ap_core::event::ArchCheckResult;
+use ap_core::sweep_event::{SweepVerdict, SweptPackage};
 
 /// Compact duration for the Step column: `42s`, `1m23s`.
 pub(super) fn fmt_dur(d: Duration) -> String {
@@ -87,7 +88,8 @@ impl TuiState {
     }
 
     /// Packages shown in the table: every one by default, or, with `show_all`
-    /// off, everything except ones that built fine and need no further attention. Failed and missing-deps
+    /// off, everything except ones that built fine or were checked up to
+    /// date, which need no further attention. Failed and missing-deps
     /// packages stay visible since they may still need attention or get
     /// retried; the header's `n/N packages done` count still includes the
     /// hidden ones (it is derived from `packages`, not this list). Hiding
@@ -97,14 +99,51 @@ impl TuiState {
     pub(super) fn visible_order(&self) -> Vec<&String> {
         self.order
             .iter()
-            .filter(|name| self.show_all || !self.packages[*name].status.is_built())
+            .filter(|name| {
+                let status = &self.packages[*name].status;
+                self.show_all || !(status.is_built() || *status == PkgStatus::UpToDate)
+            })
             .collect()
+    }
+
+    /// The rows a build was queued for: every row but the ones that are only
+    /// what the sweep's check found.
+    pub(super) fn build_rows(&self) -> impl Iterator<Item = &PkgState> {
+        self.packages.values().filter(|p| !p.status.is_check_only())
     }
 
     /// The rows in each stage, counted from their statuses on every call so
     /// the header cannot drift from the table.
     pub(super) fn stage_counts(&self) -> StageCounts {
         StageCounts::of(self.packages.values().map(|p| &p.status))
+    }
+
+    /// The row of a package the sweep checked, created when it has none.
+    /// What the check found shows only on a row no build has taken over.
+    fn apply_check(&mut self, swept: &SweptPackage) {
+        if !self.packages.contains_key(&swept.name) {
+            self.order.push(swept.name.clone());
+            self.packages
+                .insert(swept.name.clone(), PkgState::checking());
+        }
+        let Some(row) = self.packages.get_mut(&swept.name) else {
+            return;
+        };
+        row.advance(Input::Checked(&swept.verdict));
+        if !row.status.is_check_only() {
+            return;
+        }
+        match &swept.verdict {
+            SweepVerdict::UpToDate { version } => {
+                row.version = version.clone();
+                row.from_version = None;
+            }
+            SweepVerdict::Update { from, to } => {
+                row.version = to.clone();
+                row.from_version = Some(from.clone());
+            }
+            SweepVerdict::Skipped { reason } => row.skip_reason = Some(reason.clone()),
+        }
     }
 
     pub(super) fn pkg_mut(&mut self, name: &str) -> &mut PkgState {
@@ -147,15 +186,17 @@ impl TuiState {
                 checked,
                 to_update,
                 up_to_date,
-                skipped,
                 finished,
+                package,
                 ..
             } => {
+                if let Some(package) = package {
+                    self.apply_check(package);
+                }
                 self.sweep = Some(SweepCounts {
                     checked: *checked,
                     to_update: *to_update,
                     up_to_date: *up_to_date,
-                    skipped: *skipped,
                     finished: *finished,
                 });
             }

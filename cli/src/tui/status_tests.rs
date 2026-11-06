@@ -1,7 +1,12 @@
 use super::*;
+use ap_core::sweep_event::SweepVerdict;
 
 /// Every status a row can be in.
-const ALL: [PkgStatus; 11] = [
+const ALL: [PkgStatus; 15] = [
+    PkgStatus::Checking,
+    PkgStatus::UpToDate,
+    PkgStatus::NeedsUpdate,
+    PkgStatus::CheckSkipped,
     PkgStatus::Queued,
     PkgStatus::Running,
     PkgStatus::Between,
@@ -127,7 +132,7 @@ fn only_a_package_being_worked_on_runs_its_clock() {
     for from in ALL {
         let runs = matches!(
             from,
-            PkgStatus::Running | PkgStatus::Between | PkgStatus::Retrying
+            PkgStatus::Checking | PkgStatus::Running | PkgStatus::Between | PkgStatus::Retrying
         );
         assert_eq!(from.timer_runs(), runs, "{}", from.label());
     }
@@ -165,7 +170,7 @@ fn each_status_counts_in_one_header_group() {
             done: 3,
             failed: 2,
             waiting: 1,
-            skipped: 1,
+            skipped: 2,
         }
     );
 }
@@ -216,4 +221,47 @@ fn a_parked_row_waits_upstream_and_a_skipped_one_says_why() {
     let skipped = &state.packages["skipped"];
     assert_eq!(skipped.status_cell(), "skipped");
     assert_eq!(skipped.step_text(), "excluded on x86_64");
+}
+
+#[test]
+fn a_check_result_moves_only_a_row_no_build_has_taken() {
+    let current = SweepVerdict::UpToDate {
+        version: "1".into(),
+    };
+    let update = SweepVerdict::Update {
+        from: "1".into(),
+        to: "2".into(),
+    };
+    let skip = SweepVerdict::Skipped {
+        reason: "no spec".into(),
+    };
+    for from in ALL {
+        for (verdict, checked) in [
+            (&current, PkgStatus::UpToDate),
+            (&update, PkgStatus::NeedsUpdate),
+            (&skip, PkgStatus::CheckSkipped),
+        ] {
+            let to = from.next(Input::Checked(verdict));
+            let want = if from.is_check_only() {
+                checked
+            } else {
+                from.clone()
+            };
+            assert!(to == want, "{} -> {}", from.label(), to.label());
+        }
+    }
+}
+
+#[test]
+fn only_the_check_statuses_are_check_only() {
+    for from in ALL {
+        let check = matches!(
+            from,
+            PkgStatus::Checking
+                | PkgStatus::UpToDate
+                | PkgStatus::NeedsUpdate
+                | PkgStatus::CheckSkipped
+        );
+        assert_eq!(from.is_check_only(), check, "{}", from.label());
+    }
 }

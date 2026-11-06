@@ -174,7 +174,7 @@ fn the_full_header_counts_each_stage_and_explains_the_queue() {
     let full = &summary_counters(&state_in_every_stage(4))[0];
     assert!(
         full.starts_with(
-            " checked 37 · up-to-date 30 · needs update 2 · queued 3 (4 at a time) · running 1 · done 1 · failed 1 · waiting 1 · skipped 5 │ elapsed 0s │ cost $0.00"
+            " checked 37 · up-to-date 30 · needs update 2 · queued 3 (4 at a time) · running 1 · done 1 · failed 1 · waiting 1 │ elapsed 0s │ cost $0.00"
         ),
         "{full:?}"
     );
@@ -191,7 +191,7 @@ fn a_mid_width_header_still_shows_the_sweep_counts() {
     let state = state_in_every_stage(4);
     let scopes = scope_labels(&state.scope);
     // Too narrow for the full title, wide enough for the short one.
-    for width in 90..=150 {
+    for width in 90..=135 {
         let line = header_line(&scopes, summary_counters(&state), width);
         assert!(!line.contains("elapsed"), "{width}: {line:?}");
         assert!(

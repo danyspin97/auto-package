@@ -2,9 +2,20 @@
 //! status cell, its glyph and colour all read from here.
 
 use super::*;
+use ap_core::sweep_event::SweepVerdict;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum PkgStatus {
+    /// Found by the sweep, its check not answered yet: the state a row the
+    /// sweep reports is created in.
+    Checking,
+    /// Checked: upstream has nothing newer.
+    UpToDate,
+    /// Checked: upstream has a newer version, and nothing queued the package
+    /// (a dry run, or a source the pipeline cannot build from).
+    NeedsUpdate,
+    /// Checked, and not compared for a reason the Step column gives.
+    CheckSkipped,
     Queued,
     Running,
     Succeeded,
@@ -35,6 +46,10 @@ impl PkgStatus {
     /// adds the tries to a running one (see `PkgState::status_cell`).
     pub(super) fn label(&self) -> &'static str {
         match self {
+            PkgStatus::Checking => "checking",
+            PkgStatus::UpToDate => "up-to-date",
+            PkgStatus::NeedsUpdate => "needs-update",
+            PkgStatus::CheckSkipped => "skipped",
             PkgStatus::Queued => "queued",
             PkgStatus::Running | PkgStatus::Between => "running",
             PkgStatus::Retrying => "running (retrying)",
@@ -53,6 +68,10 @@ impl PkgStatus {
     /// symbol.
     pub(super) fn glyph(&self, tick: u64) -> &'static str {
         match self {
+            PkgStatus::Checking => "…",
+            PkgStatus::UpToDate => "=",
+            PkgStatus::NeedsUpdate => "↑",
+            PkgStatus::CheckSkipped => "⊘",
             PkgStatus::Queued => "○",
             PkgStatus::Running => ["◐", "◓", "◑", "◒"][(tick % 4) as usize],
             PkgStatus::Between => "◌",
@@ -67,6 +86,9 @@ impl PkgStatus {
 
     pub(super) fn color(&self) -> Color {
         match self {
+            PkgStatus::Checking => Color::Yellow,
+            PkgStatus::UpToDate | PkgStatus::CheckSkipped => Color::DarkGray,
+            PkgStatus::NeedsUpdate => Color::Cyan,
             PkgStatus::Queued => Color::DarkGray,
             PkgStatus::Running | PkgStatus::Between | PkgStatus::Retrying => Color::Yellow,
             PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt => {
@@ -90,6 +112,8 @@ pub(super) enum Input<'a> {
     StepStarted { notes: bool },
     /// `StepFinished` of the step the package is on; `failed` when it failed.
     StepFinished { notes: bool, failed: bool },
+    /// `SweepProgress` for the package: what its check found.
+    Checked(&'a SweepVerdict),
     /// `PackageFinished`. `disk_full` when an earlier step of this attempt
     /// already saw the disk run out (see `PkgState::disk_full_detected`).
     Finished {
@@ -101,6 +125,8 @@ pub(super) enum Input<'a> {
 /// The group a status is counted in by the header.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Stage {
+    /// What the sweep's check of the package found; never built.
+    Check,
     Queued,
     Running,
     Done,
@@ -114,13 +140,26 @@ impl PkgStatus {
     /// The header group this status counts in.
     pub(super) fn stage(&self) -> Stage {
         match self {
+            PkgStatus::Checking | PkgStatus::UpToDate | PkgStatus::NeedsUpdate => Stage::Check,
             PkgStatus::Queued => Stage::Queued,
             PkgStatus::Running | PkgStatus::Between | PkgStatus::Retrying => Stage::Running,
             PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt => Stage::Done,
             PkgStatus::Failed | PkgStatus::NoSpace => Stage::Failed,
             PkgStatus::MissingDeps => Stage::Waiting,
-            PkgStatus::Skipped => Stage::Skipped,
+            PkgStatus::Skipped | PkgStatus::CheckSkipped => Stage::Skipped,
         }
+    }
+
+    /// Whether the row is only what the sweep's check found: nothing was
+    /// queued for it, so the run does not wait on it to end.
+    pub(super) fn is_check_only(&self) -> bool {
+        matches!(
+            self,
+            PkgStatus::Checking
+                | PkgStatus::UpToDate
+                | PkgStatus::NeedsUpdate
+                | PkgStatus::CheckSkipped
+        )
     }
 
     /// Whether the package is built (here, locally, or already before).
@@ -130,13 +169,18 @@ impl PkgStatus {
 
     /// Whether the package's time runs: only while it is worked on.
     pub(super) fn timer_runs(&self) -> bool {
-        self.stage() == Stage::Running
+        self.stage() == Stage::Running || *self == PkgStatus::Checking
     }
 
     /// The status after `input`. This is the only place a row's status is
     /// decided; every handler that changes it goes through here.
     pub(super) fn next(&self, input: Input<'_>) -> PkgStatus {
         match input {
+            // A check never takes a row back from the build it is in.
+            Input::Checked(_) if !self.is_check_only() => self.clone(),
+            Input::Checked(SweepVerdict::UpToDate { .. }) => PkgStatus::UpToDate,
+            Input::Checked(SweepVerdict::Update { .. }) => PkgStatus::NeedsUpdate,
+            Input::Checked(SweepVerdict::Skipped { .. }) => PkgStatus::CheckSkipped,
             Input::Selected => PkgStatus::Queued,
             // The notes turn only runs after a successful build, so the
             // package is already done; showing it as running would hide that.
@@ -221,6 +265,7 @@ impl StageCounts {
         let mut counts = StageCounts::default();
         for status in statuses {
             let slot = match status.stage() {
+                Stage::Check => continue,
                 Stage::Queued => &mut counts.queued,
                 Stage::Running => &mut counts.running,
                 Stage::Done => &mut counts.done,
