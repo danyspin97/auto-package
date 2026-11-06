@@ -60,6 +60,7 @@ mod schedule;
 mod schedule_tests;
 mod submit;
 mod tidy;
+mod tui_row;
 
 #[cfg(test)]
 mod tests;

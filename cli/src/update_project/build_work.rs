@@ -1,7 +1,9 @@
 //! The build of each prepared item, run by the scheduler on its own thread.
 
 use super::schedule::{Scheduler, Work, interleave};
+use super::tui_row::{FinishWatch, close_row, queue_row, row_name};
 use super::*;
+use crate::build_cmd::panic_message;
 use std::sync::Mutex;
 
 /// A prepared item, as it is handed to the scheduler.
@@ -65,8 +67,25 @@ impl<'a, 'c> BuildWork<'a, 'c> {
         }
     }
 
-    fn build(&self, job: Job, report: &mut Report) {
+    /// The TUI row of `job`'s build, when it has one: a package the TUI
+    /// shows and that goes to the pipeline.
+    fn row(&self, job: &Job) -> Option<String> {
+        self.ctx.tui_ctrl.as_ref()?;
+        let a = self.a;
+        let pipeline =
+            !(a.improve && (job.mechanical || agent_needed(a.no_agent, &job.item.findings)));
+        row_name(&job.item).filter(|_| pipeline)
+    }
+
+    fn build(&self, job: Job, report: &mut Report, watch: Option<Arc<FinishWatch>>) {
         let (a, branch, ctx, resolver) = (self.a, self.branch, self.ctx, self.resolver);
+        // The build closes its row; one that ends without it (it failed
+        // first, or reported another name) is closed below, or by `run`.
+        let base: Arc<dyn Reporter + Send + Sync> = match &watch {
+            Some(w) => w.clone(),
+            None => ctx.base_reporter.clone(),
+        };
+        let build_item = |item: &Item| build_item(a, branch, item, resolver, ctx, base.clone());
         let item = job.item;
         // Why the item is not submitted once its work is done (see `skipped`).
         let mut skip: Option<String> = None;
@@ -75,15 +94,13 @@ impl<'a, 'c> BuildWork<'a, 'c> {
                 "backporting into {} {} in {branch} (the version stays)",
                 item.pkg, item.new_version
             ));
-            stage_backport(branch, &item, backport, ctx)
-                .and_then(|()| build_item(a, branch, &item, resolver, ctx))
+            stage_backport(branch, &item, backport, ctx).and_then(|()| build_item(&item))
         } else if let Some(task) = &a.fix_task {
             ctx.say(format!(
                 "fixing a bug in {} {} in {branch} (the version stays)",
                 item.pkg, item.new_version
             ));
-            build_item(a, branch, &item, resolver, ctx)
-                .and_then(|()| super::fix_landed::check(branch, &item, task, ctx))
+            build_item(&item).and_then(|()| super::fix_landed::check(branch, &item, task, ctx))
         } else if a.improve {
             ctx.say(format!("improving {} in {branch}", item.pkg));
             if job.mechanical {
@@ -100,20 +117,25 @@ impl<'a, 'c> BuildWork<'a, 'c> {
                 skipped(ctx, report, item, "the findings need the agent".to_string());
                 return;
             } else {
-                build_item(a, branch, &item, resolver, ctx)
+                build_item(&item)
             }
         } else {
             ctx.say(format!(
                 "updating {} to {} in {branch}",
                 item.pkg, item.new_version
             ));
-            build_item(a, branch, &item, resolver, ctx)
+            build_item(&item)
         };
         let outcome = match done {
             Ok(()) if skip.is_some() => ItemOutcome::Skipped(skip.clone().unwrap_or_default()),
             Ok(()) => ItemOutcome::Updated,
             Err(why) => ItemOutcome::Failed(why),
         };
+        if let Some(w) = &watch
+            && !w.finished()
+        {
+            close_row(ctx, &w.row, &item, &outcome);
+        }
         if let ItemOutcome::Skipped(why) = outcome {
             skipped(ctx, report, item, why);
             return;
@@ -121,7 +143,18 @@ impl<'a, 'c> BuildWork<'a, 'c> {
         if outcome == ItemOutcome::Updated {
             let _one_at_a_time = edits_branch_meta(a)
                 .then(|| self.arch_check.lock().unwrap_or_else(|p| p.into_inner()));
-            super::arch::check_item(a, branch, &item, ctx, report);
+            // The build is done by now: a check that panics is a warning, as a
+            // check that cannot run is.
+            let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::arch::check_item(a, branch, &item, ctx, report);
+            }));
+            if let Err(p) = checked {
+                ctx.warn(format!(
+                    "arch check of {} panicked: {}",
+                    item.pkg,
+                    panic_message(p.as_ref())
+                ));
+            }
         }
         report.results.push(ItemResult {
             item,
@@ -147,20 +180,50 @@ impl Work for BuildWork<'_, '_> {
         if let Some(b) = &self.ctx.backend {
             b.register(&job.item);
         }
+        // Queued in the TUI when it is handed over, not when its turn comes.
+        if let Some(row) = self.row(job) {
+            queue_row(self.ctx, &row, &job.item);
+        }
     }
 
     fn run(&self, job: Job) -> Report {
         let mut report = Report::default();
-        self.build(job, &mut report);
+        let item = job.item.clone();
+        let watch = self
+            .row(&job)
+            .map(|row| Arc::new(FinishWatch::new(self.ctx.base_reporter.clone(), row)));
+        // A panic in the build is caught here rather than by the scheduler, so
+        // the report keeps what the build put in it, and the row is closed only
+        // if the build has not closed it.
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.build(job, &mut report, watch.clone())
+        }));
+        if let Err(p) = built {
+            let why = format!("build panicked: {}", panic_message(p.as_ref()));
+            self.ctx.warn(format!("{}: {why}", item.pkg));
+            let outcome = ItemOutcome::Failed(why);
+            if let Some(w) = watch.as_ref().filter(|w| !w.finished()) {
+                close_row(self.ctx, &w.row, &item, &outcome);
+            }
+            report.results.push(ItemResult {
+                item,
+                outcome,
+                sr: SrOutcome::NotRequested,
+            });
+        }
         report
     }
 
     fn not_run(&self, job: Job, why: String) -> Report {
         self.ctx.warn(format!("{}: {why}", job.item.pkg));
+        let outcome = ItemOutcome::Failed(why);
+        if let Some(row) = self.row(&job) {
+            close_row(self.ctx, &row, &job.item, &outcome);
+        }
         let mut report = Report::default();
         report.results.push(ItemResult {
             item: job.item,
-            outcome: ItemOutcome::Failed(why),
+            outcome,
             sr: SrOutcome::NotRequested,
         });
         report
@@ -232,6 +295,7 @@ fn build_item(
     item: &Item,
     resolver: &Arc<DepResolver>,
     ctx: &Ctx<'_>,
+    base_reporter: Arc<dyn Reporter + Send + Sync>,
 ) -> Result<(), String> {
     // As in `update`: a PyPI package is named by its PyPI name; a repository
     // one by the repository, which is also handed back so the pipeline fetches
@@ -297,7 +361,7 @@ fn build_item(
             ctx.python_flavors.clone(),
             ctx.run_dir,
             ctx.reporter.clone(),
-            ctx.base_reporter.clone(),
+            base_reporter,
             ctx.tui_ctrl.clone(),
             Some(&build),
         )
