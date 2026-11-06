@@ -39,6 +39,10 @@ pub(super) trait Work: Sync {
     }
     /// Whether the run is stopping: a job that has not started is not run.
     fn stopping(&self) -> bool;
+    /// Told once per job handed over when its run has ended, however it
+    /// ended (not run, panicked), before the jobs waiting for it start.
+    /// Default: nothing to do.
+    fn run_ended(&self) {}
 }
 
 /// Set once a job's run has ended, however it ended.
@@ -59,6 +63,16 @@ impl Ended {
         while !*ended {
             ended = self.cvar.wait(ended).unwrap_or_else(|p| p.into_inner());
         }
+    }
+}
+
+/// Tells the work its job's run ended on drop, so a thread that panics
+/// still tells it.
+struct RunEndedOnDrop<'w, W: Work>(&'w W);
+
+impl<W: Work> Drop for RunEndedOnDrop<'_, W> {
+    fn drop(&mut self) {
+        self.0.run_ended();
     }
 }
 
@@ -149,8 +163,10 @@ where
             let fallback = job.clone();
             let state = if self.inline {
                 let _set = SetOnDrop(ended.clone());
+                let told = RunEndedOnDrop(self.work);
                 let copy = job.clone();
                 let out = run_one(self.work, job);
+                drop(told);
                 ended.set();
                 State::Done(post_one(self.work, copy, out))
             } else {
@@ -161,6 +177,7 @@ where
                 let early = ended.clone();
                 State::Running(self.scope.spawn(move || {
                     let _set = set;
+                    let told = RunEndedOnDrop(work);
                     for w in &waits {
                         w.wait();
                     }
@@ -172,6 +189,7 @@ where
                     // The run is over: the slot is free and the jobs that
                     // wait for this one may start, while the post step waits
                     // for its own bound.
+                    drop(told);
                     early.set();
                     let _post = Permit::acquire(&post_gate);
                     post_one(work, copy, out)

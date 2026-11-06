@@ -29,6 +29,8 @@ struct Fake {
     /// Set by `release`: the post steps of the `held-` jobs wait for it.
     released: Mutex<bool>,
     released_cvar: Condvar,
+    /// How many times `run_ended` was told.
+    runs_ended: AtomicUsize,
 }
 
 impl Fake {
@@ -122,6 +124,9 @@ impl Work for Fake {
     }
     fn stopping(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
+    }
+    fn run_ended(&self) {
+        self.runs_ended.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -441,4 +446,41 @@ fn a_panicking_post_step_is_that_jobs_failure_only() {
             ]
         );
     }
+}
+
+#[test]
+fn each_job_tells_its_run_ended_once_however_it_ended() {
+    for jobs in [0, 1, 2] {
+        let fake = Fake::default();
+        run(
+            &fake,
+            jobs,
+            vec![
+                vec![job("a", &[], 0), job("panic-b", &[], 0)],
+                vec![job("c", &["a"], 0)],
+            ],
+        );
+        assert_eq!(fake.runs_ended.load(Ordering::SeqCst), 3, "jobs {jobs}");
+        let stopped = Fake::default();
+        stopped.stop.store(true, Ordering::SeqCst);
+        run(
+            &stopped,
+            jobs,
+            vec![vec![job("a", &[], 0), job("b", &[], 0)]],
+        );
+        assert_eq!(stopped.runs_ended.load(Ordering::SeqCst), 2, "jobs {jobs}");
+    }
+}
+
+#[test]
+fn a_run_is_told_ended_before_its_post_step_ends() {
+    let fake = Fake::default();
+    std::thread::scope(|s| {
+        let mut sched = Scheduler::new(s, &fake, 2);
+        sched.submit(vec![job("held-a", &[], 0)], 0);
+        assert!(wait_for(&fake, "post held-a"));
+        assert_eq!(fake.runs_ended.load(Ordering::SeqCst), 1);
+        fake.release();
+        sched.finish();
+    });
 }
