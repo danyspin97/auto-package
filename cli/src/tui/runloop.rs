@@ -53,11 +53,13 @@ pub(super) fn run(
 /// not reliable.
 ///
 /// Rows that are only what the sweep's check found are left out: nothing was
-/// queued for them. A run with no other rows is settled only once it has ended successfully:
-/// `RunFinished` is reported after the root work is released, so until then a
-/// `build` that has not shown its first row yet stays open, while an `update`
-/// with nothing to do closes at once. A failure before anything started stays
-/// on screen.
+/// queued for them. So are the rows the update preparation dropped (see
+/// `Event::PackageDropped`): nothing was built for them, so the run does not
+/// wait on them. A run with no other rows is settled only once it has ended
+/// successfully: `RunFinished` is reported after the root work is released, so
+/// until then a `build` that has not shown its first row yet stays open, while
+/// an `update` with nothing to do closes at once. A failure before anything
+/// started stays on screen.
 pub(super) fn run_is_done(state: &TuiState, work_left: usize) -> bool {
     if work_left != 0 {
         return false;
