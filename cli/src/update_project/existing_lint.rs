@@ -85,6 +85,18 @@ pub(super) fn origin_version(project: &str, pkg: &str, emit: Emit<'_>) -> Result
         })
 }
 
+/// Set `item` to `version`, the version its branch holds. An index address
+/// names the release it packages, so the origin's version in it is replaced
+/// too; otherwise the build would fetch the origin's archive. Git and PyPI
+/// sources name no version, so they are left as they are.
+pub(super) fn continue_at(item: &mut Item, version: String) {
+    if let Ecosystem::Index { url } = &mut item.ecosystem {
+        *url = url.replace(&item.old_version, &version);
+    }
+    item.old_version = version.clone();
+    item.new_version = version;
+}
+
 /// [`decide`] against OBS. An item continued from the branch is set to the
 /// branch's version, so the run improves that version and does not fetch the
 /// origin's. `None` when the package is left alone (listed as skipped).
@@ -110,8 +122,7 @@ pub(super) fn continue_from_branch(
                  not rebasing it onto its origin",
                 item.pkg, item.old_version, item.origin
             ));
-            item.old_version = version.clone();
-            item.new_version = version;
+            continue_at(item, version);
             Some(true)
         }
         Continuation::Skip(why) => {

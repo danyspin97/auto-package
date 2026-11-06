@@ -143,3 +143,37 @@ fn a_branch_that_is_continued_from_is_not_rebased() {
     );
     assert_eq!(calls.get(), 1);
 }
+
+#[test]
+fn a_branch_ahead_has_its_index_address_at_its_own_version() {
+    let mut it = item("25.3");
+    it.ecosystem = ap_build::update::Ecosystem::Index {
+        url: "https://sourceforge.net/projects/eric-ide/files/eric7/25.3/eric7-25.3.tar.gz".into(),
+    };
+    continue_at(&mut it, "26.11".into());
+    assert_eq!(
+        it.ecosystem,
+        ap_build::update::Ecosystem::Index {
+            url: "https://sourceforge.net/projects/eric-ide/files/eric7/26.11/eric7-26.11.tar.gz"
+                .into()
+        }
+    );
+    assert_eq!(it.old_version, "26.11");
+    assert_eq!(it.new_version, "26.11");
+}
+
+#[test]
+fn a_git_source_names_no_version_and_is_kept() {
+    let mut it = item("5.3");
+    continue_at(&mut it, "5.4".into());
+    assert_eq!(
+        it.ecosystem,
+        ap_build::update::Ecosystem::GitRepo {
+            url: "https://github.com/a/b".into()
+        }
+    );
+    assert_eq!(
+        (it.old_version.as_str(), it.new_version.as_str()),
+        ("5.4", "5.4")
+    );
+}
