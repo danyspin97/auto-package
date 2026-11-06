@@ -165,11 +165,10 @@ fn restore_stale_baseline(
             rpm_name: config.rpm_name.clone(),
             reason: format!(
                 "not started: the OBS baseline of an earlier failed attempt was NOT \
-                 restored ({why}); OBS keeps that attempt. The baseline is kept in {} \
-                 and is not deleted; fix the cause and run again, or, if OBS is right \
-                 as it is, discard the baseline with `{}`",
-                baseline.display(),
+                 restored ({why}). To take OBS as it is, run `{}`; otherwise fix the \
+                 cause and run again (the baseline in {} is kept)",
                 discard_hint(config),
+                baseline.display(),
             ),
             kind: FailureKind::Other,
         });
