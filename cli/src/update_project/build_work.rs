@@ -140,22 +140,6 @@ impl<'a, 'c> BuildWork<'a, 'c> {
             skipped(ctx, report, item, why);
             return;
         }
-        if outcome == ItemOutcome::Updated {
-            let _one_at_a_time = edits_branch_meta(a)
-                .then(|| self.arch_check.lock().unwrap_or_else(|p| p.into_inner()));
-            // The build is done by now: a check that panics is a warning, as a
-            // check that cannot run is.
-            let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                super::arch::check_item(a, branch, &item, ctx, report);
-            }));
-            if let Err(p) = checked {
-                ctx.warn(format!(
-                    "arch check of {} panicked: {}",
-                    item.pkg,
-                    panic_message(p.as_ref())
-                ));
-            }
-        }
         report.results.push(ItemResult {
             item,
             outcome,
@@ -226,6 +210,33 @@ impl Work for BuildWork<'_, '_> {
             outcome,
             sr: SrOutcome::NotRequested,
         });
+        report
+    }
+
+    /// The other-architecture check of each item the build updated. It waits
+    /// for OBS on the other arches, so it runs after the build's slot is free.
+    fn post(&self, mut report: Report) -> Report {
+        let updated: Vec<Item> = report
+            .results
+            .iter()
+            .filter(|r| r.outcome == ItemOutcome::Updated)
+            .map(|r| r.item.clone())
+            .collect();
+        for item in updated {
+            let _one_at_a_time = edits_branch_meta(self.a)
+                .then(|| self.arch_check.lock().unwrap_or_else(|p| p.into_inner()));
+            // A check that panics is a warning, as a check that cannot run is.
+            let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::arch::check_item(self.a, self.branch, &item, self.ctx, &mut report);
+            }));
+            if let Err(p) = checked {
+                self.ctx.warn(format!(
+                    "arch check of {} panicked: {}",
+                    item.pkg,
+                    panic_message(p.as_ref())
+                ));
+            }
+        }
         report
     }
 

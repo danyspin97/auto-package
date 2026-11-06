@@ -193,7 +193,9 @@ pub struct UpdateProjectArgs {
     /// Maximum number of packages to build concurrently (0 = unlimited). It
     /// bounds both the packages of the project in flight, each on its own
     /// thread, and the package builds they run, dependencies included. 1
-    /// builds one package at a time, in the order they are found.
+    /// builds one package at a time, in the order they are found. The
+    /// other-architecture wait of an updated package (`--arch-wait-minutes`)
+    /// does not hold one of these slots: up to 8 of those waits run at once.
     #[arg(long, default_value_t = ap_core::limits::DEFAULT_JOBS)]
     pub jobs: usize,
 
