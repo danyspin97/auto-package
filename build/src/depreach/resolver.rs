@@ -20,6 +20,9 @@ pub struct DepResolver {
     metas_fetch: Mutex<()>,
     /// Set for a maintenance run: no build path is added, and this says why.
     frozen_paths: Option<String>,
+    /// Set for an `--in-place` run, whose branch project is the source itself:
+    /// the source is not a branch, so its repositories keep their rebuild mode.
+    branch_is_source: bool,
     /// Capability searches made, by [`requirements::search_key`].
     pub(super) rpm_searches: Mutex<HashMap<String, Result<osc::RpmSearch, String>>>,
     /// `Provides:` of each RPM read, by [`requirements::provides_key`].
@@ -73,6 +76,7 @@ impl DepResolver {
             binaries_fetch: Mutex::new(()),
             metas_fetch: Mutex::new(()),
             frozen_paths: None,
+            branch_is_source: false,
             rpm_searches: Mutex::default(),
             provides: Mutex::default(),
             listings: Mutex::default(),
@@ -130,6 +134,14 @@ impl DepResolver {
     /// stream only.
     pub fn with_frozen_paths(mut self, reason: &str) -> Self {
         self.frozen_paths = Some(reason.to_string());
+        self
+    }
+
+    /// The same resolver for a branch project that is the source itself (an
+    /// `--in-place` run). Its meta is written as the source had it, without
+    /// `rebuild="local"`, which is for branch projects only.
+    pub fn for_in_place_source(mut self) -> Self {
+        self.branch_is_source = true;
         self
     }
 
@@ -345,6 +357,7 @@ impl DepResolver {
                 .collect();
             return Err(format!("{reason}; it would need {}", wanted.join(", ")));
         }
+        let edited = self.branch_meta_for_write(edited);
         self.obs.set_project_meta(&self.branch_project, &edited)?;
         for a in &made {
             self.say(format!(
@@ -353,6 +366,16 @@ impl DepResolver {
             ));
         }
         Ok(made)
+    }
+
+    /// The meta to write back to the branch project: a branch gets
+    /// `rebuild="local"` on its repositories (its packages build from their
+    /// own sources), a source is written as it is.
+    fn branch_meta_for_write(&self, edited: String) -> String {
+        if self.branch_is_source {
+            return edited;
+        }
+        osc::with_local_rebuild(&edited).unwrap_or(edited)
     }
 
     /// For a dependency the pipeline found missing: make it reachable, or say

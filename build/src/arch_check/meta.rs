@@ -2,7 +2,9 @@
 //! of the user's own branch project, under the project-meta lock.
 
 use super::{ArchAddition, ArchObs, Port, add_port_to_meta};
-use crate::osc::{ProjectInfo, lock_project_meta, parse_project_info, repository_elements};
+use crate::osc::{
+    ProjectInfo, lock_project_meta, parse_project_info, repository_elements, with_local_rebuild,
+};
 
 /// Refuse any project but a `home:` one. Only the branch project, which the
 /// user owns, may be written to by the arch check.
@@ -154,6 +156,7 @@ pub fn edit_branch_meta<O: ArchObs + ?Sized>(
         return Ok(made);
     }
     announce(&made);
+    let edited = with_local_rebuild(&edited).unwrap_or(edited);
     obs.set_project_meta(project, &edited)?;
     Ok(made)
 }

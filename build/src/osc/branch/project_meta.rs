@@ -327,3 +327,47 @@ pub fn add_paths_to_meta(
     }
     Ok((xml, made))
 }
+
+/// `xml` with `rebuild="local"` on every `<repository>`, or `None` when each
+/// already has it. A repository that names another `rebuild` mode gets `local`
+/// in place of it. Its other attributes, the other repositories and the
+/// order of the attributes are left as they are. `block` is not touched.
+pub fn with_local_rebuild(xml: &str) -> Option<String> {
+    let mut out = xml.to_string();
+    let mut changed = false;
+    // Back to front, so earlier offsets stay valid.
+    for r in repository_elements(xml).ok()?.into_iter().rev() {
+        let tag = &out[r.start..r.open_end];
+        match crate::obs_xml::attr(tag, "rebuild").as_deref() {
+            Some("local") => continue,
+            Some(_) => {
+                let at = r.start + tag.find("rebuild=")? + "rebuild=".len();
+                let quote = out[at..].chars().next()?;
+                let value = at + 1;
+                let end = value + out[value..].find(quote)?;
+                out.replace_range(value..end, "local");
+            }
+            None => {
+                let gt = r.start + tag.rfind('>')?;
+                let at = if out[..gt].ends_with('/') { gt - 1 } else { gt };
+                let trimmed = out[..at].trim_end().len();
+                out.insert_str(trimmed, " rebuild=\"local\"");
+            }
+        }
+        changed = true;
+    }
+    changed.then_some(out)
+}
+
+/// Make the repositories of `project` rebuild only for their own sources (see
+/// [`with_local_rebuild`]). A project with nothing to change is not written.
+pub fn rebuild_locally(project: &str, emit: Emit<'_>) -> Result<(), Error> {
+    let _meta = lock_project_meta();
+    let Some(xml) = get_project_meta(project, emit)? else {
+        return Ok(());
+    };
+    match with_local_rebuild(&xml) {
+        Some(edited) => set_project_meta(project, &edited, emit),
+        None => Ok(()),
+    }
+}

@@ -313,6 +313,7 @@ pub fn branch_package_at(
         // Best effort: a branch that keeps OBS's default blocking only builds
         // slower, and the build wait reports what it is blocked on.
         let _ = block_locally(target_project, emit);
+        let _ = rebuild_locally(target_project, emit);
     }
     if out.success() {
         return Ok(BranchResult::Branched(parse_branch_response(

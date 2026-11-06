@@ -533,3 +533,38 @@ fn the_project_meta_lock_is_exclusive_while_held() {
     drop(guard);
     assert!(project_meta_lock_is_free());
 }
+
+#[test]
+fn repositories_without_a_rebuild_get_a_local_one() {
+    let xml = "<project>\n  <repository name=\"a\" block=\"local\">\n    <arch>x86_64</arch>\n  </repository>\n  \
+                   <repository name=\"b\" block=\"all\"/>\n  <repository name=\"c\" />\n</project>";
+    let edited = with_local_rebuild(xml).unwrap();
+    assert!(edited.contains("<repository name=\"a\" block=\"local\" rebuild=\"local\">"));
+    assert!(edited.contains("<repository name=\"b\" block=\"all\" rebuild=\"local\"/>"));
+    assert!(edited.contains("<repository name=\"c\" rebuild=\"local\" />"));
+    assert_eq!(
+        with_local_rebuild(&edited),
+        None,
+        "a second run changes nothing"
+    );
+}
+
+#[test]
+fn a_rebuild_mode_other_than_local_is_replaced_in_place() {
+    let xml = "<project><repository name=\"a\" rebuild=\"transitive\" block=\"local\">\
+               <arch>x86_64</arch></repository>\
+               <repository name=\"b\" rebuild='local'/></project>";
+    let edited = with_local_rebuild(xml).unwrap();
+    assert_eq!(
+        edited,
+        "<project><repository name=\"a\" rebuild=\"local\" block=\"local\">\
+         <arch>x86_64</arch></repository>\
+         <repository name=\"b\" rebuild='local'/></project>"
+    );
+}
+
+#[test]
+fn a_meta_already_local_is_not_changed() {
+    let xml = "<project>\n  <repository name=\"a\" rebuild=\"local\">\n    <arch>x86_64</arch>\n  </repository>\n</project>";
+    assert_eq!(with_local_rebuild(xml), None);
+}

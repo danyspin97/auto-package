@@ -311,6 +311,28 @@ fn adding_the_chosen_paths_edits_the_meta_once_and_is_idempotent() {
 }
 
 #[test]
+fn an_added_path_makes_a_branch_rebuild_locally_but_not_an_in_place_source() {
+    let (r, fake) = resolver();
+    let adds = choose_paths(&r.check(&[pkg("libfoo-devel")]).unwrap());
+    r.add_paths(&adds).unwrap();
+    let branch = fake.metas.lock().unwrap()[BRANCH].clone();
+    let repos = osc::repository_elements(&branch).unwrap().len();
+    assert_eq!(
+        branch.matches("rebuild=\"local\"").count(),
+        repos,
+        "{branch}"
+    );
+
+    let (r, fake) = resolver();
+    let r = r.for_in_place_source();
+    let adds = choose_paths(&r.check(&[pkg("libfoo-devel")]).unwrap());
+    assert_eq!(r.add_paths(&adds).unwrap().len(), 2);
+    let source = fake.metas.lock().unwrap()[BRANCH].clone();
+    assert!(!source.contains("rebuild="), "{source}");
+    assert!(source.contains("devel:languages:c_c++"), "{source}");
+}
+
+#[test]
 fn a_frozen_resolver_refuses_a_new_path_and_leaves_the_meta_alone() {
     let (r, fake) = resolver();
     let r = r.with_frozen_paths("a maintenance run adds no build paths");

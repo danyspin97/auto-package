@@ -54,6 +54,12 @@ pub(super) fn cmd_update_project(
         } else {
             resolver_for(Box::new(live))
         };
+        // An in-place run's branch is its source, which keeps its own rebuild modes.
+        let resolver = if a.in_place {
+            resolver.for_in_place_source()
+        } else {
+            resolver
+        };
         // A maintenance incident builds against the code stream only: its
         // branch gets no build path that the incident would not have.
         if a.maintenance_source {
