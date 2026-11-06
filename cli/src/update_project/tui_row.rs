@@ -68,10 +68,22 @@ pub(super) fn close_dropped(
 ) {
     for r in results.iter().skip(*seen) {
         if let Some(row) = row_name(&r.item).filter(|row| queued.remove(row)) {
-            close_row(ctx, &row, &r.item, &r.outcome);
+            drop_row(ctx, &row, &r.item, &r.outcome);
         }
     }
     *seen = results.len();
+}
+
+/// Close `row` in the TUI as dropped by the preparation: nothing was built for
+/// it, so the run does not wait for it (see `Event::PackageDropped`).
+fn drop_row(ctx: &Ctx<'_>, row: &str, item: &Item, outcome: &ItemOutcome) {
+    if let Some(r) = tui_only(ctx) {
+        r.report(&Event::PackageDropped {
+            pkg: row.to_string(),
+            version: item.new_version.clone(),
+            outcome: package_outcome(outcome),
+        });
+    }
 }
 
 /// Close `row` in the TUI with what its item ended with.
