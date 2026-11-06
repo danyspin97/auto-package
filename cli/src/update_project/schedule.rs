@@ -127,6 +127,11 @@ where
         }
     }
 
+    /// What runs the jobs.
+    pub(super) fn work(&self) -> &'env W {
+        self.work
+    }
+
     /// Hand over `batch`. `anchor` is where its outputs go among the caller's
     /// own (see [`interleave`]).
     pub(super) fn submit(&mut self, batch: Vec<W::Job>, anchor: usize) {

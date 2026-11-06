@@ -1,6 +1,7 @@
 //! The build of each prepared item, run by the scheduler on its own thread.
 
 use super::schedule::{Scheduler, Work, interleave};
+use super::throttle::Throttle;
 use super::tui_row::{FinishWatch, close_row, queue_row, row_name};
 use super::*;
 use crate::build_cmd::panic_message;
@@ -49,6 +50,8 @@ pub(super) struct BuildWork<'a, 'c> {
     /// project's meta: two such writes at once would both rewrite it. The
     /// waits of the checks are not held (see `CheckRequest::meta_lock`).
     arch_check: Mutex<()>,
+    /// How far the preparation may branch ahead of the builds.
+    pub(super) throttle: &'a Throttle,
 }
 
 impl<'a, 'c> BuildWork<'a, 'c> {
@@ -57,6 +60,7 @@ impl<'a, 'c> BuildWork<'a, 'c> {
         branch: &'a str,
         resolver: &'a Arc<DepResolver>,
         ctx: &'a Ctx<'c>,
+        throttle: &'a Throttle,
     ) -> Self {
         BuildWork {
             a,
@@ -64,6 +68,7 @@ impl<'a, 'c> BuildWork<'a, 'c> {
             resolver,
             ctx,
             arch_check: Mutex::new(()),
+            throttle,
         }
     }
 
@@ -251,17 +256,23 @@ impl Work for BuildWork<'_, '_> {
     fn stopping(&self) -> bool {
         ap_build::proc::shutting_down()
     }
+
+    fn run_ended(&self) {
+        self.throttle.run_ended();
+    }
 }
 
 /// Hand the prepared items over to be built, the dependencies before what
 /// needs them. Their results go where the items stand among the results
-/// reported so far.
+/// reported so far. The throttle counts them from now until their runs end,
+/// and the next unit starts from nothing, also when this one has no items.
 pub(super) fn hand_over(
     ready: &mut Vec<Job>,
     mechanical: &HashSet<String>,
     builds: &mut Builds<'_, '_, '_, '_>,
     report: &Report,
 ) {
+    builds.work().throttle.handed_over(ready.len());
     if ready.is_empty() {
         return;
     }

@@ -84,4 +84,5 @@ use maintenance::*;
 use request::*;
 use schedule::Scheduler;
 use submit::*;
+use throttle::Throttle;
 use tidy::*;

@@ -71,8 +71,10 @@ pub(super) fn cmd_update_project(
     let resolver = Arc::new(resolver);
 
     // Each package is built on its own thread as soon as it is prepared, at
-    // most `--jobs` at a time; the run goes on preparing the next meanwhile.
-    let work = BuildWork::new(a, branch, &resolver, ctx);
+    // most `--jobs` at a time; the run goes on preparing the next meanwhile,
+    // and branches it only while the throttle has room.
+    let throttle = Throttle::new(a.jobs, ap_build::proc::shutting_down);
+    let work = BuildWork::new(a, branch, &resolver, ctx, &throttle);
     let mut built = Vec::new();
     let prepared = std::thread::scope(|s| {
         let mut builds = Scheduler::new(s, &work, a.jobs);
@@ -298,6 +300,18 @@ fn prepare(
             continue;
         }
         if !a.dry_run {
+            // Branching queues a build in the branch project: it waits until
+            // fewer than `2 x jobs` items are handed over and not built.
+            if !builds.work().throttle.admit() {
+                let why = "interrupted before it was branched".to_string();
+                ctx.warn(format!("{}: {why}", item.pkg));
+                report.results.push(ItemResult {
+                    item,
+                    outcome: ItemOutcome::Failed(why),
+                    sr: SrOutcome::NotRequested,
+                });
+                continue;
+            }
             match branch_item(
                 branch,
                 &mut item,
@@ -318,6 +332,7 @@ fn prepare(
                     visited.insert(visit_key(&item));
                 }
                 Err(why) => {
+                    builds.work().throttle.dropped();
                     ctx.warn(format!("{}: {why}", item.pkg));
                     report.results.push(ItemResult {
                         item,
@@ -332,6 +347,7 @@ fn prepare(
                 match osc::project_has_repositories(branch, emit) {
                     Ok(true) => branch_checked = true,
                     Ok(false) => {
+                        builds.work().throttle.dropped();
                         let why = format!(
                             "branch project {branch} has no build repositories; configure one \
                              in its meta before building"
@@ -345,6 +361,7 @@ fn prepare(
                         continue;
                     }
                     Err(e) => {
+                        builds.work().throttle.dropped();
                         let why = format!("could not read the meta of {branch}: {e}");
                         ctx.warn(format!("{}: {why}", item.pkg));
                         report.results.push(ItemResult {
