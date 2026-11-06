@@ -31,18 +31,19 @@ pub(super) enum PkgStatus {
 }
 
 impl PkgStatus {
+    /// The status as a word, the same for every row in it. The status cell
+    /// adds the tries to a running one (see `PkgState::status_cell`).
     pub(super) fn label(&self) -> &'static str {
         match self {
             PkgStatus::Queued => "queued",
-            PkgStatus::Running => "running",
-            PkgStatus::Between => "working",
-            PkgStatus::Retrying => "retrying",
+            PkgStatus::Running | PkgStatus::Between => "running",
+            PkgStatus::Retrying => "running (retrying)",
             PkgStatus::Succeeded => "done",
-            PkgStatus::BuiltLocally => "built locally",
-            PkgStatus::AlreadyBuilt => "cached",
-            PkgStatus::MissingDeps => "blocked",
+            PkgStatus::BuiltLocally => "done (local)",
+            PkgStatus::AlreadyBuilt => "done (cached)",
+            PkgStatus::MissingDeps => "waiting-upstream",
             PkgStatus::Failed => "failed",
-            PkgStatus::NoSpace => "no space",
+            PkgStatus::NoSpace => "failed (no space)",
             PkgStatus::Skipped => "skipped",
         }
     }

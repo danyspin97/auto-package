@@ -204,6 +204,7 @@ impl TuiState {
                 state.advance(Input::Selected);
                 state.step = None;
                 state.fail_reason = None;
+                state.skip_reason = None;
                 state.skipped.clear();
                 // A fresh attempt — the condition that caused last time's
                 // `NoSpace` may already be gone (that's the whole point of
@@ -255,11 +256,15 @@ impl TuiState {
                         }
                         state.fail_reason = Some(reason.clone());
                     }
+                    PackageOutcome::Skipped { reason } => {
+                        state.step = None;
+                        state.fail_reason = None;
+                        state.skip_reason = Some(reason.clone());
+                    }
                     PackageOutcome::Built
                     | PackageOutcome::BuiltLocally
                     | PackageOutcome::AlreadyBuilt
-                    | PackageOutcome::MissingDeps { .. }
-                    | PackageOutcome::Skipped { .. } => {
+                    | PackageOutcome::MissingDeps { .. } => {
                         state.step = None;
                         state.fail_reason = None;
                     }

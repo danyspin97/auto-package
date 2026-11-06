@@ -94,6 +94,8 @@ pub(super) struct PkgState {
     pub(super) step: Option<StepInfo>,
     /// Reason from `PackageOutcome::Failed`, shown in the detail pane.
     pub(super) fail_reason: Option<String>,
+    /// Reason from `PackageOutcome::Skipped`, shown in the Step column.
+    pub(super) skip_reason: Option<String>,
     /// Conditional steps that did not run, in the order they were skipped.
     pub(super) skipped: Vec<(StepKind, SkipReason)>,
     pub(super) log_lines: VecDeque<LogLine>,
@@ -174,16 +176,18 @@ impl PkgState {
             .map_or_else(|| "-".to_string(), fmt_dur)
     }
 
-    /// The status cell's text: the status, or for a built package that fails
-    /// on another arch `built ⚠`. The names of the failing arches are in the
-    /// package's log, the column has no room for them.
+    /// The status cell's text: the status, with the try for a running
+    /// package once the pipeline has counted one (`running (try 2/3)`,
+    /// `running (try 2/3, retrying)` after a failed step), and `done ⚠` for
+    /// a built package that fails on another arch. The names of the failing
+    /// arches are in the package's log, the column has no room for them.
     pub(super) fn status_cell(&self) -> String {
-        match (
-            self.status == PkgStatus::Succeeded,
-            self.arch_fails.is_empty(),
-        ) {
-            (true, false) => "built ⚠".to_string(),
-            _ => self.status.label().to_string(),
+        let try_n = (self.max_tries > 0).then(|| format!("try {}/{}", self.tries, self.max_tries));
+        match (&self.status, try_n) {
+            (PkgStatus::Retrying, Some(t)) => format!("running ({t}, retrying)"),
+            (PkgStatus::Running | PkgStatus::Between, Some(t)) => format!("running ({t})"),
+            (PkgStatus::Succeeded, _) if !self.arch_fails.is_empty() => "done ⚠".to_string(),
+            (status, _) => status.label().to_string(),
         }
     }
 
@@ -194,6 +198,7 @@ impl PkgState {
             status: PkgStatus::Queued,
             step: None,
             fail_reason: None,
+            skip_reason: None,
             skipped: Vec::new(),
             log_lines: VecDeque::new(),
             log_seq: 0,
@@ -250,8 +255,12 @@ impl PkgState {
     }
 
     /// The Step column text: what the last step is doing or did, with its
-    /// time — live while running, frozen once finished.
+    /// time — live while running, frozen once finished. A skipped package
+    /// shows why it was skipped instead.
     pub(super) fn step_text(&self) -> String {
+        if let (PkgStatus::Skipped, Some(reason)) = (&self.status, &self.skip_reason) {
+            return reason.clone();
+        }
         let Some(step) = &self.step else {
             return "-".to_string();
         };

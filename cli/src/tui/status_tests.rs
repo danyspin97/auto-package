@@ -169,3 +169,51 @@ fn each_status_counts_in_one_header_group() {
         }
     );
 }
+
+#[test]
+fn a_running_row_says_its_try_once_the_pipeline_counts_one() {
+    let mut pkg = PkgState::new("1".into());
+    pkg.advance(Input::StepStarted { notes: false });
+    assert_eq!(pkg.status_cell(), "running");
+    (pkg.tries, pkg.max_tries) = (2, 3);
+    assert_eq!(pkg.status_cell(), "running (try 2/3)");
+    pkg.advance(Input::StepFinished {
+        notes: false,
+        failed: true,
+    });
+    assert_eq!(pkg.status_cell(), "running (try 2/3, retrying)");
+    pkg.advance(Input::Finished {
+        outcome: &failed(false),
+        disk_full: false,
+    });
+    assert_eq!(pkg.status_cell(), "failed");
+}
+
+#[test]
+fn a_parked_row_waits_upstream_and_a_skipped_one_says_why() {
+    let mut state = TuiState::new(RunScope::default());
+    let finish = |pkg: &str, outcome| Msg {
+        pkg: None,
+        event: Event::PackageFinished {
+            pkg: pkg.to_string(),
+            version: "1".to_string(),
+            outcome,
+        },
+    };
+    state.apply(finish(
+        "parked",
+        PackageOutcome::MissingDeps {
+            deps: vec!["x".into()],
+        },
+    ));
+    assert_eq!(state.packages["parked"].status_cell(), "waiting-upstream");
+    state.apply(finish(
+        "skipped",
+        PackageOutcome::Skipped {
+            reason: "excluded on x86_64".into(),
+        },
+    ));
+    let skipped = &state.packages["skipped"];
+    assert_eq!(skipped.status_cell(), "skipped");
+    assert_eq!(skipped.step_text(), "excluded on x86_64");
+}

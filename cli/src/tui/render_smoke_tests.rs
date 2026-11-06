@@ -195,7 +195,12 @@ fn stacked_heights_always_fill_the_terminal() {
 
 #[test]
 fn the_table_keeps_the_most_important_columns_when_narrow() {
-    assert_eq!(visible_columns(90), vec![0, 1, 2, 3, 4, 5, 6]);
+    // From 91 columns every column fits with the full status.
+    assert_eq!(visible_columns(91), vec![0, 1, 2, 3, 4, 5]);
+    assert_eq!(column_width(0, 91), Some(29));
+    // Narrower, the status is cut down so no column is lost for it.
+    assert_eq!(visible_columns(90), vec![0, 1, 2, 3, 4, 5]);
+    assert_eq!(column_width(0, 90), Some(12));
     assert_eq!(visible_columns(60), vec![0, 1, 2, 3]);
     assert_eq!(visible_columns(40), vec![0, 1, 3]);
     // The package name is always there, even when nothing else fits.

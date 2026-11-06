@@ -78,21 +78,36 @@ pub(super) fn summary_counters(state: &TuiState) -> Vec<String> {
 }
 
 /// Package table columns as (header, fixed width), in display order. A `None`
-/// width is a flexible column that takes whatever the others leave.
-pub(super) const TABLE_COLUMNS: [(&str, Option<u16>); 7] = [
-    ("Status", Some(11)),
+/// width is a flexible column that takes whatever the others leave. The status
+/// is wide enough for `running (try 2/3, retrying)` behind its glyph; it says
+/// the tries, so there is no column of its own for them.
+pub(super) const TABLE_COLUMNS: [(&str, Option<u16>); 6] = [
+    ("Status", Some(29)),
     ("Package", None),
     ("Version", Some(15)),
     ("Step", None),
-    ("Tries", Some(7)),
     ("Time", Some(7)),
     ("Cost", Some(9)),
 ];
 /// Column indices by importance, most important first. On a narrow terminal
 /// the last ones are dropped first.
-const TABLE_PRIORITY: [usize; 7] = [1, 0, 3, 2, 5, 4, 6];
+const TABLE_PRIORITY: [usize; 6] = [1, 0, 3, 2, 4, 5];
 /// Least width a flexible column needs before it is worth showing.
 const FLEX_MIN_WIDTH: u16 = 12;
+/// The status column of a table too narrow for every column at the status's
+/// full width: the cell is cut with an ellipsis, which keeps its glyph.
+const NARROW_STATUS_WIDTH: u16 = 12;
+
+/// Width of column `i` in a table `table_width` wide: the status column is
+/// narrowed when the full one would cost the table a column.
+pub(super) fn column_width(i: usize, table_width: u16) -> Option<u16> {
+    let full = TABLE_COLUMNS[i].1;
+    if i == 0 && table_width < table_needs(&[0, 1, 2, 3, 4, 5], None) {
+        Some(NARROW_STATUS_WIDTH)
+    } else {
+        full
+    }
+}
 
 /// Indices into `TABLE_COLUMNS` of the columns a table `width` wide shows, in
 /// display order. Columns are added in priority order while they still fit,
@@ -103,19 +118,24 @@ pub(super) fn visible_columns(width: u16) -> Vec<usize> {
         let mut trial = kept.clone();
         trial.push(col);
         trial.sort_unstable();
-        if kept.is_empty() || table_needs(&trial) <= width {
+        if kept.is_empty() || table_needs(&trial, Some(width)) <= width {
             kept = trial;
         }
     }
     kept
 }
 
-/// Width a table showing `columns` needs: each fixed column's width, a
-/// minimum for each flexible one, a space between columns and the borders.
-fn table_needs(columns: &[usize]) -> u16 {
+/// Width a table showing `columns` needs: each fixed column's width (as in a
+/// table `table_width` wide, or at full width), a minimum for each flexible
+/// one, a space between columns and the borders.
+fn table_needs(columns: &[usize], table_width: Option<u16>) -> u16 {
     let spaces = u16::try_from(columns.len().saturating_sub(1)).unwrap_or(u16::MAX);
     columns.iter().fold(spaces.saturating_add(2), |need, &i| {
-        need.saturating_add(TABLE_COLUMNS[i].1.unwrap_or(FLEX_MIN_WIDTH))
+        let width = match table_width {
+            Some(w) => column_width(i, w),
+            None => TABLE_COLUMNS[i].1,
+        };
+        need.saturating_add(width.unwrap_or(FLEX_MIN_WIDTH))
     })
 }
 
@@ -128,6 +148,7 @@ pub(super) fn render_table(
     focused: bool,
 ) {
     let columns = visible_columns(area.width);
+    let status_width = column_width(0, area.width).unwrap_or(0) as usize;
     let spin = state
         .run_start
         .map_or(0, |s| s.elapsed().as_millis() as u64 / 250);
@@ -139,14 +160,12 @@ pub(super) fn render_table(
                 Some(mark) => Cell::from(Line::from(mark.span())),
                 None => Cell::from(pkg.step_text()),
             };
-            let tries = if pkg.max_tries > 0 {
-                format!("{}/{}", pkg.tries, pkg.max_tries)
-            } else {
-                "-".to_string()
-            };
             let cells = [
-                Cell::from(format!("{} {}", pkg.status.glyph(spin), pkg.status_cell()))
-                    .style(Style::default().fg(pkg.status.color())),
+                Cell::from(truncate_with_ellipsis(
+                    &format!("{} {}", pkg.status.glyph(spin), pkg.status_cell()),
+                    status_width,
+                ))
+                .style(Style::default().fg(pkg.status.color())),
                 Cell::from(name.as_str()).style(
                     if matches!(pkg.status, PkgStatus::Queued | PkgStatus::AlreadyBuilt) {
                         Style::default().fg(Color::DarkGray)
@@ -156,7 +175,6 @@ pub(super) fn render_table(
                 ),
                 Cell::from(pkg.version_label()).style(Style::default().fg(Color::Gray)),
                 step_cell,
-                Cell::from(tries),
                 Cell::from(pkg.time_cell()),
                 Cell::from(format!("${:.2}", pkg.cost_usd)),
             ];
@@ -169,7 +187,7 @@ pub(super) fn render_table(
         })
         .collect();
 
-    let widths = columns.iter().map(|&i| match TABLE_COLUMNS[i].1 {
+    let widths = columns.iter().map(|&i| match column_width(i, area.width) {
         Some(width) => Constraint::Length(width),
         None => Constraint::Fill(1),
     });
