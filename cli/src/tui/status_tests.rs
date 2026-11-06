@@ -1,10 +1,11 @@
 use super::*;
 
 /// Every status a row can be in.
-const ALL: [PkgStatus; 10] = [
+const ALL: [PkgStatus; 11] = [
     PkgStatus::Queued,
     PkgStatus::Running,
     PkgStatus::Between,
+    PkgStatus::Retrying,
     PkgStatus::Succeeded,
     PkgStatus::BuiltLocally,
     PkgStatus::AlreadyBuilt,
@@ -50,9 +51,30 @@ fn a_step_runs_the_package_from_any_status() {
 #[test]
 fn a_finished_step_leaves_the_package_between_steps() {
     for from in ALL {
-        let to = from.next(Input::StepFinished { notes: false });
+        let to = from.next(Input::StepFinished {
+            notes: false,
+            failed: false,
+        });
         assert!(to == PkgStatus::Between, "{}", from.label());
     }
+}
+
+#[test]
+fn a_failed_step_is_a_retry_not_a_failed_package() {
+    for from in ALL {
+        let to = from.next(Input::StepFinished {
+            notes: false,
+            failed: true,
+        });
+        assert!(to == PkgStatus::Retrying, "{}", from.label());
+    }
+    // The package fails only once its build reports so.
+    let outcome = failed(false);
+    let to = PkgStatus::Retrying.next(Input::Finished {
+        outcome: &outcome,
+        disk_full: false,
+    });
+    assert!(to == PkgStatus::Failed);
 }
 
 #[test]
@@ -60,7 +82,14 @@ fn the_notes_turn_keeps_the_package_done() {
     for from in ALL {
         for input in [
             Input::StepStarted { notes: true },
-            Input::StepFinished { notes: true },
+            Input::StepFinished {
+                notes: true,
+                failed: false,
+            },
+            Input::StepFinished {
+                notes: true,
+                failed: true,
+            },
         ] {
             assert!(from.next(input) == PkgStatus::Succeeded, "{}", from.label());
         }
@@ -96,7 +125,10 @@ fn a_failure_is_out_of_space_when_the_outcome_or_an_earlier_step_says_so() {
 #[test]
 fn only_a_package_being_worked_on_runs_its_clock() {
     for from in ALL {
-        let runs = matches!(from, PkgStatus::Running | PkgStatus::Between);
+        let runs = matches!(
+            from,
+            PkgStatus::Running | PkgStatus::Between | PkgStatus::Retrying
+        );
         assert_eq!(from.timer_runs(), runs, "{}", from.label());
     }
 }

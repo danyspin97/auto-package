@@ -77,7 +77,10 @@ impl TuiState {
                 if notes {
                     state.step = None;
                 }
-                state.advance(Input::StepFinished { notes });
+                state.advance(Input::StepFinished {
+                    notes,
+                    failed: matches!(outcome, StepOutcome::Failed),
+                });
             }
             Event::BuildFailed { classification, .. } => {
                 state.add_log(LogLevel::Error, format!("Build failed: {classification:?}"));

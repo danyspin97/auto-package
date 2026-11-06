@@ -261,14 +261,14 @@ impl PkgState {
             step.kind.label().to_string()
         };
         match (&self.status, &step.done) {
-            (PkgStatus::Running, _) | (PkgStatus::Between, None) => {
+            (PkgStatus::Running, _) | (PkgStatus::Between | PkgStatus::Retrying, None) => {
                 format!("{label} {}", fmt_dur(step.started.elapsed()))
             }
             (PkgStatus::Failed | PkgStatus::NoSpace, done) => {
                 let elapsed = done.as_ref().map_or(step.started.elapsed(), |d| d.1);
                 format!("✗ {label} {}", fmt_dur(elapsed))
             }
-            (PkgStatus::Between, Some((outcome, elapsed))) => {
+            (PkgStatus::Between | PkgStatus::Retrying, Some((outcome, elapsed))) => {
                 let marker = match outcome {
                     StepOutcome::Ok => "✓",
                     // The package is not finished: the pipeline is still on

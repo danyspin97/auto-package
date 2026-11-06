@@ -17,6 +17,9 @@ pub(super) enum PkgStatus {
     /// Live, but no step is executing right now: the last step has finished
     /// and the agent turn (or `PackageFinished`) has not yet come in.
     Between,
+    /// Live, after a step that failed: the pipeline goes on to its next try,
+    /// so the failure is not the package's end (that is `PackageFinished`).
+    Retrying,
     /// `Failed` whose build log signature matched [`looks_like_disk_full`] —
     /// split out from plain `Failed` so it's visually distinct in the table
     /// (nothing about the spec is wrong; there's nothing to fix but disk
@@ -33,6 +36,7 @@ impl PkgStatus {
             PkgStatus::Queued => "queued",
             PkgStatus::Running => "running",
             PkgStatus::Between => "working",
+            PkgStatus::Retrying => "retrying",
             PkgStatus::Succeeded => "done",
             PkgStatus::BuiltLocally => "built locally",
             PkgStatus::AlreadyBuilt => "cached",
@@ -51,6 +55,7 @@ impl PkgStatus {
             PkgStatus::Queued => "○",
             PkgStatus::Running => ["◐", "◓", "◑", "◒"][(tick % 4) as usize],
             PkgStatus::Between => "◌",
+            PkgStatus::Retrying => "↻",
             PkgStatus::Succeeded | PkgStatus::BuiltLocally => "✓",
             PkgStatus::AlreadyBuilt => "✔",
             PkgStatus::MissingDeps => "◇",
@@ -62,7 +67,7 @@ impl PkgStatus {
     pub(super) fn color(&self) -> Color {
         match self {
             PkgStatus::Queued => Color::DarkGray,
-            PkgStatus::Running | PkgStatus::Between => Color::Yellow,
+            PkgStatus::Running | PkgStatus::Between | PkgStatus::Retrying => Color::Yellow,
             PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt => {
                 Color::Green
             }
@@ -82,8 +87,8 @@ pub(super) enum Input<'a> {
     /// `StepStarted`. `notes` for the notes turn, which only runs once the
     /// package has built.
     StepStarted { notes: bool },
-    /// `StepFinished` of the step the package is on.
-    StepFinished { notes: bool },
+    /// `StepFinished` of the step the package is on; `failed` when it failed.
+    StepFinished { notes: bool, failed: bool },
     /// `PackageFinished`. `disk_full` when an earlier step of this attempt
     /// already saw the disk run out (see `PkgState::disk_full_detected`).
     Finished {
@@ -95,7 +100,10 @@ pub(super) enum Input<'a> {
 impl PkgStatus {
     /// Whether the package's time runs: only while it is worked on.
     pub(super) fn timer_runs(&self) -> bool {
-        matches!(self, PkgStatus::Running | PkgStatus::Between)
+        matches!(
+            self,
+            PkgStatus::Running | PkgStatus::Between | PkgStatus::Retrying
+        )
     }
 
     /// The status after `input`. This is the only place a row's status is
@@ -105,11 +113,20 @@ impl PkgStatus {
             Input::Selected => PkgStatus::Queued,
             // The notes turn only runs after a successful build, so the
             // package is already done; showing it as running would hide that.
-            Input::StepStarted { notes: true } | Input::StepFinished { notes: true } => {
+            Input::StepStarted { notes: true } | Input::StepFinished { notes: true, .. } => {
                 PkgStatus::Succeeded
             }
             Input::StepStarted { notes: false } => PkgStatus::Running,
-            Input::StepFinished { notes: false } => PkgStatus::Between,
+            // Only `PackageFinished` fails a package: a failed step is one
+            // try, and the pipeline decides whether another follows.
+            Input::StepFinished {
+                notes: false,
+                failed: true,
+            } => PkgStatus::Retrying,
+            Input::StepFinished {
+                notes: false,
+                failed: false,
+            } => PkgStatus::Between,
             Input::Finished { outcome, disk_full } => match outcome {
                 PackageOutcome::Built => PkgStatus::Succeeded,
                 PackageOutcome::BuiltLocally => PkgStatus::BuiltLocally,
