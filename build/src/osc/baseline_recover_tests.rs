@@ -268,10 +268,15 @@ fn a_restore_that_landed_before_a_crash_is_not_refused_again() {
         Ok(())
     })
     .unwrap();
-    record_restore(base.path(), co.path(), || {
-        write_rev(co.path(), "ccc");
-        Ok(())
-    })
+    record_restore(
+        base.path(),
+        co.path(),
+        || {
+            write_rev(co.path(), "ccc");
+            Ok(())
+        },
+        || Err("no OBS".to_string()),
+    )
     .unwrap();
     assert_eq!(restored_revisions(base.path()), vec!["ccc".to_string()]);
     let commits = RefCell::new(Vec::new());
@@ -293,9 +298,12 @@ fn a_restore_cut_short_before_its_commit_is_made_again() {
         Ok(())
     })
     .unwrap();
-    let _ = record_restore(base.path(), co.path(), || {
-        Err(Error::NotActionable("killed".into()))
-    });
+    let _ = record_restore(
+        base.path(),
+        co.path(),
+        || Err(Error::NotActionable("killed".into())),
+        || Err("no OBS".to_string()),
+    );
     assert!(restored_revisions(base.path()).is_empty());
     let commits = RefCell::new(Vec::new());
     assert_eq!(

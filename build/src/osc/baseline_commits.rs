@@ -143,13 +143,69 @@ fn append_landed(dir: &Path, checkout: &Path, log: &str, before: &str) -> bool {
 /// run refuses it (equality is not ownership) and the baseline is discarded by
 /// hand, with the command the refusal names. A second restore commit is not made
 /// over a revision of unknown origin.
+///
+/// A commit osc reports as failed may still have landed: osc can fail after
+/// the server took the commit (see [`restore_landed_despite_error`]). Then
+/// `obs_xml` reads OBS's listing of the package, and the restore is recorded as
+/// landed. Any other failure is returned as it was.
 pub fn record_restore(
     dir: &Path,
     checkout: &Path,
     commit: impl FnOnce() -> Result<(), Error>,
+    obs_xml: impl FnOnce() -> Result<String, String>,
 ) -> Result<(), Error> {
     let before = checkout_revision(checkout).unwrap_or_default();
-    commit()?;
-    append_landed(dir, checkout, RESTORED, &before);
-    Ok(())
+    match commit() {
+        Ok(()) => {
+            append_landed(dir, checkout, RESTORED, &before);
+            Ok(())
+        }
+        Err(e) => {
+            let Ok(xml) = obs_xml() else {
+                return Err(e);
+            };
+            if !restore_landed_despite_error(dir, checkout, &before, &xml) {
+                return Err(e);
+            }
+            ap_core::diag!(
+                "  the restore's commit to {} reported an error, but OBS holds the restored state: recorded as landed",
+                checkout.display()
+            );
+            append_landed(dir, checkout, RESTORED, &before);
+            Ok(())
+        }
+    }
+}
+
+/// Whether a restore whose commit osc reported as failed landed anyway, read
+/// from OBS's listing `obs_xml` of the package (see [`landed_despite_error`]).
+fn restore_landed_despite_error(dir: &Path, checkout: &Path, before: &str, obs_xml: &str) -> bool {
+    if has_service(checkout) {
+        return false;
+    }
+    let Some(head) = expanded_revision(obs_xml) else {
+        return false;
+    };
+    landed_despite_error(
+        before,
+        checkout_revision(checkout).as_deref(),
+        &head,
+        &recorded_listing(dir),
+        &listing_md5s(obs_xml),
+    )
+}
+
+/// Whether a restore whose commit failed landed: OBS's head `head` is a revision
+/// newer than the one the checkout held before the commit (`before`), the
+/// checkout records that same revision (`after`, osc's record of the commit),
+/// and OBS's listing `obs` is the listing the baseline recorded (`recorded`,
+/// the state the restore puts back). Both listings are sorted by name.
+pub fn landed_despite_error(
+    before: &str,
+    after: Option<&str>,
+    head: &str,
+    recorded: &[(String, String)],
+    obs: &[(String, String)],
+) -> bool {
+    head != before && after == Some(head) && !recorded.is_empty() && recorded == obs
 }

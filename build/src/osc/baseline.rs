@@ -389,8 +389,16 @@ fn obs_listing_matches(dir: &Path, expected: &Path, obs_xml: &str) -> bool {
     if Path::new(&saved_from) != expected {
         return false;
     }
+    let recorded = recorded_listing(dir);
+    // An empty record says nothing about OBS: it is not a match.
+    !recorded.is_empty() && recorded == listing_md5s(obs_xml)
+}
+
+/// The listing OBS held when the baseline in `dir` was taken, sorted by name
+/// (see [`listing_md5s`]); empty when there is none.
+pub fn recorded_listing(dir: &Path) -> Vec<(String, String)> {
     let Ok(text) = fs::read_to_string(dir.join(OBS_LISTING)) else {
-        return false;
+        return Vec::new();
     };
     let mut recorded: Vec<(String, String)> = text
         .lines()
@@ -398,8 +406,7 @@ fn obs_listing_matches(dir: &Path, expected: &Path, obs_xml: &str) -> bool {
         .map(|(name, md5)| (name.to_string(), md5.to_string()))
         .collect();
     recorded.sort();
-    // An empty record says nothing about OBS: it is not a match.
-    !recorded.is_empty() && recorded == listing_md5s(obs_xml)
+    recorded
 }
 
 /// [`restore_baseline_with`], preceded by the check that OBS still holds the
@@ -469,9 +476,16 @@ pub fn restore_baseline_outcome(
         },
         |checkout| obs_still_at_checkout(checkout, dir),
         |checkout, message, files| {
-            record_restore(dir, checkout, || {
-                commit(checkout, message, files, None, emit)
-            })
+            record_restore(
+                dir,
+                checkout,
+                || commit(checkout, message, files, None, emit),
+                || {
+                    let (project, package) = checkout_project_package(checkout)?;
+                    source_listing_expanded_xml(&project, &package, Emit::quiet())
+                        .map_err(|e| e.to_string())
+                },
+            )
         },
     );
     let outcome = outcome.and_then(|restored| match restored {

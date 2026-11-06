@@ -115,11 +115,116 @@ fn a_service_listed_in_the_listing_but_not_checked_out_records_nothing() {
 fn a_restore_lands_in_its_own_log_not_the_attempts() {
     let co = checkout_at("aaa");
     let base = tempfile::tempdir().unwrap();
-    record_restore(base.path(), co.path(), || {
-        land(co.path(), "bbb");
-        Ok(())
-    })
+    record_restore(
+        base.path(),
+        co.path(),
+        || {
+            land(co.path(), "bbb");
+            Ok(())
+        },
+        || Err("no OBS".to_string()),
+    )
     .unwrap();
     assert_eq!(restored_revisions(base.path()), vec!["bbb".to_string()]);
     assert!(committed_revisions(base.path()).is_empty());
+}
+
+/// A baseline in `dir` that recorded OBS holding `a` at md5 `1`.
+fn recorded_one_file(dir: &Path) {
+    fs::write(dir.join("obs-md5"), "a\t1\n").unwrap();
+}
+
+/// OBS's listing of a package at `rev` holding `a` at md5 `md5`.
+fn obs_listing(rev: &str, md5: &str) -> String {
+    format!(r#"<directory name="foo" srcmd5="{rev}"><entry name="a" md5="{md5}"/></directory>"#)
+}
+
+#[test]
+fn a_restore_osc_reports_as_failed_but_obs_holds_is_recorded_as_landed() {
+    let co = checkout_at("aaa");
+    let base = tempfile::tempdir().unwrap();
+    recorded_one_file(base.path());
+    let res = record_restore(
+        base.path(),
+        co.path(),
+        || {
+            // osc wrote the new revision, then failed after the server had it.
+            land(co.path(), "bbb");
+            Err(Error::NotActionable("FileNotFoundError".into()))
+        },
+        || Ok(obs_listing("bbb", "1")),
+    );
+    assert!(res.is_ok());
+    assert_eq!(restored_revisions(base.path()), vec!["bbb".to_string()]);
+}
+
+#[test]
+fn a_failed_restore_is_still_a_failure_when_obs_does_not_hold_it() {
+    let base = tempfile::tempdir().unwrap();
+    recorded_one_file(base.path());
+    // Nothing landed: OBS is still at the checkout's revision.
+    let co = checkout_at("aaa");
+    let res = record_restore(
+        base.path(),
+        co.path(),
+        || Err(Error::NotActionable("refused".into())),
+        || Ok(obs_listing("aaa", "1")),
+    );
+    assert!(res.is_err());
+    // Another revision, but not the restored state.
+    let co = checkout_at("aaa");
+    let res = record_restore(
+        base.path(),
+        co.path(),
+        || {
+            land(co.path(), "bbb");
+            Err(Error::NotActionable("failed".into()))
+        },
+        || Ok(obs_listing("bbb", "2")),
+    );
+    assert!(res.is_err());
+    // Unreadable OBS: the failure stands.
+    let res = record_restore(
+        base.path(),
+        co.path(),
+        || Err(Error::NotActionable("failed".into())),
+        || Err("timeout".to_string()),
+    );
+    assert!(res.is_err());
+    assert!(restored_revisions(base.path()).is_empty());
+}
+
+#[test]
+fn landed_despite_error_needs_a_newer_head_the_checkout_holds_and_the_restored_listing() {
+    let rec = vec![("a".to_string(), "1".to_string())];
+    let same = rec.clone();
+    let other = vec![("a".to_string(), "2".to_string())];
+    assert!(landed_despite_error("aaa", Some("bbb"), "bbb", &rec, &same));
+    // Head is the revision before the commit: nothing landed.
+    assert!(!landed_despite_error(
+        "aaa",
+        Some("aaa"),
+        "aaa",
+        &rec,
+        &same
+    ));
+    // The checkout does not record the head.
+    assert!(!landed_despite_error(
+        "aaa",
+        Some("ccc"),
+        "bbb",
+        &rec,
+        &same
+    ));
+    assert!(!landed_despite_error("aaa", None, "bbb", &rec, &same));
+    // Listing is not the restored state.
+    assert!(!landed_despite_error(
+        "aaa",
+        Some("bbb"),
+        "bbb",
+        &rec,
+        &other
+    ));
+    // Nothing recorded to compare with.
+    assert!(!landed_despite_error("aaa", Some("bbb"), "bbb", &[], &[]));
 }
