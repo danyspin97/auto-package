@@ -28,6 +28,7 @@ impl HumanSink {
             | Event::StepSkipped { .. }
             | Event::SpecChanged { .. }
             | Event::PackageFinished { .. }
+            | Event::PackageDropped { .. }
             | Event::VersionUnchecked { .. }
             | Event::NotesUsage { .. }
             | Event::FailedTurnUsage { .. }

@@ -530,6 +530,15 @@ pub enum Event {
         version: String,
         outcome: PackageOutcome,
     },
+    /// The update preparation dropped a package it had queued for the TUI, so
+    /// nothing was built for it. Its outcome is what the preparation said
+    /// (skipped or failed). Only the TUI reports it: unlike `PackageFinished`,
+    /// it does not keep the run open.
+    PackageDropped {
+        pkg: String,
+        version: String,
+        outcome: PackageOutcome,
+    },
     /// The zig vendor archive of a package was rebuilt from the `build.zig.zon`
     /// of its new source. `changed` is false when the archive was already that.
     /// `deps` are the dependencies it holds, in the order they are written.
