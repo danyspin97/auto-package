@@ -8,6 +8,7 @@ fn state_with_run_log() -> TuiState {
     let scope = RunScope {
         project: "proj".to_string(),
         targets: vec![],
+        jobs: 4,
     };
     let mut state = TuiState::new(scope);
     for name in ["alpha", "bravo", "charlie"] {

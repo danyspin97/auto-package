@@ -7,6 +7,9 @@ use super::*;
 pub struct RunScope {
     pub project: String,
     pub targets: Vec<String>,
+    /// How many packages build at once (`--jobs`), which explains a queue
+    /// longer than that; 0 for no limit.
+    pub jobs: usize,
 }
 
 /// Handle used by the CLI to obtain reporters that feed the TUI.

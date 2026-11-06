@@ -22,37 +22,58 @@ pub(super) fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
     f.render_widget(framed(area, header), area);
 }
 
-/// The header's counter titles, widest first. Each narrower one keeps the
-/// sweep counts (when there are any) so they show for as long as the title
-/// has room for them.
+/// The header's counter titles, widest first: what the sweep checked and
+/// found (when there is a sweep), then the rows in each stage, the run's time
+/// and cost. The narrower titles shorten the words before they drop parts.
 pub(super) fn summary_counters(state: &TuiState) -> Vec<String> {
-    let done = state.packages.values().filter(|p| p.finished).count();
-    let total = state.order.len();
-    let counts = state.stage_counts();
-    let pending = counts.queued + counts.running;
-    let built = counts.done;
-    let elapsed = state.run_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+    let c = state.stage_counts();
+    let skipped = c.skipped + state.sweep.map_or(0, |s| s.skipped);
+    let elapsed = fmt_dur(state.run_start.map_or(Duration::ZERO, |s| s.elapsed()));
     let cost = state.total_cost_usd();
-    let sweep = state
-        .sweep
-        .map_or(String::new(), |s| format!(" │ {}", s.label()));
-    let sweep_compact = state
-        .sweep
-        .map_or(String::new(), |s| format!(" │ {}", s.compact_label()));
-    let full = match (state.resolve_total, state.resolve_in_distro) {
-        (Some(closure_total), Some(in_distro)) => format!(
-            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built, {in_distro}/{closure_total} in distro){sweep} │ elapsed {elapsed}s │ cost ${cost:.2} "
-        ),
-        _ => format!(
-            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built){sweep} │ elapsed {elapsed}s │ cost ${cost:.2} "
-        ),
+    // A long queue is what `--jobs` makes of it: only so many build at once.
+    let queued = match state.scope.jobs {
+        0 => format!("queued {}", c.queued),
+        _ if c.queued == 0 => "queued 0".to_string(),
+        jobs => format!("queued {} ({jobs} at a time)", c.queued),
     };
-    // Narrower titles for narrower terminals, each dropping the least
-    // essential parts first.
-    let short = format!(
-        " {done}/{total} done, {pending} pending{sweep_compact} │ elapsed {elapsed}s │ ${cost:.2} "
+    let skipped_part = if skipped > 0 {
+        format!(" · skipped {skipped}")
+    } else {
+        String::new()
+    };
+    // The last resolve's snapshot (see `ResolveFinished`): a dependency the
+    // distro has never gets a row, so it is counted only here.
+    let distro_part = match (state.resolve_total, state.resolve_in_distro) {
+        (Some(total), Some(in_distro)) => format!(" · in distro {in_distro}/{total}"),
+        _ => String::new(),
+    };
+    let sweep = |label: fn(&SweepCounts) -> String| {
+        state
+            .sweep
+            .as_ref()
+            .map_or(String::new(), |s| format!("{} · ", label(s)))
+    };
+    let full = format!(
+        " {}{queued} · running {} · done {} · failed {} · waiting {}{skipped_part}{distro_part} │ elapsed {elapsed} │ cost ${cost:.2} ",
+        sweep(SweepCounts::label),
+        c.running,
+        c.done,
+        c.failed,
+        c.waiting,
     );
-    let shortest = format!(" {done}/{total} done{sweep_compact} │ ${cost:.2} ");
+    let short = format!(
+        " {}queued {} · run {} · done {} · fail {} · wait {} │ ${cost:.2} ",
+        sweep(SweepCounts::compact_label),
+        c.queued,
+        c.running,
+        c.done,
+        c.failed,
+        c.waiting,
+    );
+    let shortest = format!(
+        " run {} · queued {} · done {} · fail {} ",
+        c.running, c.queued, c.done, c.failed
+    );
     vec![full, short, shortest]
 }
 

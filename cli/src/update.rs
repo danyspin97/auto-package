@@ -86,6 +86,7 @@ pub(super) fn update_in_place(
         tui::RunScope {
             project: project.clone(),
             targets: only.to_vec(),
+            jobs,
         },
         false,
     );

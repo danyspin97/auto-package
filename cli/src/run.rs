@@ -217,6 +217,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                 tui::RunScope {
                     project: project.clone(),
                     targets: vec![target.clone().unwrap_or_else(|| name.clone())],
+                    jobs,
                 },
                 true,
             );

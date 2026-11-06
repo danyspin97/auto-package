@@ -9,26 +9,31 @@ pub(super) struct SweepCounts {
 }
 
 impl SweepCounts {
-    /// `checked 42 (7 to update, 30 current, 5 skipped)`, `checking` while the
-    /// sweep goes on.
+    /// `checked 42 · up-to-date 30 · needs update 7`, with `, checking…`
+    /// after the count while the sweep goes on.
     pub(super) fn label(&self) -> String {
         format!(
-            "{} {} ({} to update, {} current, {} skipped)",
-            if self.finished {
-                "checked"
-            } else {
-                "checking:"
-            },
+            "checked {}{} · up-to-date {} · needs update {}",
             self.checked,
-            self.to_update,
+            self.in_flight(", checking…"),
             self.up_to_date,
-            self.skipped
+            self.to_update
         )
     }
 
-    /// `37 checked, 2 to update`: the part of [`Self::label`] a narrow header
-    /// keeps.
+    /// `checked 42 · current 30 · update 7`: the part of [`Self::label`] a
+    /// narrow header keeps.
     pub(super) fn compact_label(&self) -> String {
-        format!("{} checked, {} to update", self.checked, self.to_update)
+        format!(
+            "checked {}{} · current {} · update {}",
+            self.checked,
+            self.in_flight("…"),
+            self.up_to_date,
+            self.to_update
+        )
+    }
+
+    fn in_flight(&self, mark: &'static str) -> &'static str {
+        if self.finished { "" } else { mark }
     }
 }

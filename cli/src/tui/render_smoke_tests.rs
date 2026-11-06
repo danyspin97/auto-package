@@ -30,6 +30,7 @@ fn state_with_history() -> TuiState {
     let scope = RunScope {
         project: "home:foo:bar".to_string(),
         targets: vec!["foo".to_string(), "bar".to_string(), "baz".to_string()],
+        jobs: 4,
     };
     let mut state = TuiState::new(scope);
     let pkg = state.pkg_mut("foo");
@@ -129,10 +130,21 @@ fn render_at(state: &TuiState, w: u16, h: u16) -> Terminal<TestBackend> {
 #[test]
 fn the_header_names_the_project_and_targets_when_there_is_room() {
     let terminal = render_at(&state_with_history(), 200, 30);
-    assert!(row_text(&terminal, 1).contains("project: home:foo:bar | target: foo, bar, baz"));
-    // Narrower, but still a boxed header: the project survives the cut.
-    let terminal = render_at(&state_with_history(), 80, 30);
-    assert!(row_text(&terminal, 1).contains("project: home:foo:bar"));
+    let row = row_text(&terminal, 1);
+    assert!(
+        row.contains("project: home:foo:bar | target: foo, bar, baz │ queued 1 (4 at a time)"),
+        "{row}"
+    );
+    // Narrower: the targets give way, the project and the counters stay.
+    let row = row_text(&terminal_at(80), 1);
+    assert!(
+        row.contains("project: home:foo:bar │ queued 1 · run 0 · done 0"),
+        "{row}"
+    );
+}
+
+fn terminal_at(width: u16) -> Terminal<TestBackend> {
+    render_at(&state_with_history(), width, 30)
 }
 
 #[test]

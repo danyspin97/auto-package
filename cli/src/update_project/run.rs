@@ -147,6 +147,7 @@ pub(super) fn run_on(
         tui::RunScope {
             project: branch_project.clone(),
             targets: a.only.clone(),
+            jobs: a.jobs,
         },
         false,
     );
