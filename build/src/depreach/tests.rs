@@ -442,7 +442,11 @@ fn only_non_distro_non_personal_projects_are_candidates_for_updating_a_dependenc
     // cmake is Factory's (a distro project), onlyhome is personal.
     assert_eq!(
         origins,
-        vec![("devel:languages:c_c++".to_string(), "libfoo".to_string())]
+        vec![DependencyOrigin {
+            project: "devel:languages:c_c++".to_string(),
+            package: "libfoo".to_string(),
+            names: vec!["libfoo-devel".to_string()],
+        }]
     );
     // The project being updated from is not an origin of its own dependency.
     assert!(dependency_origins(&v, &adds, BRANCH, "devel:languages:c_c++").is_empty());
@@ -560,4 +564,28 @@ fn distro_projects_are_recognised() {
     assert!(is_distro_project("SUSE:SLE-15-SP6:GA"));
     assert!(!is_distro_project("devel:languages:python"));
     assert!(!is_distro_project("Base:System"));
+}
+
+#[test]
+fn a_dependency_origin_lists_every_name_it_is_required_by() {
+    let provider = Hit {
+        project: "devel:libraries:c_c++".into(),
+        repository: "openSUSE_Tumbleweed".into(),
+        package: Some("libfoo".into()),
+        version: Some("2.0".into()),
+    };
+    let reachable = |name: &str| DepVerdict {
+        name: name.into(),
+        state: DepState::Reachable {
+            provider: provider.clone(),
+        },
+    };
+    let v = [
+        reachable("libfoo-devel"),
+        reachable("libfoo-tools"),
+        reachable("libfoo-devel"),
+    ];
+    let origins = dependency_origins(&v, &[], BRANCH, "Base:System");
+    assert_eq!(origins.len(), 1);
+    assert_eq!(origins[0].names, ["libfoo-devel", "libfoo-tools"]);
 }

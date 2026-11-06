@@ -360,7 +360,8 @@ pub(super) fn dependency_items(
     emit: Emit<'_>,
 ) -> Vec<Item> {
     let mut out = Vec::new();
-    for (project, pkg) in depreach::dependency_origins(verdicts, adds, branch, &a.source) {
+    for origin in depreach::dependency_origins(verdicts, adds, branch, &a.source) {
+        let (project, pkg) = (origin.project, origin.package);
         let key = osc::fuzzy_key(&pkg);
         let plan = update::plan_where(
             &project,

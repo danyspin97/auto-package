@@ -44,6 +44,8 @@ pub struct Found {
     pub rpm: String,
     /// The version its `Provides:` gives the capability.
     pub version: String,
+    /// The source package the RPM is built from, when the search said so.
+    pub package: Option<String>,
 }
 
 /// What the providers of one capability come to, over the target repositories.
@@ -199,6 +201,7 @@ fn judge_repo(
                     project: c.hit.project.clone(),
                     rpm: c.name.clone(),
                     version,
+                    package: c.hit.package.clone(),
                 });
             }
             Match::Unknown(why) => problems.push(format!("{}: {why}", c.name)),

@@ -263,38 +263,75 @@ pub fn choose_paths(verdicts: &[DepVerdict]) -> Vec<PathAddition> {
     chosen
 }
 
+/// A source package the dependencies will be built against, in the project
+/// that publishes it, with the names the package requires it by (a package
+/// name, or a capability with its bound, as [`DepVerdict::name`] has them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyOrigin {
+    pub project: String,
+    pub package: String,
+    pub names: Vec<String>,
+}
+
 /// The projects the dependencies will be built against that are not distro
 /// projects, personal projects, `own` or `exclude`: the places a dependency
 /// could itself be updated. Reachable dependencies count by the project the
-/// build finds them in; missing ones by the project `added` points at.
+/// build finds them in; missing ones by the project `added` points at. A
+/// capability a provider in a project does not meet its bound (`NoProvider`)
+/// counts by that project, where the update the bound may need comes from.
 pub fn dependency_origins(
     verdicts: &[DepVerdict],
     added: &[PathAddition],
     own: &str,
     exclude: &str,
-) -> Vec<(String, String)> {
+) -> Vec<DependencyOrigin> {
     let usable =
         |p: &str| !is_distro_project(p) && !p.starts_with("home:") && p != own && p != exclude;
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut push = |h: &Hit| {
-        if let (true, Some(pkg)) = (usable(&h.project), &h.package) {
-            let pair = (h.project.clone(), pkg.clone());
-            if !out.contains(&pair) {
-                out.push(pair);
+    let mut out: Vec<DependencyOrigin> = Vec::new();
+    let mut push = |h: &Hit, name: &str| {
+        let (true, Some(pkg)) = (usable(&h.project), &h.package) else {
+            return;
+        };
+        let at = out
+            .iter()
+            .position(|o| o.project == h.project && o.package == *pkg);
+        let origin = match at {
+            Some(i) => &mut out[i],
+            None => {
+                out.push(DependencyOrigin {
+                    project: h.project.clone(),
+                    package: pkg.clone(),
+                    names: Vec::new(),
+                });
+                out.last_mut().expect("just pushed")
             }
+        };
+        if !origin.names.iter().any(|n| n == name) {
+            origin.names.push(name.to_string());
         }
     };
     for v in verdicts {
         match &v.state {
             DepState::Reachable { provider }
-            | DepState::Capability(CapState::Provided { provider }) => push(provider),
+            | DepState::Capability(CapState::Provided { provider }) => push(provider, &v.name),
+            DepState::Capability(CapState::NoProvider { found, .. }) => {
+                for f in found {
+                    let provider = Hit {
+                        project: f.project.clone(),
+                        repository: f.repo.clone(),
+                        package: f.package.clone(),
+                        version: Some(f.version.clone()),
+                    };
+                    push(&provider, &v.name);
+                }
+            }
             DepState::Missing { options } => {
                 let hit = options
                     .iter()
                     .flat_map(|(_, hits)| hits)
                     .find(|h| added.iter().any(|a| a.project == h.project));
                 if let Some(h) = hit {
-                    push(h);
+                    push(h, &v.name);
                 }
             }
             _ => {}
