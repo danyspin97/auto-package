@@ -59,6 +59,7 @@ mod schedule;
 #[cfg(test)]
 mod schedule_tests;
 mod submit;
+mod throttle;
 mod tidy;
 mod tui_row;
 
