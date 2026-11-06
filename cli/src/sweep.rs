@@ -111,6 +111,17 @@ impl PlanReport {
                 message: format!("[note]    {}  ({note})", c.rpm_name),
             });
         }
+        self.report_progress(reporter, false);
+    }
+
+    fn report_progress(&self, reporter: &(dyn Reporter + Send + Sync), finished: bool) {
+        reporter.report(&Event::SweepProgress {
+            checked: self.total(),
+            to_update: self.n_update + self.n_found_only,
+            up_to_date: self.n_uptodate,
+            skipped: self.n_skipped,
+            finished,
+        });
     }
 
     pub(super) fn total(&self) -> usize {
@@ -125,6 +136,7 @@ impl PlanReport {
     }
 
     pub(super) fn finish(&self, reporter: &(dyn Reporter + Send + Sync)) {
+        self.report_progress(reporter, true);
         let stopped = self.by_reason.contains_key("stopped") || ap_build::proc::shutting_down();
         let head = if stopped {
             "update plan, stopped before the end"

@@ -1,6 +1,31 @@
 use super::*;
 
 pub(super) fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
+    let title = header_line(
+        &scope_labels(&state.scope),
+        summary_counters(state),
+        text_width(area),
+    );
+    // The `│` dividers are dimmed so the scope and each counter group stand
+    // apart; the text itself is unchanged.
+    let strong = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    for (i, part) in title.split('│').enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
+        }
+        spans.push(Span::styled(part.to_string(), strong));
+    }
+    let header = Paragraph::new(Line::from(spans));
+    f.render_widget(framed(area, header), area);
+}
+
+/// The header's counter titles, widest first. Each narrower one keeps the
+/// sweep counts (when there are any) so they show for as long as the title
+/// has room for them.
+pub(super) fn summary_counters(state: &TuiState) -> Vec<String> {
     let done = state.packages.values().filter(|p| p.finished).count();
     let total = state.order.len();
     let pending = state.pending_count();
@@ -23,38 +48,27 @@ pub(super) fn render_summary(f: &mut Frame, state: &TuiState, area: Rect) {
         .count();
     let elapsed = state.run_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
     let cost = state.total_cost_usd();
+    let sweep = state
+        .sweep
+        .map_or(String::new(), |s| format!(" │ {}", s.label()));
+    let sweep_compact = state
+        .sweep
+        .map_or(String::new(), |s| format!(" │ {}", s.compact_label()));
     let full = match (state.resolve_total, state.resolve_in_distro) {
         (Some(closure_total), Some(in_distro)) => format!(
-            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built, {in_distro}/{closure_total} in distro) │ elapsed {elapsed}s │ cost ${cost:.2} "
+            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built, {in_distro}/{closure_total} in distro){sweep} │ elapsed {elapsed}s │ cost ${cost:.2} "
         ),
         _ => format!(
-            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built) │ elapsed {elapsed}s │ cost ${cost:.2} "
+            " Auto-Package — {done}/{total} packages done, {pending} pending ({built} built){sweep} │ elapsed {elapsed}s │ cost ${cost:.2} "
         ),
     };
     // Narrower titles for narrower terminals, each dropping the least
     // essential parts first.
-    let short =
-        format!(" {done}/{total} done, {pending} pending │ elapsed {elapsed}s │ ${cost:.2} ");
-    let shortest = format!(" {done}/{total} done │ ${cost:.2} ");
-    let title = header_line(
-        &scope_labels(&state.scope),
-        vec![full, short, shortest],
-        text_width(area),
+    let short = format!(
+        " {done}/{total} done, {pending} pending{sweep_compact} │ elapsed {elapsed}s │ ${cost:.2} "
     );
-    // The `│` dividers are dimmed so the scope and each counter group stand
-    // apart; the text itself is unchanged.
-    let strong = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let mut spans = Vec::new();
-    for (i, part) in title.split('│').enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
-        }
-        spans.push(Span::styled(part.to_string(), strong));
-    }
-    let header = Paragraph::new(Line::from(spans));
-    f.render_widget(framed(area, header), area);
+    let shortest = format!(" {done}/{total} done{sweep_compact} │ ${cost:.2} ");
+    vec![full, short, shortest]
 }
 
 /// Package table columns as (header, fixed width), in display order. A `None`

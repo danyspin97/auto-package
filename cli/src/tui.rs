@@ -60,6 +60,7 @@ mod reporter;
 mod runloop;
 mod screen;
 mod state;
+mod sweep_counts;
 mod terminal;
 mod text;
 
@@ -75,6 +76,7 @@ use pkg::*;
 use render::*;
 use runloop::*;
 use state::*;
+use sweep_counts::*;
 use text::*;
 
 #[cfg(test)]

@@ -41,6 +41,9 @@ pub(super) struct TuiState {
     /// Same snapshot caveat as `resolve_total`: how many of the closure the
     /// distro already satisfies, as of the last resolve pass.
     pub(super) resolve_in_distro: Option<usize>,
+    /// The update sweep so far (`Event::SweepProgress`): what was compared and
+    /// found, shown in the header since only the packages to update get a row.
+    pub(super) sweep: Option<SweepCounts>,
 }
 
 impl TuiState {
@@ -56,6 +59,7 @@ impl TuiState {
             can_submit: false,
             resolve_total: None,
             resolve_in_distro: None,
+            sweep: None,
             run_start: None,
             show_all: true,
         }
@@ -148,6 +152,21 @@ impl TuiState {
                         usage.cost_usd
                     ),
                 );
+            }
+            Event::SweepProgress {
+                checked,
+                to_update,
+                up_to_date,
+                skipped,
+                finished,
+            } => {
+                self.sweep = Some(SweepCounts {
+                    checked: *checked,
+                    to_update: *to_update,
+                    up_to_date: *up_to_date,
+                    skipped: *skipped,
+                    finished: *finished,
+                });
             }
             Event::ResolveStarted { root } => {
                 self.add_global_log(LogLevel::Info, format!("Resolving {root}"));

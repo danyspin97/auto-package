@@ -92,3 +92,60 @@ fn a_project_too_long_for_any_width_is_cut_with_an_ellipsis() {
     assert!(line.width() <= 15, "{line:?}");
     assert!(line.ends_with("..."), "{line:?}");
 }
+
+#[test]
+fn the_sweep_counts_are_in_the_header_state() {
+    let mut state = TuiState::new(scope(&[]));
+    assert!(state.sweep.is_none());
+    let progress = |checked, finished| Msg {
+        pkg: None,
+        event: Event::SweepProgress {
+            checked,
+            to_update: 2,
+            up_to_date: 30,
+            skipped: 5,
+            finished,
+        },
+    };
+    state.apply(progress(37, false));
+    assert_eq!(
+        state.sweep.unwrap().label(),
+        "checking: 37 (2 to update, 30 current, 5 skipped)"
+    );
+    state.apply(progress(37, true));
+    assert!(state.sweep.unwrap().label().starts_with("checked 37"));
+}
+
+#[test]
+fn without_a_sweep_the_counter_titles_have_no_sweep_part() {
+    let state = TuiState::new(scope(&[]));
+    for line in summary_counters(&state) {
+        assert!(!line.contains("to update"), "{line:?}");
+    }
+}
+
+#[test]
+fn a_mid_width_header_still_shows_the_sweep_counts() {
+    let mut state = TuiState::new(scope(&["pkg1"]));
+    state.apply(Msg {
+        pkg: None,
+        event: Event::SweepProgress {
+            checked: 37,
+            to_update: 2,
+            up_to_date: 30,
+            skipped: 5,
+            finished: false,
+        },
+    });
+    let scopes = scope_labels(&state.scope);
+    // Too narrow for the full title (it is over 100 columns with the sweep),
+    // wide enough for the short ones.
+    for width in 60..=100 {
+        let line = header_line(&scopes, summary_counters(&state), width);
+        assert!(!line.contains("Auto-Package"), "{width}: {line:?}");
+        assert!(
+            line.contains("37 checked, 2 to update"),
+            "{width}: {line:?}"
+        );
+    }
+}
