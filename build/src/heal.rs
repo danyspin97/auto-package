@@ -94,6 +94,121 @@ pub fn obs_built_decision(
     ObsDecision::Fetch
 }
 
+/// Heal the checkouts and the state files of every package that has one,
+/// without asking OBS: a leftover archive of another release is deleted from
+/// its checkout, and a recorded review of another version is dropped. Returns
+/// `(package, what was done)` for each change, which is also written to the
+/// package's `reconciled.log`.
+pub fn checkouts(
+    state_root: &std::path::Path,
+    checkout_root: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for name in package_names(state_root) {
+        let Some(ws) = crate::workspace::Workspace::find_existing(state_root, &[&name]) else {
+            continue;
+        };
+        let state = crate::pipeline::PkgState::load(&ws);
+        let obs = state.obs_name.clone().unwrap_or_else(|| name.clone());
+        let checkout = checkout_root.join(&obs);
+        let Ok(spec) = std::fs::read_to_string(checkout.join(format!("{obs}.spec"))) else {
+            continue;
+        };
+        let Some(version) = crate::spec::parse_header(&spec).map(|h| h.version) else {
+            continue;
+        };
+        // A wheel switch keeps its own leftovers (see `doctor`): not touched here.
+        let wheel = is_wheel_spec(&spec);
+        let mut whats = Vec::new();
+        if !wheel && checkout.is_dir() {
+            for file in drop_stale_archives(&checkout, &spec, &version) {
+                whats.push(format!("removed the stale archive {file}"));
+            }
+        }
+        if is_stale_review(state.reviewed_version.as_deref(), Some(&version)) {
+            let saved = crate::pipeline::PkgState::update(&ws, |st| {
+                st.reviewed_version = None;
+                st.reviewed_spec_hash = None;
+            });
+            if saved.is_ok() {
+                whats.push(format!(
+                    "dropped the review of {} (the spec says {version})",
+                    state.reviewed_version.as_deref().unwrap_or_default()
+                ));
+            }
+        }
+        for what in whats {
+            record(&ws, &what);
+            out.push((name.clone(), what));
+        }
+    }
+    out
+}
+
+/// The files of `checkout` the publish plan leaves out that
+/// [`stale_archive_action`] deletes. Deleted through `osc::discard_untracked_archives`,
+/// which also refuses anything named or tracked. Returns the names deleted.
+fn drop_stale_archives(checkout: &std::path::Path, spec: &str, version: &str) -> Vec<String> {
+    let named = crate::osc::spec_source_names(spec);
+    let tracked = crate::osc::tracked_files(checkout);
+    let mut gone = Vec::new();
+    for file in crate::osc::publish_plan(checkout).skipped {
+        let is_archive = crate::osc::ARCHIVE_SUFFIXES
+            .iter()
+            .any(|s| file.ends_with(s));
+        let action = stale_archive_action(
+            &file,
+            is_archive,
+            tracked.contains(&file),
+            crate::doctor::spec_names_archive(spec, &file),
+            version,
+        );
+        if action == ArchiveAction::Delete {
+            gone.extend(crate::osc::discard_untracked_archives(
+                checkout,
+                std::slice::from_ref(&file),
+                &named,
+            ));
+        }
+    }
+    gone
+}
+
+/// Whether the spec builds from a wheel (one of its `Source:` lines names a
+/// `.whl`), as `doctor` reads it.
+fn is_wheel_spec(spec: &str) -> bool {
+    spec.lines().any(|l| {
+        crate::spec::parse_source_line(l.trim_start(), &["source"], str::to_string).is_some()
+            && l.contains(".whl")
+    })
+}
+
+/// Append one line saying what was reconciled in a package's state directory.
+fn record(ws: &crate::workspace::Workspace, what: &str) {
+    use std::io::Write;
+    let path = ws.dir().join("reconciled.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{what}");
+    }
+}
+
+/// The names of the packages with a `state.json` under `state_root`, sorted.
+fn package_names(state_root: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(state_root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join("state.json").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +309,68 @@ mod tests {
             matches!(&never, ObsDecision::Decline(r) if r.contains("nothing")),
             "{never:?}"
         );
+    }
+
+    #[test]
+    fn a_leftover_archive_of_another_release_is_removed_and_one_obs_holds_is_kept() {
+        use crate::pipeline::PkgState;
+        use crate::workspace::Workspace;
+        let root = tempfile::tempdir().unwrap();
+        let state_root = root.path().join("state");
+        let proj = root.path().join("proj");
+        let dir = proj.join("pyenv");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pyenv.spec"),
+            "Name: pyenv\nVersion: 2.8.14\nSource0: pyenv-%{version}.tar.gz\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("pyenv-2.8.14.tar.gz"), "x").unwrap();
+        std::fs::write(dir.join("pyenv-2.8.4.tar.gz"), "x").unwrap();
+        let ws = Workspace::open(&state_root, "pyenv").unwrap();
+        PkgState::update(&ws, |s| {
+            s.reviewed_version = Some("2.8.4".into());
+            s.reviewed_spec_hash = Some(1);
+        })
+        .unwrap();
+        // The same leftover, but OBS holds it: the next commit removes it there.
+        let tracked = proj.join("tracked");
+        std::fs::create_dir_all(tracked.join(".osc")).unwrap();
+        std::fs::write(
+            tracked.join("tracked.spec"),
+            "Name: tracked\nVersion: 2.0\nSource0: tracked-%{version}.tar.gz\n",
+        )
+        .unwrap();
+        std::fs::write(tracked.join("tracked-2.0.tar.gz"), "x").unwrap();
+        std::fs::write(tracked.join("tracked-1.0.tar.gz"), "x").unwrap();
+        std::fs::write(
+            tracked.join(".osc/_files"),
+            "<directory name=\"tracked\"><entry name=\"tracked-1.0.tar.gz\" md5=\"x\" size=\"1\" mtime=\"1\" /></directory>",
+        )
+        .unwrap();
+        Workspace::open(&state_root, "tracked").unwrap();
+
+        let done = checkouts(&state_root, &proj);
+
+        assert!(!dir.join("pyenv-2.8.4.tar.gz").exists());
+        assert!(dir.join("pyenv-2.8.14.tar.gz").exists());
+        assert!(tracked.join("tracked-1.0.tar.gz").exists());
+        let st = PkgState::load(&ws);
+        assert_eq!((st.reviewed_version, st.reviewed_spec_hash), (None, None));
+        assert!(
+            done.iter()
+                .any(|(n, w)| n == "pyenv" && w.contains("stale archive pyenv-2.8.4.tar.gz")),
+            "{done:?}"
+        );
+        assert!(
+            done.iter()
+                .any(|(n, w)| n == "pyenv" && w.contains("review of 2.8.4")),
+            "{done:?}"
+        );
+        assert!(!done.iter().any(|(n, _)| n == "tracked"), "{done:?}");
+        let log = std::fs::read_to_string(ws.dir().join("reconciled.log")).unwrap();
+        assert!(log.contains("stale archive pyenv-2.8.4.tar.gz"), "{log}");
+        // A second run has nothing left to do.
+        assert!(checkouts(&state_root, &proj).is_empty());
     }
 }

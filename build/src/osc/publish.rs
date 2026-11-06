@@ -376,7 +376,7 @@ pub fn drop_empty_rpmlintrc(checkout_dir: &Path) -> Vec<String> {
 }
 
 /// Names OBS already tracks for this checkout (`.osc/_files`).
-pub(super) fn tracked_files(checkout_dir: &Path) -> Vec<String> {
+pub fn tracked_files(checkout_dir: &Path) -> Vec<String> {
     let xml = fs::read_to_string(checkout_dir.join(".osc").join("_files")).unwrap_or_default();
     xml.split("<entry ")
         .skip(1)

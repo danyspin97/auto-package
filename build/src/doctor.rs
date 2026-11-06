@@ -203,7 +203,7 @@ pub(crate) fn names_version(archive: &str, version: &str) -> bool {
 /// archive with a version that is not its `Version:` (`dmraid-%{src_version}`
 /// for `1.0.0.rc16-3` under `Version: 1.0.0.rc16.3`, `popt-%{version}-release`):
 /// what the spec names is the archive it builds from.
-fn spec_names_archive(spec: &str, archive: &str) -> bool {
+pub(crate) fn spec_names_archive(spec: &str, archive: &str) -> bool {
     crate::osc::spec_names_source(spec, archive)
         || crate::spec::expanded_sources(spec)
             .iter()
