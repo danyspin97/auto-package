@@ -4,6 +4,7 @@
 use super::*;
 use ap_build::arch_check::{self, ArchRow, CheckRequest, LiveArchObs, Port};
 use ap_core::event::ArchCheckResult;
+use std::sync::Mutex;
 
 /// The `--arches` list, validated, or `None` when it was not given.
 pub(super) fn wanted_arches(a: &UpdateProjectArgs) -> Result<Option<Vec<String>>, String> {
@@ -32,6 +33,7 @@ pub(super) fn check_item(
     branch: &str,
     item: &Item,
     ctx: &Ctx<'_>,
+    meta_lock: &Mutex<()>,
     report: &mut Report,
 ) {
     if a.no_arch_check {
@@ -83,7 +85,8 @@ pub(super) fn check_item(
         ports: ports.clone(),
         // An in-place update's source is only read: it is never written.
         read_only: a.in_place,
-        bound: std::time::Duration::from_secs(a.arch_wait_minutes * 60),
+        deadline: &ctx.arch_deadline,
+        meta_lock,
         log_dir: &log_dir,
         say: &say,
     };

@@ -377,13 +377,12 @@ mod results {
         let clock = Cell::new(Duration::ZERO);
         let polls = Cell::new(0u32);
         let out = wait_settled(
-            Duration::from_secs(120),
+            || Duration::from_secs(120).saturating_sub(clock.get()),
             || {
                 polls.set(polls.get() + 1);
                 Ok(vec![("s390x", BuildStatus::Building)])
             },
             |d| clock.set(clock.get() + d),
-            || clock.get(),
             |_| Duration::from_secs(60),
         )
         .unwrap();
@@ -403,7 +402,7 @@ mod results {
         use std::time::Duration;
         let calls = Cell::new(0u32);
         let out = wait_settled(
-            Duration::from_secs(1800),
+            || Duration::from_secs(1800),
             || {
                 calls.set(calls.get() + 1);
                 Ok(vec![
@@ -419,7 +418,6 @@ mod results {
                 ])
             },
             |_| {},
-            || Duration::ZERO,
             |_| Duration::from_secs(15),
         )
         .unwrap();

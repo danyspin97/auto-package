@@ -33,6 +33,8 @@ pub(super) struct Ctx<'a> {
     /// The packages whose other-architecture check ran in this run: their
     /// results were already awaited, so a submit does not wait for them again.
     pub(super) arch_checked: ArchChecked,
+    /// The deadline the other-architecture waits of this run share.
+    pub(super) arch_deadline: Arc<ap_build::arch_check::ArchDeadline>,
 }
 
 /// The packages the arch check ran for, shared with the TUI's submit backend.

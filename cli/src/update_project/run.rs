@@ -197,6 +197,9 @@ pub(super) fn run_on(
         sem: make_semaphore(a.jobs),
         backend: None,
         arch_checked: arch_checked.clone(),
+        arch_deadline: Arc::new(ap_build::arch_check::ArchDeadline::new(
+            std::time::Duration::from_secs(a.arch_wait_minutes * 60),
+        )),
     };
     // A dry run builds nothing, so there is nothing to diff or submit.
     let ctx = match (&ctx.tui_ctrl, a.dry_run) {

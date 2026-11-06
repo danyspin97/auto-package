@@ -5,7 +5,8 @@
 
 use std::cell::RefCell;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::Instant;
 
 use super::*;
 use crate::obs_status::{ResultEntry, resolve_lenient};
@@ -31,8 +32,12 @@ pub struct CheckRequest<'a> {
     /// The branch is only read here (the source of an in-place update): no
     /// architecture or port is added to it, whatever the other fields say.
     pub read_only: bool,
-    /// The total wait for the other architectures.
-    pub bound: Duration,
+    /// The deadline the other-architecture waits of the run share (see
+    /// [`ArchDeadline`]): the checks of its packages wait together.
+    pub deadline: &'a ArchDeadline,
+    /// Held while the branch project's meta is written, so the checks of the
+    /// run's packages do not rewrite it at once. Not held for the waits.
+    pub meta_lock: &'a Mutex<()>,
     /// Where the logs of failures are saved.
     pub log_dir: &'a Path,
     /// Told each thing before it is done: an addition before the write.
@@ -76,6 +81,7 @@ pub fn check_other_arches<O: ArchObs + ?Sized>(
             "the branch is only read here: no architecture or port is added to it".to_string(),
         );
     } else if writes {
+        let _write = req.meta_lock.lock().unwrap_or_else(|p| p.into_inner());
         added = edit_branch_meta(
             obs,
             req.branch,
@@ -168,10 +174,9 @@ fn wait_and_classify<O: ArchObs + ?Sized>(
     req: &CheckRequest<'_>,
     keys: &[Key],
 ) -> Result<(Vec<ArchRow>, Vec<String>), String> {
-    let start = Instant::now();
     let latest: RefCell<Vec<ResultEntry>> = RefCell::new(Vec::new());
     let statuses = wait_settled(
-        req.bound,
+        || req.deadline.left(Instant::now()),
         || {
             let entries = obs.results(req.branch, req.pkg)?;
             let out = keys
@@ -182,15 +187,13 @@ fn wait_and_classify<O: ArchObs + ?Sized>(
             Ok(out)
         },
         crate::osc::sleep_interruptible,
-        || start.elapsed(),
         crate::osc::poll_pause,
     )?;
     let entries = latest.into_inner();
     let mut notes = Vec::new();
     if statuses.iter().any(|(_, s)| !s.is_terminal()) {
         notes.push(format!(
-            "still building after {} minute(s): those results are not final",
-            req.bound.as_secs() / 60
+            "still building when the wait ended: those results are not final"
         ));
     }
     let rows = keys

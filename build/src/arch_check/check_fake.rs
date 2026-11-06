@@ -5,6 +5,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use super::*;
@@ -160,6 +161,12 @@ pub(super) fn set_absent(fake: &FakeObs, project: &str) {
     fake.absent.borrow_mut().insert(project.into());
 }
 
+/// The deadline of the test checks: none, so a pending result is read once.
+pub(super) static NO_WAIT: ArchDeadline = ArchDeadline::new(Duration::ZERO);
+
+/// The branch meta lock of the test checks.
+pub(super) static META_LOCK: Mutex<()> = Mutex::new(());
+
 pub(super) fn request<'a>(
     log_dir: &'a Path,
     say: &'a dyn Fn(String),
@@ -175,7 +182,8 @@ pub(super) fn request<'a>(
         add_arches,
         ports: Vec::new(),
         read_only,
-        bound: Duration::ZERO,
+        deadline: &NO_WAIT,
+        meta_lock: &META_LOCK,
         log_dir,
         say,
     }

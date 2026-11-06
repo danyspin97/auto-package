@@ -177,8 +177,10 @@ pub struct UpdateProjectArgs {
     #[arg(long, default_value_t = false, conflicts_with = "no_arch_check")]
     pub ports: bool,
 
-    /// The total time to wait for the other architectures' builds, in minutes.
-    /// Builds still running after it are reported as still building.
+    /// The time, in minutes, the run waits for the other architectures' builds
+    /// after its last build ends. One deadline is shared by the packages'
+    /// checks, so they wait together. Builds still running at it are reported
+    /// as not final; a submit does not wait for them.
     #[arg(long, default_value_t = 30, value_name = "MINUTES")]
     pub arch_wait_minutes: u64,
 

@@ -45,9 +45,9 @@ pub(super) struct BuildWork<'a, 'c> {
     branch: &'a str,
     resolver: &'a Arc<DepResolver>,
     ctx: &'a Ctx<'c>,
-    /// Held by the other-architecture check, one at a time, when it edits the
-    /// branch project's meta (see `edits_branch_meta`): two such checks at
-    /// once would both rewrite it.
+    /// Held by an other-architecture check while it writes the branch
+    /// project's meta: two such writes at once would both rewrite it. The
+    /// waits of the checks are not held (see `CheckRequest::meta_lock`).
     arch_check: Mutex<()>,
 }
 
@@ -195,6 +195,9 @@ impl Work for BuildWork<'_, '_> {
                 sr: SrOutcome::NotRequested,
             });
         }
+        // The other-architecture waits of the run end `--arch-wait-minutes`
+        // after the last build ends (see `ArchDeadline`).
+        self.ctx.arch_deadline.build_ended(Instant::now());
         report
     }
 
@@ -223,11 +226,16 @@ impl Work for BuildWork<'_, '_> {
             .map(|r| r.item.clone())
             .collect();
         for item in updated {
-            let _one_at_a_time = edits_branch_meta(self.a)
-                .then(|| self.arch_check.lock().unwrap_or_else(|p| p.into_inner()));
             // A check that panics is a warning, as a check that cannot run is.
             let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                super::arch::check_item(self.a, self.branch, &item, self.ctx, &mut report);
+                super::arch::check_item(
+                    self.a,
+                    self.branch,
+                    &item,
+                    self.ctx,
+                    &self.arch_check,
+                    &mut report,
+                );
             }));
             if let Err(p) = checked {
                 self.ctx.warn(format!(
@@ -278,12 +286,6 @@ pub(super) fn merge_built(report: &mut Report, built: Vec<(usize, Report)>) {
         report.requested.extend(part.requested);
     }
     report.results = interleave(std::mem::take(&mut report.results), results);
-}
-
-/// Whether the other-architecture check of `a` edits the branch project's
-/// meta: `--arches` adds architectures to it and `--ports` adds repositories.
-fn edits_branch_meta(a: &UpdateProjectArgs) -> bool {
-    !a.arches.is_empty() || a.ports
 }
 
 /// Records an item that is not submitted: it leaves the TUI's offers (so it
@@ -378,29 +380,4 @@ fn build_item(
         )
     })
     .map_err(|e| format!("{e:#}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[derive(Parser)]
-    struct Wrapper {
-        #[command(flatten)]
-        args: UpdateProjectArgs,
-    }
-
-    fn args(extra: &[&str]) -> UpdateProjectArgs {
-        let mut argv = vec!["x", "Base:System"];
-        argv.extend_from_slice(extra);
-        Wrapper::try_parse_from(argv).unwrap().args
-    }
-
-    #[test]
-    fn only_a_check_that_edits_the_branch_meta_takes_the_lock() {
-        assert!(!edits_branch_meta(&args(&[])));
-        assert!(edits_branch_meta(&args(&["--arches", "s390x"])));
-        assert!(edits_branch_meta(&args(&["--ports"])));
-    }
 }
