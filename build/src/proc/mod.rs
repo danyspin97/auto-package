@@ -15,6 +15,9 @@ mod capture_timeout_tests;
 mod logged;
 #[cfg(test)]
 mod logged_tests;
+mod osc_lock;
+#[cfg(test)]
+mod osc_lock_tests;
 #[cfg(test)]
 mod restore_spawn_tests;
 mod shutdown;

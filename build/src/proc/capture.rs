@@ -263,6 +263,27 @@ pub fn capture_with_timeout_env(
     timeout: Duration,
     env: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<Captured, ProcessError> {
+    // An osc call that writes a project working copy holds that project's
+    // lock for the length of the child, so two packages of one project never
+    // write its `.osc` at once (see `osc_lock`).
+    let argv: Vec<String> = args
+        .iter()
+        .map(|a| a.as_ref().to_string_lossy().into_owned())
+        .collect();
+    let key = super::osc_lock::lock_key(program, &argv, cwd);
+    super::osc_lock::with_lock(key.as_deref(), || {
+        capture_unlocked(program, args, cwd, emit, timeout, env)
+    })
+}
+
+fn capture_unlocked(
+    program: &str,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    cwd: &Path,
+    emit: Emit<'_>,
+    timeout: Duration,
+    env: Option<&std::collections::BTreeMap<String, String>>,
+) -> Result<Captured, ProcessError> {
     use std::io::Read;
 
     let timeout = if restoring() {
