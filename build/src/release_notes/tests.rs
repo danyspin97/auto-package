@@ -178,6 +178,31 @@ Version 3.3.0 (2023-01-01)
         assert!(got.text.contains("Add a thing"));
         assert!(section_of_archive(&archive, "9.9", "3.4.0").is_none());
     }
+
+    #[test]
+    fn a_changelog_in_a_docs_directory_below_the_top_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("pkg-3.4.0").join("pkg").join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("changelog.md"),
+            "# Change Log\n\n### Version 3.4.0\n- Added a thing\n\n### Version 3.3.0\n- old\n",
+        )
+        .unwrap();
+        let archive = dir.path().join("pkg-3.4.0.tar.gz");
+        let status = std::process::Command::new("tar")
+            .arg("czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(dir.path())
+            .arg("pkg-3.4.0")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let got = section_of_archive(&archive, "3.3.0", "3.4.0").unwrap();
+        assert_eq!(got.file, "changelog.md");
+        assert!(got.text.contains("Added a thing"));
+    }
 }
 
 #[test]

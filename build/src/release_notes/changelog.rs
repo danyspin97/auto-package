@@ -14,6 +14,7 @@ const NAMES: &[&str] = &[
     "CHANGELOG.md",
     "CHANGELOG.txt",
     "CHANGELOG.rst",
+    "changelog.md",
     "ChangeLog",
     "Changelog.md",
     "CHANGES",
@@ -44,25 +45,41 @@ pub(super) struct Section {
 pub(super) fn section_of_archive(archive: &Path, old: &str, new: &str) -> Option<Section> {
     let dir = tempfile::tempdir().ok()?;
     let dest = dir.path().join("src");
-    // Only a changelog file directly under the top-level directory is
-    // unpacked; the rest of the archive is read past and dropped.
+    // Only a changelog file at the top-level directory, or in a `docs` or
+    // `doc` directory at most one level below it, is unpacked; the rest of
+    // the archive is read past and dropped.
     ap_ecosystem::sdist::extract_where(archive, &dest, |p| {
         let parts: Vec<_> = p.components().collect();
-        parts.len() == 2 && NAMES.contains(&parts[1].as_os_str().to_string_lossy().as_ref())
+        let part = |i: usize| parts[i].as_os_str().to_string_lossy().into_owned();
+        (2..=4).contains(&parts.len())
+            && NAMES.contains(&part(parts.len() - 1).as_str())
+            && (parts.len() == 2
+                || ["docs", "doc"].contains(&part(parts.len() - 2).to_lowercase().as_str()))
     })
     .ok()?;
     let top = std::fs::read_dir(&dest).ok()?.flatten().next()?.path();
-    NAMES.iter().find_map(|name| {
-        let path = top.join(name);
-        let meta = std::fs::symlink_metadata(&path).ok()?;
-        if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
-            return None;
+    // The top of the tree first, then its `docs`, then one directory down.
+    let mut dirs = vec![top.clone(), top.join("docs"), top.join("doc")];
+    if let Ok(entries) = std::fs::read_dir(&top) {
+        let mut subs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        subs.sort();
+        for sub in subs {
+            dirs.extend([sub.join("docs"), sub.join("doc")]);
         }
-        let bytes = std::fs::read(&path).ok()?;
-        let text = String::from_utf8_lossy(&bytes);
-        section_between(&text, old, new).map(|text| Section {
-            file: (*name).to_string(),
-            text,
+    }
+    dirs.iter().find_map(|dir| {
+        NAMES.iter().find_map(|name| {
+            let path = dir.join(name);
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+                return None;
+            }
+            let bytes = std::fs::read(&path).ok()?;
+            let text = String::from_utf8_lossy(&bytes);
+            section_between(&text, old, new).map(|text| Section {
+                file: (*name).to_string(),
+                text,
+            })
         })
     })
 }
