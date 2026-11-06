@@ -55,6 +55,7 @@ mod controller;
 mod detail;
 mod panes;
 mod pkg;
+mod pkg_events;
 mod render;
 mod reporter;
 mod runloop;
