@@ -18,11 +18,15 @@ pub use names::*;
 mod error;
 pub use error::*;
 
+mod bounded_missing;
+#[cfg(test)]
+mod bounded_missing_tests;
 mod failure;
 #[cfg(test)]
 mod query_retry_tests;
 #[cfg(test)]
 mod transient_text_tests;
+pub use bounded_missing::*;
 pub use failure::*;
 
 #[cfg(test)]

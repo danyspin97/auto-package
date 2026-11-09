@@ -563,7 +563,7 @@ pub(super) fn unresolvable_deps_round(
         )));
     }
     let native = crate::depclass::native_among(&unresolvable_deps, &to_build);
-    let outdated: Vec<(String, Option<String>)> = osc::outdated_packages(&detail)
+    let mut outdated: Vec<(String, Option<String>)> = osc::outdated_packages(&detail)
         .into_iter()
         .filter(|(n, _)| {
             to_build
@@ -571,6 +571,10 @@ pub(super) fn unresolvable_deps_round(
                 .any(|b| osc::fuzzy_key(b) == osc::fuzzy_key(n))
         })
         .collect();
+    // A bound OBS names without the version it has is a candidate too; the
+    // queue keeps it only while the repository's copy is older than it.
+    let own = osc::try_list_project_packages(&config.project, Emit::new(reporter, build_step.id));
+    osc::add_bounded_outdated(&mut outdated, &detail, &to_build, own.ok().as_deref());
     wait_record::save_missing(ctx, &to_build, &native, &outdated);
     Err(PipelineResult::MissingDeps {
         rpm_name: rpm_name.clone(),
