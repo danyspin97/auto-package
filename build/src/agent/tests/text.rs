@@ -214,3 +214,26 @@ fn no_source_or_convention_names_a_merged_convention() {
         }
     }
 }
+
+/// An index line's `(N)` trigger is a convention merged into that line's topic.
+#[test]
+fn index_triggers_in_brackets_are_merged_into_their_line() {
+    let merged = merged_targets();
+    for line in CONVENTIONS_INDEX.lines() {
+        let topic: u32 = line.split('.').next().unwrap().parse().unwrap();
+        let mut rest = line;
+        while let Some(i) = rest.find('(') {
+            let after = &rest[i + 1..];
+            let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+            if !digits.is_empty() && after[digits.len()..].starts_with(") ") {
+                let n: u32 = digits.parse().unwrap();
+                assert_eq!(
+                    merged.get(&n),
+                    Some(&topic),
+                    "index line {topic} names ({n}), which is not merged into it"
+                );
+            }
+            rest = after;
+        }
+    }
+}
