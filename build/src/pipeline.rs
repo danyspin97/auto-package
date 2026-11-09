@@ -415,12 +415,16 @@ mod network_fetch;
 #[cfg(test)]
 mod network_fetch_tests;
 mod patch_rules;
+pub(crate) use patch_delta::patch_delta;
 pub(crate) use patch_rules::{
     declared_patches, header_field, header_lines, header_problems, is_patch_comment,
     names_in_bullet,
 };
-pub(crate) use patch_rules_content::{patch_delta, source_only_problems};
+pub(crate) use patch_rules_content::source_only_problems;
 pub(crate) use patch_rules_spec::spec_route_problems;
+mod patch_delta;
+#[cfg(test)]
+mod patch_delta_tests;
 mod patch_rules_content;
 #[cfg(test)]
 mod patch_rules_content_tests;

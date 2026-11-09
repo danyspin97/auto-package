@@ -197,39 +197,6 @@ pub(super) fn patch_changes(text: &str) -> PatchChanges {
     out
 }
 
-/// The changes of a patch that the edit did not already have: `new` minus `old`,
-/// as lines (a file, a line and a deletion are counted as many times as they occur).
-/// With no `old` every change is new.
-pub(crate) fn patch_delta(old: Option<&str>, new: &str) -> PatchChanges {
-    let new = patch_changes(new);
-    let Some(old) = old else {
-        return new;
-    };
-    let old = patch_changes(old);
-    PatchChanges {
-        added: subtract(new.added, &old.added),
-        removed: subtract(new.removed, &old.removed),
-        deleted: subtract(new.deleted, &old.deleted),
-    }
-}
-
-/// `new` without the items of `old`, one for one.
-fn subtract<T: Eq + std::hash::Hash + Clone>(new: Vec<T>, old: &[T]) -> Vec<T> {
-    let mut counts: std::collections::HashMap<&T, usize> = std::collections::HashMap::new();
-    for item in old {
-        *counts.entry(item).or_default() += 1;
-    }
-    new.into_iter()
-        .filter(|item| match counts.get_mut(item) {
-            Some(n) if *n > 0 => {
-                *n -= 1;
-                false
-            }
-            _ => true,
-        })
-        .collect()
-}
-
 /// Whether `path` is a test file or sits in a test directory.
 pub(super) fn is_test_path(path: &str) -> bool {
     let p = Path::new(path);
