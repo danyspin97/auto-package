@@ -350,19 +350,7 @@ pub(super) fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, St
     Ok(check)
 }
 
-/// A `PatchN:` value with the spec's `%{name}` and `%{version}` (or the bare
-/// `%name`, `%version`) expanded, so `foo-%{version}-fix.patch` names the file
-/// `foo-1.2-fix.patch`. A spec whose header cannot be read is left as written.
-pub(crate) fn expand_patch_name(raw: &str, spec: &str) -> String {
-    let raw = raw.trim();
-    let Some(header) = crate::spec::parse_header(spec) else {
-        return raw.to_string();
-    };
-    raw.replace("%{name}", &header.name)
-        .replace("%name", &header.name)
-        .replace("%{version}", &header.version)
-        .replace("%version", &header.version)
-}
+pub(crate) use crate::spec::expand_patch_name;
 
 /// [`try_patches`] as a gate for an edit: `Err` names the first patch that does
 /// not apply. The `Ok` value is what could not be checked, to be reported.

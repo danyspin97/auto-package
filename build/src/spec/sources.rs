@@ -247,3 +247,33 @@ pub fn adopt_sources_from_tree(
     }
     copied
 }
+
+/// The file a web address names: its last path component, as a source of the
+/// package is named. Any other value is returned as it is.
+pub fn web_address_file(value: &str) -> String {
+    let web = (value.starts_with("http://") || value.starts_with("https://"))
+        && !value.contains(char::is_whitespace);
+    if web {
+        value.rsplit('/').next().unwrap_or(value).to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// A `PatchN:` value with the spec's `%{name}` and `%{version}` (or `%name`,
+/// `%version`) expanded, so `foo-%{version}-fix.patch` names `foo-1.2-fix.patch`.
+/// A web address names the file it ends with. A spec whose header cannot be read
+/// is left as written.
+pub fn expand_patch_name(raw: &str, spec: &str) -> String {
+    let raw = raw.trim();
+    let expanded = crate::spec::parse_header(spec).map_or_else(
+        || raw.to_string(),
+        |h| {
+            raw.replace("%{name}", &h.name)
+                .replace("%name", &h.name)
+                .replace("%{version}", &h.version)
+                .replace("%version", &h.version)
+        },
+    );
+    crate::spec::web_address_file(&expanded)
+}

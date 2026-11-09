@@ -298,3 +298,52 @@ fn a_patch_quilt_reverse_applies_only_with_fuzz_is_proven_by_its_hunks() {
     // Quilt's reverse-apply alone, with nothing to check the hunks against, is no proof.
     assert!(proof_of(&fuzzy, None, Some(diff), 1, "p.patch").is_err());
 }
+
+#[test]
+fn a_web_address_patch_names_the_file_it_ends_with() {
+    let spec = "Name: foo\nVersion: 1.0\nPatch0: https://example.org/x/%{name}-%{version}.patch\n";
+    assert_eq!(
+        crate::pipeline::expand_patch_name("https://example.org/x/%{name}-%{version}.patch", spec),
+        "foo-1.0.patch"
+    );
+    // A plain name is what it was.
+    assert_eq!(
+        crate::pipeline::expand_patch_name("foo-%{version}-fix.patch", spec),
+        "foo-1.0-fix.patch"
+    );
+}
+
+#[test]
+fn a_web_address_patch_is_removed_with_its_quilt_proof() {
+    if std::process::Command::new("quilt")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path();
+    archive(
+        checkout,
+        "foo-1.0.tar.gz",
+        &[("f.txt", "a\nint answer = 42;\nc\nd\n")],
+    );
+    // The change is already in the archive: quilt reverse-applies the file.
+    let patch = "--- a/f.txt\n+++ b/f.txt\n@@ -1,4 +1,4 @@\n a\n-int answer = 41;\n+int answer = 42;\n c\n d\n";
+    std::fs::write(checkout.join("foo-1.0.patch"), patch).unwrap();
+    let before = "Name: foo\nVersion: 1.0\nPatch0: https://example.org/x/%{name}-%{version}.patch\n%prep\n%autosetup -p1\n";
+    let spec_path = checkout.join("foo.spec");
+    std::fs::write(&spec_path, before).unwrap();
+    std::fs::write(
+        &spec_path,
+        "Name: foo\nVersion: 1.0\n%prep\n%autosetup -p1\n",
+    )
+    .unwrap();
+    let judged = judge_removals("1.0", checkout, &spec_path, before, None);
+    assert!(judged.refused.is_empty(), "{judged:?}");
+    assert_eq!(
+        judged.proven,
+        vec![("foo-1.0.patch".to_string(), DropProof::ReverseApplies)]
+    );
+}
