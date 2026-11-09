@@ -7,6 +7,7 @@ mod fix_tools;
 mod integrity;
 mod links;
 mod prompt;
+mod pytest_line;
 mod request_review;
 mod retry_prompt;
 mod review_tools;
