@@ -253,6 +253,12 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         commit_step.finish(StepOutcome::Failed);
         return Err(ctx.failed(format!("not committed: {why}; nothing was sent to OBS")));
     }
+    // OBS's validator refuses an origin entry whose date it cannot read, so each
+    // `osc ci` would fail the same way: stopped once, here, with the line.
+    if let Some(why) = osc::origin_changes_date_problem(&ctx.checkout_dir, &baseline) {
+        commit_step.finish(StepOutcome::Failed);
+        return Err(ctx.failed_as(FailureKind::NeedsMaintainer, why));
+    }
     // Noted before the write: a commit that fails half way may still have sent them.
     if let Err(e) = osc::note_attempt(&baseline, &files) {
         commit_step.finish(StepOutcome::Failed);

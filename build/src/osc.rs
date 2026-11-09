@@ -76,6 +76,8 @@ mod changes;
 #[cfg(test)]
 mod spec_file_name_tests;
 pub use changes::*;
+mod changes_dates;
+pub use changes_dates::*;
 mod changes_normalise;
 pub use changes_normalise::*;
 mod changes_drop;
