@@ -121,8 +121,9 @@ pub(super) struct UpdateMode {
 /// - kept: `normalize_python_module_versions` (a name that does not exist),
 ///   `fix_stray_dollar_macros` (a bare `$python_sitelib` outside its expansion),
 ///   `fix_missing_alternatives_requires` (an install-time failure),
-///   `drop_unused_pytest_build_requires` (a BuildRequires an update adds that
-///   the check does not use), `parenthesize_conditional_dependencies` (OBS:
+///   `drop_unused_pytest_build_requires` (a pytest BuildRequires that neither
+///   `%check` nor the unpacked tests need, and the origin does not have),
+///   `parenthesize_conditional_dependencies` (OBS:
 ///   `nothing provides if`), `normalize_runtime_python_module` (a runtime name of
 ///   another flavor), `hoist_dependency_tags` (a Requires written after
 ///   `%python_subpackages` lands on the wrong subpackage), `dedupe_changelog_header`
