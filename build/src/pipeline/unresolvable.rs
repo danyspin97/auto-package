@@ -14,6 +14,9 @@ use extra_drop::*;
 mod rpm_names;
 #[cfg(test)]
 mod rpm_names_tests;
+mod wait_bounds;
+#[cfg(test)]
+mod wait_bounds_tests;
 #[cfg(test)]
 mod wait_precheck_tests;
 pub(super) mod wait_record;

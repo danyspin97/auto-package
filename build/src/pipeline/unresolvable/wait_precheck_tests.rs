@@ -104,3 +104,23 @@ fn an_edited_spec_is_not_waited_on() {
         assert!(ctx.ws.dir().join("unresolvable-wait.json").exists());
     });
 }
+
+/// The spec asks `foo >= 2.0`: the record keeps that bound, so an RPM of foo
+/// at 2.0 here is not enough while the repository's copy is older.
+#[test]
+fn a_spec_bound_is_kept_and_checked_against_the_repository_copy() {
+    let reporter = Progress::default();
+    let spec = "Name: bar\nVersion: 1\nRequires: python313-foo >= 2.0\n";
+    with_ctx(spec, &reporter, |ctx, work| {
+        save_missing(ctx, &["foo".to_string()], &[], &[]);
+        std::fs::write(work.join("rpms/python313-foo-2.0-1.1.noarch.rpm"), b"").unwrap();
+        let older = |_: &str, _: &str| false;
+        assert!(matches!(
+            precheck_with(ctx, &older),
+            Some(PipelineResult::MissingDeps { .. })
+        ));
+        assert!(ctx.ws.dir().join("unresolvable-wait.json").exists());
+        assert!(precheck_with(ctx, &|_, _| true).is_none());
+        assert!(!ctx.ws.dir().join("unresolvable-wait.json").exists());
+    });
+}
