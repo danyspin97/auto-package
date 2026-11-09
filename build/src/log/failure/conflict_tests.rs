@@ -96,3 +96,17 @@ fn the_check_block_is_found_through_the_whole_extract() {
     assert!(e.excerpt.contains("found conflict of"));
     assert_eq!(e.failed_section, None);
 }
+
+/// The logging noise at exit is not the headline: no error line names it, so
+/// the agent's hint leads with the check instead.
+#[test]
+fn the_logging_noise_at_exit_is_not_the_headline() {
+    let e = extract(KIVY_TAIL, &PathMapper::with_sdist_root("Kivy-2.3.2"));
+    assert!(
+        e.error_lines.iter().all(|l| !l.contains("I/O operation")),
+        "{:?}",
+        e.error_lines
+    );
+    let f = e.failure.expect("the packaged-twice block");
+    assert!(f.excerpt.starts_with("... running 50-check-packaged-twice"));
+}

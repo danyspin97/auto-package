@@ -204,6 +204,14 @@ static PY_EXCEPTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(?<kind>\w+(?:Error|Exception|Warning)): (?<msg>.+)$").expect("static pattern")
 });
 
+/// What the logging module prints when a handler writes to a stream that is
+/// already closed: pytest-xvfb's shutdown stops the virtual display and its
+/// `log.debug` lines hit a closed stdout. It runs after the test summary, so it
+/// is not the failure, and the last exception line would otherwise name it.
+static LOGGING_AT_EXIT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^ValueError: I/O operation on closed file\.?$").expect("static pattern")
+});
+
 /// Extract the signal from a raw `osc build` log.
 pub fn extract(raw: &str, mapper: &PathMapper) -> ExtractedLog {
     let format_suspect = !has_timestamps(raw);
@@ -285,7 +293,7 @@ fn parse_errors(lines: &[&str]) -> Vec<String> {
     // what went wrong. Python-only; other ecosystems get nothing from this half
     // and fall through to rpm's verdict below.
     for l in lines.iter().rev() {
-        if PY_EXCEPTION.is_match(l) {
+        if PY_EXCEPTION.is_match(l) && !LOGGING_AT_EXIT.is_match(l) {
             out.push(l.trim().to_string());
             break;
         }
