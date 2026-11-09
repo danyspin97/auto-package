@@ -207,8 +207,18 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
             .collect(),
         package_notes: q.package_notes.clone(),
     };
+    let (records, tries_unreadable) = chosen
+        .as_deref()
+        .map(|r| run_records(dir, r))
+        .unwrap_or_default();
+    ex.tries = per_package(&records).into_iter().find(|t| t.pkg == pkg);
     ex.attempts = p.attempts;
     ex.unknown = unknowns(&ex, state.is_some());
+    if tries_unreadable > 0 {
+        ex.unknown.push(format!(
+            "{tries_unreadable} line(s) of run.jsonl named a build or package event that could not be read: the tries may be short."
+        ));
+    }
     Ok(ex)
 }
 

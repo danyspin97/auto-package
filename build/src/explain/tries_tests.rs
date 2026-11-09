@@ -280,3 +280,31 @@ fn the_summary_lists_at_most_twenty_five_lines_of_packages() {
 fn the_summary_block_is_empty_when_no_package_ran_a_build() {
     assert_eq!(summary_block(&[]), "");
 }
+
+#[test]
+fn explain_prints_the_tries_and_the_reason_of_each_failed_try() {
+    let t = tempfile::tempdir().unwrap();
+    let run = t.path().join("runs").join("20261027-000000-aaaa-1-0");
+    std::fs::create_dir_all(&run).unwrap();
+    let lines = [
+        start("foo", 1, 1, 0),
+        step_end("foo", 1, "Failed"),
+        build_failed("foo", 1, r#""BuildFailed""#),
+        start("foo", 2, 2, 1),
+        step_end("foo", 2, "Ok"),
+        finished("foo", BUILT),
+    ];
+    std::fs::write(run.join("run.jsonl"), lines.join("\n") + "\n").unwrap();
+    let ex = explain(&Query {
+        project_dir: t.path(),
+        package: "foo",
+        run: None,
+        package_notes: String::new(),
+    })
+    .unwrap();
+    let text = plain(&render(&ex, 100));
+    assert!(text.contains("Tries (2)"), "{text}");
+    assert!(text.contains("2 tries, built"), "{text}");
+    assert!(text.contains("try 1: failed, BuildFailed"), "{text}");
+    assert!(text.contains("try 2: built"), "{text}");
+}

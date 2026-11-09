@@ -24,6 +24,7 @@ mod tests;
 mod tries;
 #[cfg(test)]
 mod tries_tests;
+mod tries_view;
 
 pub use collect::*;
 use logs::*;
@@ -31,3 +32,4 @@ pub use model::*;
 use parse::*;
 pub use render::*;
 pub use tries::*;
+use tries_view::*;

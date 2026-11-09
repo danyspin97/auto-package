@@ -192,6 +192,11 @@ pub(super) fn unknowns(ex: &Explanation, has_state: bool) -> Vec<String> {
             ex.run_info.unreadable_lines
         ));
     }
+    if ex.tries.as_ref().is_some_and(|t| t.tries > 0) {
+        u.push(
+            "run.jsonl does not record why the pipeline retried or gave up a package (its failure kind): a try shows the build log's classification only.".into(),
+        );
+    }
     if ex.attempts.iter().any(|a| a.dir.is_none()) && ex.run.is_some() {
         u.push(
             "Some steps have no artifact directory (not written for that step, or cleaned up)."

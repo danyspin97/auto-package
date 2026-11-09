@@ -293,6 +293,10 @@ pub fn render(ex: &Explanation, width: usize) -> Vec<Line> {
         }
     }
 
+    for l in tries_section(ex, o.width) {
+        o.lines.push(l);
+    }
+
     o.heading(&format!("Attempts ({})", ex.attempts.len()));
     if ex.attempts.is_empty() {
         o.para(

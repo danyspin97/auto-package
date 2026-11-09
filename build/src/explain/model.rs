@@ -25,6 +25,8 @@ pub struct Explanation {
     pub run_info: RunInfo,
     pub version: VersionInfo,
     pub outcome: Outcome,
+    /// The package's builds in the run (`None`: no run touched it).
+    pub tries: Option<PkgTries>,
     pub attempts: Vec<Attempt>,
     pub flaky: Vec<String>,
     pub ladder: Ladder,
