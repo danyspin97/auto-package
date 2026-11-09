@@ -239,9 +239,13 @@ pub(super) fn submit_requests(
         return Ok(());
     }
 
-    // A dependency's request is made first, so the request of a package that
-    // requires its update can name it.
-    pending.sort_by_key(|(i, _)| results[*i].item.dependency_of.is_none());
+    // A dependency's request is made before the request of what requires it,
+    // so that request can name it.
+    let order = requires_order(&items);
+    let mut slots: Vec<Option<(usize, osc::SubmitRequest)>> =
+        pending.into_iter().map(Some).collect();
+    let pending: Vec<(usize, osc::SubmitRequest)> =
+        order.into_iter().filter_map(|k| slots[k].take()).collect();
     let mut created: Vec<(String, String)> = Vec::new();
     for (idx, mut sr) in pending {
         sr.description = name_created(&sr.description, &results[idx].item.requires, &created);
@@ -265,6 +269,30 @@ pub(super) fn submit_requests(
         };
     }
     Ok(())
+}
+
+/// The order to create the requests of `items` in, as indices into `items`:
+/// each item after the items its `requires` name (by package), so that a
+/// request can name the request of a dependency it requires. Otherwise the
+/// order given is kept. A cycle does not hang: an item is visited once.
+pub(super) fn requires_order(items: &[&Item]) -> Vec<usize> {
+    fn visit(i: usize, items: &[&Item], seen: &mut [bool], out: &mut Vec<usize>) {
+        if std::mem::replace(&mut seen[i], true) {
+            return;
+        }
+        for r in &items[i].requires {
+            if let Some(j) = items.iter().position(|o| o.pkg == r.pkg) {
+                visit(j, items, seen, out);
+            }
+        }
+        out.push(i);
+    }
+    let mut seen = vec![false; items.len()];
+    let mut out = Vec::with_capacity(items.len());
+    for i in 0..items.len() {
+        visit(i, items, &mut seen, &mut out);
+    }
+    out
 }
 
 /// `description` with each required update that it names by its branch
@@ -381,5 +409,82 @@ mod name_created_tests {
         assert!(!out.contains("branch package"), "{out}");
         // Nothing created for it: the branch package stays.
         assert_eq!(name_created(&text, &[libbar(None)], &[]), text);
+    }
+}
+
+#[cfg(test)]
+mod requires_order_tests {
+    use super::*;
+
+    fn item(pkg: &str, requires: &[&str]) -> Item {
+        Item {
+            pkg: pkg.into(),
+            origin: "Base:System".into(),
+            ecosystem: ap_build::update::Ecosystem::GitRepo {
+                url: "https://example.org/x".into(),
+            },
+            old_version: "1".into(),
+            new_version: "2".into(),
+            upstream_tag: None,
+            dependency_of: None,
+            requires: requires
+                .iter()
+                .map(|pkg| up::RequiredUpdate {
+                    pkg: pkg.to_string(),
+                    branch_package: format!("home:u:branches:B/{pkg}"),
+                    requirement: format!("{pkg}-devel >= 2"),
+                    origin: "devel:libraries".into(),
+                    origin_version: "1".into(),
+                    request: None,
+                })
+                .collect(),
+            findings: Vec::new(),
+        }
+    }
+
+    fn order(items: &[Item]) -> Vec<&str> {
+        let refs: Vec<&Item> = items.iter().collect();
+        requires_order(&refs)
+            .into_iter()
+            .map(|i| items[i].pkg.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_dependency_comes_before_what_requires_it_even_when_listed_after() {
+        // app needs libfoo, libfoo needs libbar; listed the other way round.
+        let items = [
+            item("app", &["libfoo"]),
+            item("libfoo", &["libbar"]),
+            item("libbar", &[]),
+        ];
+        assert_eq!(order(&items), ["libbar", "libfoo", "app"]);
+    }
+
+    #[test]
+    fn items_nothing_requires_keep_their_order() {
+        let items = [item("a", &[]), item("b", &[]), item("c", &[])];
+        assert_eq!(order(&items), ["a", "b", "c"]);
+        let items = [
+            item("a", &[]),
+            item("app", &["lib"]),
+            item("b", &[]),
+            item("lib", &[]),
+        ];
+        assert_eq!(order(&items), ["a", "lib", "app", "b"]);
+    }
+
+    #[test]
+    fn a_cycle_is_ordered_once_each() {
+        let items = [item("a", &["b"]), item("b", &["a"])];
+        let mut got = order(&items);
+        got.sort();
+        assert_eq!(got, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_requirement_on_a_package_not_pending_is_ignored() {
+        let items = [item("app", &["elsewhere"]), item("b", &[])];
+        assert_eq!(order(&items), ["app", "b"]);
     }
 }
