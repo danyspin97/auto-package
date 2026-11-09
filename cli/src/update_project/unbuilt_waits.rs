@@ -59,6 +59,7 @@ mod tests {
             old_version: "1".into(),
             new_version: "2".into(),
             upstream_tag: None,
+            held_version: None,
             dependency_of: None,
             requires: Vec::new(),
             findings: Vec::new(),

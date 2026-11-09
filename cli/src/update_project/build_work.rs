@@ -349,7 +349,7 @@ fn build_item(
             .as_ref()
             .map(|job| job.problem(&item.pkg, &item.new_version))
             .or_else(|| improve_problem(item)),
-        from_version: Some(item.old_version.clone()),
+        from_version: Some(item.from_version().to_string()),
         upstream_tag: item.upstream_tag.clone(),
         // A maintenance run (its code streams and backports) keeps its own
         // recipe rules and is not an update of the package.

@@ -283,7 +283,7 @@ fn prepare(
         // A branch that holds upstream's version and built it is listed, not
         // rebuilt; one ahead of upstream is skipped. Both are decided before
         // the branch call, which would rebase the branch onto its origin.
-        if existing::settled_in_branch(&item, branch, a, ctx, report) {
+        if existing::settled_in_branch(&mut item, branch, a, ctx, report) {
             continue;
         }
         // A lint of a branch an earlier update left ahead of its origin

@@ -159,6 +159,7 @@ mod tests {
             old_version: "1.0".to_string(),
             new_version: "2.0".to_string(),
             upstream_tag: None,
+            held_version: None,
             dependency_of: None,
             requires: Vec::new(),
             findings: vec![],

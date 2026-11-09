@@ -166,6 +166,7 @@ impl Audit {
                                     old_version: version.clone(),
                                     new_version: version,
                                     upstream_tag: None,
+                                    held_version: None,
                                     dependency_of: None,
                                     requires: Vec::new(),
                                     findings: fixable_lines(&findings),

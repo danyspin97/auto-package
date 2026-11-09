@@ -23,6 +23,7 @@ fn item(old: &str, new: &str) -> Item {
         old_version: old.into(),
         new_version: new.into(),
         upstream_tag: None,
+        held_version: None,
         dependency_of: None,
         requires: Vec::new(),
         findings: Vec::new(),
@@ -75,7 +76,13 @@ fn a_branch_at_upstream_that_did_not_build_is_continued_from() {
             Ok(Some("1.1")),
             Ok(status.clone()),
         );
-        assert_eq!(s, Settlement::Go, "{status}");
+        assert_eq!(
+            s,
+            Settlement::Go {
+                held: Some("1.1".into())
+            },
+            "{status}"
+        );
     }
 }
 
@@ -114,7 +121,7 @@ fn a_lint_item_is_not_settled_by_a_branch_holding_its_version() {
         Ok(Some("1.0")),
         Ok(osc::BuildStatus::Succeeded),
     );
-    assert_eq!(s, Settlement::Go);
+    assert_eq!(s, Settlement::Go { held: None });
     assert_eq!(reads, 0);
     let mut improve = args(&[]);
     improve.improve = true;
@@ -124,7 +131,7 @@ fn a_lint_item_is_not_settled_by_a_branch_holding_its_version() {
         Ok(Some("1.1")),
         Ok(osc::BuildStatus::Succeeded),
     );
-    assert_eq!(s, Settlement::Go);
+    assert_eq!(s, Settlement::Go { held: None });
 }
 
 #[test]
@@ -148,7 +155,12 @@ fn a_branch_ahead_of_upstream_is_listed_unless_the_target_is_forced() {
         ahead(),
         Ok(osc::BuildStatus::Succeeded),
     );
-    assert_eq!(s, Settlement::Go);
+    assert_eq!(
+        s,
+        Settlement::Go {
+            held: Some("1.3".into())
+        }
+    );
 }
 
 #[test]
@@ -159,7 +171,7 @@ fn a_revision_pin_is_not_settled_by_the_version() {
         Ok(Some("1.1")),
         Ok(osc::BuildStatus::Succeeded),
     );
-    assert_eq!(s, Settlement::Go);
+    assert_eq!(s, Settlement::Go { held: None });
 }
 
 #[test]
@@ -173,6 +185,29 @@ fn a_copy_that_cannot_be_read_is_left_alone() {
     assert!(matches!(s, Settlement::Unreadable(w) if w.contains("no readable")));
 }
 
+/// The version a build of `it` starts from, once it is settled with `held`.
+fn started_from(it: &Item, held: Option<&str>) -> String {
+    let (s, _) = settled(it, &args(&[]), Ok(held), Ok(osc::BuildStatus::Succeeded));
+    let Settlement::Go { held } = s else {
+        panic!("not continued: {s:?}");
+    };
+    let mut it = it.clone();
+    it.held_version = held;
+    it.from_version().to_string()
+}
+
+#[test]
+fn an_update_continued_from_the_branch_starts_from_the_branchs_version() {
+    // The origin has 1.0, the branch 1.1 and upstream 1.2: the checkout holds
+    // 1.1, so the build must expect 1.1, not the origin's 1.0.
+    assert_eq!(started_from(&item("1.0", "1.2"), Some("1.1")), "1.1");
+}
+
+#[test]
+fn a_freshly_branched_update_starts_from_the_origins_version() {
+    assert_eq!(started_from(&item("1.0", "1.2"), None), "1.0");
+}
+
 #[test]
 fn a_package_the_branch_does_not_hold_is_branched() {
     let (s, _) = settled(
@@ -181,5 +216,5 @@ fn a_package_the_branch_does_not_hold_is_branched() {
         Ok(None),
         Ok(osc::BuildStatus::Succeeded),
     );
-    assert_eq!(s, Settlement::Go);
+    assert_eq!(s, Settlement::Go { held: None });
 }

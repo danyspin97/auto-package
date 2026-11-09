@@ -460,6 +460,7 @@ mod requires_order_tests {
             old_version: "1".into(),
             new_version: "2".into(),
             upstream_tag: None,
+            held_version: None,
             dependency_of: None,
             requires: requires
                 .iter()

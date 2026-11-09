@@ -29,6 +29,7 @@ fn libbar() -> Item {
         old_version: "1.0".into(),
         new_version: "2.0".into(),
         upstream_tag: None,
+        held_version: None,
         dependency_of: Some("libfoo".into()),
         requires: Vec::new(),
         findings: Vec::new(),

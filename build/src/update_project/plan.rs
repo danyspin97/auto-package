@@ -12,6 +12,11 @@ pub struct Item {
     pub new_version: String,
     /// The upstream tag `new_version` stands for, for a dashed tag.
     pub upstream_tag: Option<String>,
+    /// The version the branch project's copy holds, when the update continues
+    /// from it (a branch between `old_version` and `new_version`). The build
+    /// starts from that version, not from `old_version`. `None` when the branch
+    /// holds no such package or its copy was not read.
+    pub held_version: Option<String>,
     /// The package this one was pulled in for (`--update-deps`).
     pub dependency_of: Option<String>,
     /// The dependency updates its BuildRequires need (`--update-deps`).
@@ -19,6 +24,14 @@ pub struct Item {
     /// What `lint` found wrong with the package, one line each.
     /// Empty for an update, where `old_version` and `new_version` differ.
     pub findings: Vec<String>,
+}
+
+impl Item {
+    /// The version the build of this item starts from: the one its branch
+    /// holds when it continues from it, otherwise the origin's.
+    pub fn from_version(&self) -> &str {
+        self.held_version.as_deref().unwrap_or(&self.old_version)
+    }
 }
 
 /// A dependency update a package's BuildRequires need: a bound the origin's
@@ -101,6 +114,7 @@ pub fn items_from_plan(origin: &str, candidates: &[Candidate], exclude: &[String
             old_version: old_version.clone(),
             new_version: new_version.clone(),
             upstream_tag: upstream_tag.clone(),
+            held_version: None,
             dependency_of: None,
             requires: Vec::new(),
             findings: Vec::new(),

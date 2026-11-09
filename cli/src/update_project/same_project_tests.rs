@@ -18,6 +18,7 @@ fn item(pkg: &str, old: &str, new: &str) -> Item {
         old_version: old.into(),
         new_version: new.into(),
         upstream_tag: None,
+        held_version: None,
         dependency_of: None,
         requires: Vec::new(),
         findings: Vec::new(),

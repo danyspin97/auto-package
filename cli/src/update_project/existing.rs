@@ -14,8 +14,11 @@ use ap_core::event::PackageOutcome;
 /// What the branch project's copy means for an item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Settlement {
-    /// The item goes on: it is branched, or continued from the branch.
-    Go,
+    /// The item goes on: it is branched, or continued from the branch. `held`
+    /// is the version the branch holds, when the item continues from it: the
+    /// build starts from that version. `None` when the branch does not hold the
+    /// package, or its copy was not read.
+    Go { held: Option<String> },
     /// The branch holds upstream's version and it built: not rebuilt.
     Updated,
     /// The branch holds a version newer than upstream's.
@@ -61,7 +64,7 @@ pub(super) fn settle(
     built: &dyn Fn() -> Result<osc::BuildStatus, String>,
 ) -> Settlement {
     if !applies(item, a) {
-        return Settlement::Go;
+        return Settlement::Go { held: None };
     }
     let held = match held() {
         Ok(held) => held,
@@ -78,22 +81,23 @@ pub(super) fn settle(
         // that succeeded settles the package; any other is continued from.
         BranchState::AlreadyUpdated => match built() {
             Ok(status) if status.is_success() => Settlement::Updated,
-            Ok(_) => Settlement::Go,
+            Ok(_) => Settlement::Go { held },
             Err(why) => {
                 Settlement::Unreadable(format!("its build results could not be read: {why}"))
             }
         },
         // `--to-version` names the target: it is not held back by a newer branch.
-        BranchState::AheadOfUpstream { .. } if a.to_version.is_some() => Settlement::Go,
+        BranchState::AheadOfUpstream { .. } if a.to_version.is_some() => Settlement::Go { held },
         BranchState::AheadOfUpstream { branch } => Settlement::Ahead { branch },
-        BranchState::Fresh | BranchState::Continue => Settlement::Go,
+        BranchState::Fresh => Settlement::Go { held: None },
+        BranchState::Continue => Settlement::Go { held },
     }
 }
 
 /// Whether the branch project's copy settles `item`. `true` when the item is
 /// handled here, and must not be branched or built; `false` when it goes on.
 pub(super) fn settled_in_branch(
-    item: &Item,
+    item: &mut Item,
     branch: &str,
     a: &UpdateProjectArgs,
     ctx: &Ctx<'_>,
@@ -111,7 +115,12 @@ pub(super) fn settled_in_branch(
         },
     );
     match settlement {
-        Settlement::Go => false,
+        Settlement::Go { held } => {
+            // The build starts from the version the branch holds, which the
+            // checkout is compared with (see `build_work::build_item`).
+            item.held_version = held;
+            false
+        }
         Settlement::Unreadable(why) => {
             // The branch's copy is unknown: it is not branched over, and the
             // package is listed as skipped, not as needing the maintainer.
