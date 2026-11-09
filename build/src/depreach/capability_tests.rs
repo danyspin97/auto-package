@@ -358,6 +358,20 @@ fn a_bound_with_a_release_compares_the_release_too() {
 }
 
 #[test]
+fn a_bound_release_is_not_compared_with_a_provide_without_one() {
+    // The provide has no release to compare, so its `1.2.3` meets `= 1.2.3-4`.
+    let bare = ["pkgconfig(foo) = 1.2.3"];
+    assert_eq!(
+        within(("=", "1.2.3-4"), &bare),
+        Match::Satisfied("1.2.3".into())
+    );
+    assert_eq!(
+        within((">=", "1.2.3-4"), &bare),
+        Match::Satisfied("1.2.3".into())
+    );
+}
+
+#[test]
 fn an_epoch_counts_before_the_version() {
     let epoch = ["pkgconfig(foo) = 1:1.2.3-4"];
     assert_eq!(

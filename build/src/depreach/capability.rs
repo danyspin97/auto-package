@@ -130,14 +130,16 @@ pub fn provided_within(req: &Requirement, capability: &str, provides: &[String])
             unknown = Some(format!("{text} has no version to compare"));
             continue;
         };
-        // A bound without a release compares the version part only, so
-        // `foo-devel = 1.2.3-4` meets `= 1.2.3` as RPM does.
-        let compared = if bound.version.contains('-') {
-            have.as_str()
+        // The release is compared only when the bound and the provide both
+        // carry one, as RPM does: `foo-devel = 1.2.3-4` meets `= 1.2.3`, and
+        // `foo = 1.2.3` meets `= 1.2.3-4`.
+        let has_release = |v: &str| strip_release(v) != v;
+        let (compared, wanted) = if has_release(&bound.version) && has_release(&have) {
+            (have.as_str(), bound.version.as_str())
         } else {
-            strip_release(&have)
+            (strip_release(&have), strip_release(&bound.version))
         };
-        match crate::version::cmp(compared, &bound.version, crate::version::Scheme::Generic) {
+        match crate::version::cmp(compared, wanted, crate::version::Scheme::Generic) {
             Some(ord) if accepts(&bound.op, ord) => return Match::Satisfied(have),
             Some(_) => {
                 older.get_or_insert(have);
