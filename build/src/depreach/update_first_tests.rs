@@ -262,3 +262,49 @@ fn the_update_side_is_the_new_package_version() {
         DepNeed::Unmet("pkgconfig(foo) >= 2.1".into())
     );
 }
+
+#[test]
+fn a_bound_without_an_epoch_ignores_the_epoch_of_the_provide() {
+    // The origin's provider gives 1:2.0 (Epoch: 1); RPM compares >= 2.0 and
+    // = 2.0 without the epoch, so the origin meets them and is not updated.
+    let spec = "BuildRequires: pkgconfig(foo) >= 2.0\nBuildRequires: pkgconfig(foo) = 2.0\n";
+    assert_eq!(
+        need_with(
+            spec,
+            &["pkgconfig(foo) >= 2.0", "pkgconfig(foo) = 2.0"],
+            "2.0",
+            &[
+                ("pkgconfig(foo) >= 2.0", "1:2.0"),
+                ("pkgconfig(foo) = 2.0", "1:2.0")
+            ],
+            "2.3"
+        ),
+        DepNeed::Origin
+    );
+}
+
+#[test]
+fn a_bound_with_an_epoch_compares_the_epoch_of_the_provide() {
+    assert_eq!(
+        need_with(
+            "BuildRequires: pkgconfig(foo) >= 1:2.0\n",
+            &["pkgconfig(foo) >= 1:2.0"],
+            "2.0",
+            &[("pkgconfig(foo) >= 1:2.0", "1:2.0")],
+            "2.3"
+        ),
+        DepNeed::Origin
+    );
+    // A provide without an epoch counts as epoch 0, so 2.0 misses 1:2.0, and
+    // the new version (2.3, no epoch either) misses it too.
+    assert_eq!(
+        need_with(
+            "BuildRequires: pkgconfig(foo) >= 1:2.0\n",
+            &["pkgconfig(foo) >= 1:2.0"],
+            "2.0",
+            &[("pkgconfig(foo) >= 1:2.0", "2.0")],
+            "2.3"
+        ),
+        DepNeed::Unmet("pkgconfig(foo) >= 1:2.0".into())
+    );
+}
