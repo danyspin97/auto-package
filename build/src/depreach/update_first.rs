@@ -46,8 +46,8 @@ pub enum DepNeed {
 ///
 /// A bound the update meets and the origin misses decides first (`Update`),
 /// then one that cannot be compared (`Unknown`), then one neither meets
-/// (`Unmet`). A bound with a release (`= 1.2-3`) is compared by its version
-/// part, since the versions given carry none.
+/// (`Unmet`). A bound with a release (`= 1.2-3`) is compared with it only
+/// against a version that has one (see [`meets`]).
 pub fn dependency_need(
     reqs: &[Requirement],
     names: &[String],
@@ -98,11 +98,17 @@ fn required_by(req: &Requirement, names: &[String]) -> Option<String> {
 /// Whether `version` meets `bound`, `None` when the two cannot be compared.
 ///
 /// Compared as RPM compares a dependency with a candidate: the epochs first,
-/// a missing epoch counting as 0 on either side, then the versions. Both
-/// sides are compared without a release: a provide's `1.2-3` is `1.2`.
+/// a missing epoch counting as 0 on either side, then the versions. The
+/// release is compared only when the bound has one and the version has one
+/// too; otherwise both sides are compared without it, so a provide's `1.2-3`
+/// is `1.2` against a bound `>= 1.2`, and `= 1.2-4` is met by `1.2`.
 fn meets(version: &str, bound: &Bound) -> Option<bool> {
-    let wanted = strip_release(&bound.version);
-    let have = strip_release(version);
+    let has_release = |v: &str| strip_release(v) != v;
+    let (have, wanted) = if has_release(&bound.version) && has_release(version) {
+        (version, bound.version.as_str())
+    } else {
+        (strip_release(version), strip_release(&bound.version))
+    };
     let ord = crate::version::cmp(have, wanted, crate::version::Scheme::Generic)?;
     Some(accepts(&bound.op, ord))
 }

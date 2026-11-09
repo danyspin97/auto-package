@@ -338,3 +338,55 @@ fn a_bound_with_an_epoch_compares_the_epoch_of_the_provide() {
         DepNeed::Unmet("pkgconfig(foo) >= 1:2.0".into())
     );
 }
+
+/// What `pkgconfig(foo) <bound>` needs when the origin's provide gives
+/// `provide` and the update brings `new`.
+fn foo_need(bound: &str, provide: &str, new: &str) -> DepNeed {
+    let text = format!("pkgconfig(foo) {bound}");
+    need_with(
+        &format!("BuildRequires: {text}\n"),
+        &[text.as_str()],
+        "1.0",
+        &[(text.as_str(), provide)],
+        new,
+    )
+}
+
+#[test]
+fn a_bound_release_is_compared_with_the_release_of_a_provide_that_has_one() {
+    // `= 1.2.3-4`: an equal release is met by the origin; a greater or a less
+    // one is not, and the update (1.2.3, no release) meets it.
+    assert_eq!(foo_need("= 1.2.3-4", "1.2.3-4", "1.2.3"), DepNeed::Origin);
+    assert_eq!(
+        foo_need("= 1.2.3-4", "1.2.3-5", "1.2.3"),
+        DepNeed::Update("pkgconfig(foo) = 1.2.3-4".into())
+    );
+    assert_eq!(
+        foo_need("= 1.2.3-4", "1.2.3-3", "1.2.3"),
+        DepNeed::Update("pkgconfig(foo) = 1.2.3-4".into())
+    );
+    // `>= 1.2.3-4`: a greater release meets it, a less one does not.
+    assert_eq!(foo_need(">= 1.2.3-4", "1.2.3-5", "1.3"), DepNeed::Origin);
+    assert_eq!(
+        foo_need(">= 1.2.3-4", "1.2.3-3", "1.3"),
+        DepNeed::Update("pkgconfig(foo) >= 1.2.3-4".into())
+    );
+    // The update's version has a release too: it is compared with it.
+    assert_eq!(
+        foo_need("= 1.2.3-4", "1.2.3-3", "1.2.3-4"),
+        DepNeed::Update("pkgconfig(foo) = 1.2.3-4".into())
+    );
+}
+
+#[test]
+fn a_bound_without_a_release_ignores_the_release_of_a_provide() {
+    assert_eq!(foo_need("= 1.2.3", "1.2.3-5", "1.3"), DepNeed::Origin);
+    assert_eq!(foo_need("= 1.2.3", "1.2.3-3", "1.3"), DepNeed::Origin);
+    assert_eq!(foo_need(">= 1.2.3", "1.2.3-1", "1.3"), DepNeed::Origin);
+}
+
+#[test]
+fn a_bound_release_is_not_compared_with_a_provide_without_one() {
+    // The provide's `1.2.3` meets `= 1.2.3-4` as RPM does: no release to compare.
+    assert_eq!(foo_need("= 1.2.3-4", "1.2.3", "1.3"), DepNeed::Origin);
+}
