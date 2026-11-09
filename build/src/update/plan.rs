@@ -376,44 +376,23 @@ pub(super) fn skipped(rpm_name: &str, reason: SkipReason) -> Candidate {
     }
 }
 
-/// Classify every package in `project` (optionally filtered to just `only`).
-///
-/// Hits OBS twice per package (`osc ls` to find the real spec filename, then
-/// `osc cat <pkg> <picked>.spec`), plus one PyPI call per PyPI-sourced
-/// package and one git-forge API call per repo-sourced one. Returned in
-/// sorted RPM-name order so `--check` output is stable across runs. Fails
-/// when the project's package listing cannot be read.
-pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Result<Vec<Candidate>, String> {
-    plan_where(
-        project,
-        &|n| only.is_none_or(|o| osc::fuzzy_key(o) == osc::fuzzy_key(n)),
-        emit,
-    )
+/// What a caller of [`plan_each_watched`] is told while the packages are
+/// checked, so a view can show how many there are and which one is checked.
+#[derive(Clone, Copy)]
+pub struct Watch<'a> {
+    /// Called once, before any check, with how many packages will be checked.
+    pub total: &'a dyn Fn(usize),
+    /// Called on the pool thread that begins the check of a package, with its
+    /// name. At most `check_jobs()` checks are begun and not yet answered.
+    pub started: &'a (dyn Fn(&str) + Sync),
 }
 
-/// [`plan`] over the packages of `project` that `wanted` accepts. Packages it
-/// rejects are not fetched at all, which is what makes a few names out of a
-/// large project cheap.
-pub fn plan_where(
+/// [`plan_each`], telling `watch` the number of packages and each check's start.
+pub fn plan_each_watched(
     project: &str,
     wanted: &dyn Fn(&str) -> bool,
     emit: Emit<'_>,
-) -> Result<Vec<Candidate>, String> {
-    let mut candidates = Vec::new();
-    plan_each(project, wanted, emit, &mut |c| {
-        candidates.push(c);
-        true
-    })?;
-    Ok(candidates)
-}
-
-/// [`plan_where`] handing each package to `on` as soon as it is classified,
-/// so a caller can start on the first update while the rest are still being
-/// checked. `on` returns whether to go on; `false` stops the sweep.
-pub fn plan_each(
-    project: &str,
-    wanted: &dyn Fn(&str) -> bool,
-    emit: Emit<'_>,
+    watch: Watch<'_>,
     on: &mut dyn FnMut(Candidate) -> bool,
 ) -> Result<(), String> {
     // A failed listing is an error: treating it as "no packages" would make
@@ -432,6 +411,7 @@ pub fn plan_each(
             message: format!("{project} lists {dropped} and {kept}: only {kept} is checked"),
         });
     }
+    (watch.total)(names.len());
 
     // Enumerate the package's files instead of guessing `<pkg>.spec`.
     // AppCo's versioned-library convention gives one OBS package per
@@ -525,6 +505,7 @@ pub fn plan_each(
     // closures that are not `Sync`, so each check builds its own from the
     // shared ones above.
     let check = |n: &str| {
+        (watch.started)(n);
         let lookups = Lookups {
             fetch_pypi_latest: &fetch_pypi_latest,
             fetch_repo_latest: &fetch_repo_latest,
