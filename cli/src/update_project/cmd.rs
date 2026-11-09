@@ -1,3 +1,4 @@
+use super::same_wait::{Held, go_on};
 use super::*;
 
 pub(super) fn cmd_update_project(
@@ -233,7 +234,6 @@ fn prepare(
         };
         // The name it was found under, which the items that need it wait for.
         let first_key = visit_key(&item);
-        let mut after: Vec<String> = Vec::new();
         // A package that its own ExclusiveArch or ExcludeArch keeps off this
         // architecture would only end `excluded`: it is skipped before any branch.
         if let Some(why) = arch_exclusion(&item, &a.arch, ctx) {
@@ -261,7 +261,7 @@ fn prepare(
         if a.in_place {
             // The package is already where it will be changed, and its
             // BuildRequires resolve: it builds there today.
-            ready.push(Job::new(item, first_key, after));
+            ready.push(Job::new(item, first_key, Vec::new()));
             continue;
         }
         // An origin whose spec cannot be read cannot be updated: it is reported,
@@ -400,57 +400,50 @@ fn prepare(
                 .ok()
                 .or_else(|| origin_spec(&item))
         };
-        match spec {
-            Some(spec) => {
-                if !run_packages.contains(&item.pkg) {
-                    run_packages.push(item.pkg.clone());
-                }
-                let flavors = module_flavors.get_or_init(|| python_module_flavors(a, ctx));
-                let reqs = spec_requirements(&spec, flavors);
-                let (adds, verdicts) =
-                    match reach_dependencies(a, &item, &reqs, resolver, &run_packages, ctx, report)
-                    {
-                        Ok(found) => found,
-                        Err(e) => {
-                            let why = e.to_string();
-                            ctx.warn(format!("{}: {why}", item.pkg));
-                            report.results.push(ItemResult {
-                                item,
-                                outcome: ItemOutcome::Failed(why),
-                                sr: SrOutcome::NotRequested,
-                            });
-                            continue;
-                        }
-                    };
-                if a.update_deps {
-                    let mut deps = DepQueue {
-                        queue: &mut queue,
-                        visited: &mut visited,
-                        count: &mut dependency_count,
-                    };
-                    let prediction = || predict(&item, ctx);
-                    let found = dependency_items(
-                        a,
-                        branch,
-                        &item,
-                        &reqs.requirements,
-                        &verdicts,
-                        &adds,
-                        &prediction,
-                        ctx,
-                        emit,
-                    );
-                    for (dep, choice) in found {
-                        deps.add(&mut item, dep, choice, &mut after, ctx.reporter.as_ref());
-                    }
-                }
-            }
-            None => ctx.warn(format!(
+        let Some(spec) = spec else {
+            ctx.warn(format!(
                 "could not read the spec of {}, so its BuildRequires are not checked",
                 item.pkg
-            )),
+            ));
+            ready.push(Job::new(item, first_key, Vec::new()));
+            continue;
+        };
+        if !run_packages.contains(&item.pkg) {
+            run_packages.push(item.pkg.clone());
         }
-        ready.push(Job::new(item, first_key, after));
+        let flavors = module_flavors.get_or_init(|| python_module_flavors(a, ctx));
+        let reqs = spec_requirements(&spec, flavors);
+        let (adds, verdicts) =
+            match reach_dependencies(a, &item, &reqs, resolver, &run_packages, ctx, report) {
+                Ok(found) => found,
+                Err(e) => {
+                    let why = e.to_string();
+                    ctx.warn(format!("{}: {why}", item.pkg));
+                    report.results.push(ItemResult {
+                        item,
+                        outcome: ItemOutcome::Failed(why),
+                        sr: SrOutcome::NotRequested,
+                    });
+                    continue;
+                }
+            };
+        go_on(
+            Held {
+                item,
+                first_key,
+                reqs: reqs.requirements,
+                verdicts,
+                adds,
+                prediction: None,
+            },
+            a,
+            branch,
+            ctx,
+            &mut queue,
+            &mut visited,
+            &mut dependency_count,
+            &mut ready,
+        );
     }
     // The updates the sweep found but the loop did not take (a stop leaves
     // them in its channel) are listed as not started: that closes the rows

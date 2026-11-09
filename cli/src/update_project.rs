@@ -76,6 +76,7 @@ mod parked_tests;
 mod same_project_defer_tests;
 #[cfg(test)]
 mod same_project_tests;
+mod same_wait;
 mod schedule;
 #[cfg(test)]
 mod schedule_tests;
