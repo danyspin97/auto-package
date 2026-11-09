@@ -67,6 +67,11 @@ mod same_project;
 // Not called yet, as `same_project`.
 #[allow(dead_code)]
 mod same_project_defer;
+// Not called yet: the wiring into the preparation loop is a task of its own.
+#[allow(dead_code)]
+mod parked;
+#[cfg(test)]
+mod parked_tests;
 #[cfg(test)]
 mod same_project_defer_tests;
 #[cfg(test)]
