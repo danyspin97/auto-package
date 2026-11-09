@@ -20,6 +20,8 @@ pub(super) struct CapObs {
     /// `Provides:` of each (project, RPM name).
     pub(super) provides: HashMap<(String, String), Result<Vec<String>, String>>,
     pub(super) packages: Result<HashSet<String>, String>,
+    /// What the published-binary search finds, by binary name.
+    pub(super) published: Vec<PublishedBinary>,
     pub(super) reads: AtomicUsize,
     pub(super) writes: AtomicUsize,
 }
@@ -58,8 +60,12 @@ impl Obs for CapObs {
         self.writes.fetch_add(1, Ordering::SeqCst);
         Err("read only in tests".into())
     }
-    fn published_binaries(&self, _: &[&str]) -> Result<Vec<PublishedBinary>, String> {
-        Ok(Vec::new())
+    fn published_binaries(&self, names: &[&str]) -> Result<Vec<PublishedBinary>, String> {
+        let found = self
+            .published
+            .iter()
+            .filter(|b| names.contains(&b.name.as_str()));
+        Ok(found.cloned().collect())
     }
     fn package_meta(&self, p: &str, pkg: &str) -> Result<Option<String>, String> {
         Ok(self
@@ -174,6 +180,7 @@ pub(super) fn fixture() -> CapObs {
         listings,
         provides,
         packages: Ok(HashSet::new()),
+        published: Vec::new(),
         reads: AtomicUsize::new(0),
         writes: AtomicUsize::new(0),
     }
