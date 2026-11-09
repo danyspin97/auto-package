@@ -1,4 +1,5 @@
 use super::*;
+use ap_build::pipeline::{RepeatStep, RetryRecord};
 
 /// What a round of dependency builds leaves for the rest of the run.
 pub(super) struct DepLedger<'a> {
@@ -15,6 +16,7 @@ pub(super) struct DepLedger<'a> {
     pub(super) pkg_reporter: &'a dyn Fn(&str) -> Arc<dyn Reporter + Send + Sync>,
     pub(super) max_dep_attempts: usize,
     pub(super) repeats: &'a mut RepeatMemory,
+    pub(super) state_root: &'a std::path::Path,
 }
 
 pub(super) type DepHandle = (
@@ -27,7 +29,7 @@ pub(super) type DepHandle = (
 impl DepLedger<'_> {
     /// Record how each dependency build in `handles` ended.
     pub(super) fn record(&mut self, handles: Vec<DepHandle>) {
-        for (dep_rpm, _version, handle, dep) in handles {
+        for (dep_rpm, version, handle, dep) in handles {
             let result = join_package(handle, &dep_rpm);
             // Aborted run: the results are not outcomes of the packages.
             if ap_build::proc::abort_reason().is_some() {
@@ -39,6 +41,7 @@ impl DepLedger<'_> {
                     ap_core::diag!("built dep {dep_rpm}");
                     self.repeats.builds += 1;
                     self.repeats.last.remove(&dep_rpm);
+                    ap_build::pipeline::clear_record(self.state_root, &dep_rpm);
                     self.dep_drops.note_outcome(
                         &dep_rpm,
                         "it was built this run, yet the package that needs it still \
@@ -106,8 +109,19 @@ impl DepLedger<'_> {
                             builds: self.repeats.builds,
                         },
                     );
-                    let retry =
-                        dep_failure_retries(kind, *rounds, self.max_dep_attempts) && !repeated;
+                    let (step, record) = if identical_stop_applies(kind) {
+                        ap_build::pipeline::record_failure(
+                            self.state_root,
+                            &dep_rpm,
+                            &version,
+                            &reason,
+                            repeated,
+                        )
+                    } else {
+                        (RepeatStep::Retry, RetryRecord::default())
+                    };
+                    let stop = step == RepeatStep::Stop;
+                    let retry = dep_failure_retries(kind, *rounds, self.max_dep_attempts) && !stop;
                     if retry {
                         self.attempted_deps.remove(&key);
                         self.retrying.insert(key);
@@ -118,21 +132,33 @@ impl DepLedger<'_> {
                     }
                     self.dep_drops.note_outcome(
                         &dep_rpm,
-                        format!(
-                            "its build failed ({reason}){}",
-                            if retry {
-                                "; it is tried once more if it is still needed"
-                            } else {
-                                ""
-                            }
-                        ),
+                        if stop {
+                            record.give_up_text()
+                        } else {
+                            format!(
+                                "its build failed ({reason}){}",
+                                if retry {
+                                    "; it is tried once more if it is still needed"
+                                } else {
+                                    ""
+                                }
+                            )
+                        },
                     );
                     (self.pkg_reporter)(&dep_rpm).report(&Event::Warning {
                         step: None,
-                        message: format!(
-                            "dependency {dep_rpm} failed to build ({reason}); \
-                             self.retrying the package that needs it"
-                        ),
+                        message: if step == RepeatStep::Instruct {
+                            format!(
+                                "dependency {dep_rpm} failed again with the same reason \
+                                 ({reason}); its next attempt is told to try a different \
+                                 approach"
+                            )
+                        } else {
+                            format!(
+                                "dependency {dep_rpm} failed to build ({reason}); \
+                                 self.retrying the package that needs it"
+                            )
+                        },
                     });
                     // Record it so the dependent package's agent can see
                     // that this one was attempted — without that evidence

@@ -561,6 +561,7 @@ pub(super) fn drain_dep_queue(b: Build<'_>, repeats: &mut RepeatMemory) -> color
             pkg_reporter: &pkg_reporter,
             max_dep_attempts,
             repeats,
+            state_root,
         }
         .record(handles);
         if ap_build::proc::abort_reason().is_some() {

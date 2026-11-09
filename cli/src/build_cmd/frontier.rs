@@ -1,4 +1,5 @@
 use super::*;
+use ap_build::pipeline::{RepeatStep, RetryRecord};
 
 /// Where the packages of a frontier round leave their results: the retry
 /// counts, the give-ups and what the round still has to do.
@@ -37,8 +38,10 @@ pub(super) struct RepeatMemory {
     pub(super) last: std::collections::HashMap<String, LastFailure>,
 }
 
-/// Whether a failure of this kind can repeat identically. An ordinary failure
-/// (`Other`) can. Transient, disk, quota, busy and agent-side failures are
+/// Whether a failure of this kind takes the repeat path. An ordinary failure
+/// (`Other`) can repeat identically: its repeat is instructed to try something
+/// different, and only the instructed attempts failing again stop it (see
+/// `RetryRecord`). Transient, disk, quota, busy and agent-side failures are
 /// retried up to the cap, since their next attempt may well differ.
 pub(super) fn identical_stop_applies(kind: FailureKind) -> bool {
     kind == FailureKind::Other
@@ -77,6 +80,7 @@ impl Frontier<'_> {
                 self.fail_counts.remove(rpm_name);
                 self.repeats.builds += 1;
                 self.repeats.last.remove(rpm_name);
+                ap_build::pipeline::clear_record(self.state_root, rpm_name);
             }
             PipelineResult::AlreadyBuilt { .. } => {
                 ap_core::diag!("{rpm_name} {version} already built");
@@ -217,8 +221,9 @@ impl Frontier<'_> {
                 };
                 *count += 1;
                 // The same ordinary failure, with no build since the last
-                // one, is not retried: the next attempt would start from the
-                // same inputs and end the same way. It is a human's to decide.
+                // one, is not run again as it was: the next attempt is told
+                // what already failed and to try something different. Only
+                // the instructed attempts failing the same way again stop it.
                 let repeated = identical_stop_applies(kind)
                     && repeats_without_change(
                         self.repeats.last.get(rpm_name),
@@ -232,12 +237,24 @@ impl Frontier<'_> {
                         builds: self.repeats.builds,
                     },
                 );
+                let (step, record) = if identical_stop_applies(kind) {
+                    ap_build::pipeline::record_failure(
+                        self.state_root,
+                        rpm_name,
+                        version,
+                        &reason,
+                        repeated,
+                    )
+                } else {
+                    (RepeatStep::Retry, RetryRecord::default())
+                };
+                let stop = step == RepeatStep::Stop;
                 let limit = if rate_limited {
                     MAX_RATE_LIMITED_ROUNDS
                 } else {
                     self.max_target_retries
                 };
-                if exhausted || repeated || cap_reached(*count, limit) {
+                if exhausted || stop || cap_reached(*count, limit) {
                     self.permanently_failed.insert(rpm_name.clone());
                     self.give_ups.insert(
                         rpm_name.clone(),
@@ -245,11 +262,8 @@ impl Frontier<'_> {
                             format!("every resolution rung failed ({reason})")
                         } else if exhausted {
                             format!("it spent its full budget/attempt allowance ({reason})")
-                        } else if repeated {
-                            format!(
-                                "it failed again with the same reason and no build since, \
-                                 so it needs a human ({reason})"
-                            )
+                        } else if stop {
+                            record.give_up_text()
                         } else {
                             format!("it failed {count} times in a row (last: {reason})")
                         },
@@ -271,13 +285,11 @@ impl Frontier<'_> {
                                  fix loop with a fresh budget; anything depending on it \
                                  stays blocked, but the rest of the closure keeps going"
                             )
-                        } else if repeated {
+                        } else if stop {
                             format!(
-                                "giving up on {rpm_name}: it failed again with the same \
-                                 reason ({reason}) and no dependency was built since, so \
-                                 another attempt would repeat it; it needs a human. \
-                                 Anything depending on it stays blocked, but the rest of \
-                                 the closure keeps going"
+                                "giving up on {rpm_name}: {}. Anything depending on it \
+                                 stays blocked, but the rest of the closure keeps going",
+                                record.give_up_text()
                             )
                         } else {
                             format!(
@@ -290,10 +302,17 @@ impl Frontier<'_> {
                 } else {
                     (self.pkg_reporter)(&rpm_name).report(&Event::Warning {
                         step: None,
-                        message: format!(
-                            "{rpm_name} failed (attempt {count}/{limit}): \
-                             {reason}; retrying next round"
-                        ),
+                        message: if step == RepeatStep::Instruct {
+                            format!(
+                                "{rpm_name} failed again with the same reason ({reason}); \
+                                 its next attempt is told to try a different approach"
+                            )
+                        } else {
+                            format!(
+                                "{rpm_name} failed (attempt {count}/{limit}): \
+                                 {reason}; retrying next round"
+                            )
+                        },
                     });
                 }
             }
@@ -328,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn the_same_reason_twice_with_nothing_built_between_stops() {
+    fn the_same_reason_twice_with_nothing_built_between_is_a_repeat() {
         let prev = last("needs a human: 1 patch", 4);
         assert!(repeats_without_change(
             Some(&prev),
