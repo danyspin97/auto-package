@@ -39,6 +39,8 @@ mod diagnostics;
 mod human;
 mod jsonl;
 mod memory;
+#[cfg(test)]
+mod memory_tests;
 mod reporter;
 mod text;
 

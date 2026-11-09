@@ -1,8 +1,13 @@
+use std::collections::HashSet;
+
+use crate::event::{StepId, StepKind};
+
 use super::*;
 
 /// What the CLI's summaries need from a run, not every event. A long run emits
 /// many events, and keeping them all only to add up a few fields grew without
-/// bound. So this keeps running usage totals and the `PackageFinished` events.
+/// bound. So this keeps running usage totals, the `PackageFinished` events and
+/// the events of the build steps (see [`MemorySink::tries_records`]).
 pub struct MemorySink {
     pub(super) state: Mutex<MemoryState>,
 }
@@ -12,6 +17,10 @@ pub(super) struct MemoryState {
     usage: Usage,
     finished: Vec<Event>,
     unchecked: Vec<Event>,
+    /// The build and failure-extract steps started so far, by package and
+    /// step id, so the events of those steps alone are kept.
+    tracked: HashSet<(String, u32)>,
+    tries: Vec<(String, Event)>,
 }
 
 impl MemorySink {
@@ -39,6 +48,13 @@ impl MemorySink {
     pub fn version_unchecked(&self) -> Vec<Event> {
         self.lock().unchecked.clone()
     }
+
+    /// The events the tries of each package are read from, in order, each
+    /// with its package: the build steps' starts, ends and failures, the
+    /// failure extracts of those steps, and the `PackageFinished` events.
+    pub fn tries_records(&self) -> Vec<(String, Event)> {
+        self.lock().tries.clone()
+    }
 }
 
 impl Default for MemorySink {
@@ -58,8 +74,40 @@ impl Reporter for MemorySink {
                 st.usage.output_tokens += usage.output_tokens;
                 st.usage.cost_usd += usage.cost_usd;
             }
-            Event::PackageFinished { .. } => self.lock().finished.push(event.clone()),
+            Event::PackageFinished { pkg, .. } => {
+                let mut st = self.lock();
+                st.finished.push(event.clone());
+                st.tries.push((pkg.clone(), event.clone()));
+            }
             Event::VersionUnchecked { .. } => self.lock().unchecked.push(event.clone()),
+            _ => self.keep_try_event(event),
+        }
+    }
+}
+
+impl MemorySink {
+    /// Keeps the events of the build and extract steps, which are tagged with
+    /// the package of the ambient [`current_pkg`].
+    fn keep_try_event(&self, event: &Event) {
+        let Some(pkg) = current_pkg() else {
+            return;
+        };
+        let mut st = self.lock();
+        let key = |step: &StepId| (pkg.clone(), step.0);
+        match event {
+            Event::StepStarted { step, kind, .. }
+                if matches!(kind, StepKind::Build | StepKind::ExtractFailure) =>
+            {
+                st.tracked.insert(key(step));
+                st.tries.push((pkg.clone(), event.clone()));
+            }
+            Event::StepFinished { step, .. }
+            | Event::BuildFailed { step, .. }
+            | Event::ExtractResult { step, .. }
+                if st.tracked.contains(&key(step)) =>
+            {
+                st.tries.push((pkg.clone(), event.clone()));
+            }
             _ => {}
         }
     }
