@@ -182,6 +182,11 @@ pub(crate) fn print_run_summary(
         let _ = writeln!(out, "  {pkg} {}{local}", latest[*pkg].0);
     }
 
+    // How many builds each package needed in this run: the packages not built,
+    // or built only after three or more tries, are listed.
+    let tries = ap_build::explain::per_package(&memory.tries_records());
+    out.push_str(&ap_build::explain::summary_block(&tries));
+
     let mut queued: Vec<(&String, Vec<String>)> = latest
         .iter()
         .filter_map(|(pkg, (_, outcome))| match outcome {
