@@ -9,6 +9,7 @@ mod fix_findings;
 mod fix_tools;
 mod integrity;
 mod links;
+mod packaged_twice;
 mod prompt;
 mod pytest_line;
 mod python_expand_block;
