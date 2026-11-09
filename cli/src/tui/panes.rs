@@ -47,11 +47,12 @@ pub(super) fn summary_counters(state: &TuiState) -> Vec<String> {
         (Some(total), Some(in_distro)) => format!(" · in distro {in_distro}/{total}"),
         _ => String::new(),
     };
-    let sweep = |label: fn(&SweepCounts) -> String| {
+    let checking = c.checking;
+    let sweep = |label: fn(&SweepCounts, usize) -> String| {
         state
             .sweep
             .as_ref()
-            .map_or(String::new(), |s| format!("{} · ", label(s)))
+            .map_or(String::new(), |s| format!("{} · ", label(s, checking)))
     };
     let full = format!(
         " {}{queued} · running {} · done {} · failed {} · waiting {}{skipped_part}{distro_part} │ elapsed {elapsed} │ cost ${cost:.2} ",

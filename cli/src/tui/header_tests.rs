@@ -121,12 +121,12 @@ fn the_sweep_counts_are_in_the_header_state() {
     assert!(state.sweep.is_none());
     state.apply(progress(37, false));
     assert_eq!(
-        state.sweep.unwrap().label(),
-        "checked 37, checking… · up-to-date 30 · needs update 2"
+        state.sweep.unwrap().label(3),
+        "checked 37, checking 3 · up-to-date 30 · needs update 2"
     );
     state.apply(progress(37, true));
     assert_eq!(
-        state.sweep.unwrap().label(),
+        state.sweep.unwrap().label(0),
         "checked 37 · up-to-date 30 · needs update 2"
     );
 }
@@ -200,4 +200,77 @@ fn a_mid_width_header_still_shows_the_sweep_counts() {
             "{width}: {line:?}"
         );
     }
+}
+
+fn sweep_with_total(checked: usize, total: Option<usize>, finished: bool) -> SweepCounts {
+    SweepCounts {
+        checked,
+        total,
+        to_update: 2,
+        up_to_date: 30,
+        finished,
+    }
+}
+
+#[test]
+fn the_header_shows_the_total_once_it_is_known() {
+    let known = sweep_with_total(37, Some(120), false);
+    assert_eq!(
+        known.label(3),
+        "checked 37/120, checking 3 · up-to-date 30 · needs update 2"
+    );
+    assert_eq!(
+        known.compact_label(3),
+        "checked 37/120, checking 3 · current 30 · update 2"
+    );
+    let unknown = sweep_with_total(37, None, false);
+    assert_eq!(
+        unknown.label(3),
+        "checked 37, checking 3 · up-to-date 30 · needs update 2"
+    );
+    assert_eq!(
+        unknown.compact_label(3),
+        "checked 37, checking 3 · current 30 · update 2"
+    );
+}
+
+#[test]
+fn a_finished_sweep_shows_no_checks_in_flight() {
+    let done = sweep_with_total(120, Some(120), true);
+    assert_eq!(
+        done.label(0),
+        "checked 120/120 · up-to-date 30 · needs update 2"
+    );
+    assert_eq!(
+        done.compact_label(0),
+        "checked 120/120 · current 30 · update 2"
+    );
+}
+
+#[test]
+fn the_header_counts_the_checks_in_flight_and_the_total() {
+    let mut state = TuiState::new(scope(&[]));
+    state.apply(Msg {
+        pkg: None,
+        event: Event::SweepProgress {
+            checked: 0,
+            to_update: 0,
+            up_to_date: 0,
+            skipped: 0,
+            finished: false,
+            package: None,
+            total: Some(120),
+        },
+    });
+    state.apply(Msg {
+        pkg: None,
+        event: Event::SweepChecking {
+            package: "newer".to_string(),
+        },
+    });
+    let line = summary_counters(&state)[0].clone();
+    assert!(
+        line.contains("checked 0/120, checking 1 · up-to-date 0"),
+        "{line:?}"
+    );
 }

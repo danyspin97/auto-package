@@ -171,6 +171,7 @@ fn each_status_counts_in_one_header_group() {
             failed: 2,
             waiting: 1,
             skipped: 2,
+            checking: 1,
         }
     );
 }

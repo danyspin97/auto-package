@@ -157,8 +157,14 @@ fn a_started_check_shows_checking_until_its_answer_arrives() {
     state.apply(checking("newer"));
     assert_eq!(state.order, ["current", "newer"]);
     assert_eq!(state.packages["current"].status_cell(), "checking");
-    // A check in flight is not a build stage.
-    assert_eq!(state.stage_counts(), StageCounts::default());
+    // A check in flight is counted as a check, not as a build stage.
+    assert_eq!(
+        state.stage_counts(),
+        StageCounts {
+            checking: 2,
+            ..StageCounts::default()
+        }
+    );
     state.apply(checked(
         "current",
         SweepVerdict::UpToDate {

@@ -221,6 +221,7 @@ impl TuiState {
             }
             Event::SweepProgress {
                 checked,
+                total,
                 to_update,
                 up_to_date,
                 finished,
@@ -232,6 +233,7 @@ impl TuiState {
                 }
                 self.sweep = Some(SweepCounts {
                     checked: *checked,
+                    total: *total,
                     to_update: *to_update,
                     up_to_date: *up_to_date,
                     finished: *finished,

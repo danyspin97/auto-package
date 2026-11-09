@@ -286,12 +286,17 @@ pub(super) struct StageCounts {
     pub(super) failed: usize,
     pub(super) waiting: usize,
     pub(super) skipped: usize,
+    /// The checks begun and not answered yet: the sweep's rows in `checking`.
+    pub(super) checking: usize,
 }
 
 impl StageCounts {
     pub(super) fn of<'a>(statuses: impl IntoIterator<Item = &'a PkgStatus>) -> Self {
         let mut counts = StageCounts::default();
         for status in statuses {
+            if *status == PkgStatus::Checking {
+                counts.checking += 1;
+            }
             let slot = match status.stage() {
                 Stage::Check => continue,
                 Stage::Queued => &mut counts.queued,
