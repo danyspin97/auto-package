@@ -32,4 +32,4 @@ pub use model::*;
 use parse::*;
 pub use render::*;
 pub use tries::*;
-use tries_view::*;
+pub use tries_view::*;

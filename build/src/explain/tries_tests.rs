@@ -308,3 +308,40 @@ fn explain_prints_the_tries_and_the_reason_of_each_failed_try() {
     assert!(text.contains("try 1: failed, BuildFailed"), "{text}");
     assert!(text.contains("try 2: built"), "{text}");
 }
+
+#[test]
+fn the_whole_run_counts_every_package_and_lists_the_ones_to_look_at() {
+    let t = tempfile::tempdir().unwrap();
+    let run = t.path().join("runs").join("20261027-000000-aaaa-1-0");
+    std::fs::create_dir_all(&run).unwrap();
+    let lines = [
+        start("foo", 1, 1, 0),
+        step_end("foo", 1, "Ok"),
+        finished("foo", BUILT),
+        start("bar", 1, 1, 0),
+        step_end("bar", 1, "Failed"),
+        finished("bar", FAILED),
+    ];
+    std::fs::write(run.join("run.jsonl"), lines.join("\n") + "\n").unwrap();
+    let rt = run_tries(t.path(), None).unwrap();
+    assert_eq!(rt.run, "20261027-000000-aaaa-1-0");
+    assert_eq!(rt.packages.len(), 2);
+    let text = plain(&render_run(&rt, 100));
+    assert!(
+        text.contains("1 try: 1, 2 tries: 0, 3+ tries: 0, not built: 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("bar: 1 try, not built: the build failed"),
+        "{text}"
+    );
+    assert!(!text.contains("foo: 1 try"), "{text}");
+    assert!(run_tries(t.path(), Some("nope")).is_err());
+}
+
+#[test]
+fn the_project_of_a_whole_run_view_is_the_work_dir_when_it_holds_runs() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(t.path().join("runs")).unwrap();
+    assert_eq!(resolve_run_dir(t.path(), None, "x86_64").unwrap(), t.path());
+}

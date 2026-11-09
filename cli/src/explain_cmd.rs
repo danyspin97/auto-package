@@ -7,8 +7,9 @@ use clap::{Args, ValueEnum};
 
 #[derive(Args)]
 pub(super) struct ExplainArgs {
-    /// RPM package name, e.g. aws-c-http.
-    name: String,
+    /// RPM package name, e.g. aws-c-http. Without one, the tries of every
+    /// package of the run (`--run`, default the latest run).
+    name: Option<String>,
 
     #[arg(long, default_value = "ap-work")]
     work_dir: PathBuf,
@@ -55,15 +56,67 @@ enum OutputFormat {
 }
 
 pub(super) fn run(args: &ExplainArgs) -> color_eyre::Result<()> {
-    explain_command(
-        &args.name,
-        &args.work_dir,
-        args.branch_project.as_deref().or(args.project.as_deref()),
-        &args.arch,
-        args.run.as_deref(),
-        &args.notes_dir,
-        args.json || matches!(args.format, OutputFormat::Json),
+    let project = args.branch_project.as_deref().or(args.project.as_deref());
+    let json = args.json || matches!(args.format, OutputFormat::Json);
+    match &args.name {
+        Some(name) => explain_command(
+            name,
+            &args.work_dir,
+            project,
+            &args.arch,
+            args.run.as_deref(),
+            &args.notes_dir,
+            json,
+        ),
+        None => run_command(
+            &args.work_dir,
+            project,
+            &args.arch,
+            args.run.as_deref(),
+            json,
+        ),
+    }
+}
+
+/// The width and colour of a report on stdout.
+fn terminal_style() -> (usize, bool) {
+    use std::io::IsTerminal;
+    let tty = std::io::stdout().is_terminal();
+    let width = if tty {
+        crossterm::terminal::size().map_or(100, |(w, _)| w as usize)
+    } else {
+        100
+    };
+    (
+        width.clamp(40, 140),
+        tty && std::env::var_os("NO_COLOR").is_none(),
     )
+}
+
+/// `explain` without a package: the tries of every package of one run.
+fn run_command(
+    work_dir: &Path,
+    project: Option<&str>,
+    arch: &str,
+    run: Option<&str>,
+    json: bool,
+) -> color_eyre::Result<()> {
+    let err = |e: String| color_eyre::eyre::eyre!(e);
+    let dir = ap_build::explain::resolve_run_dir(work_dir, project, arch).map_err(err)?;
+    if project.is_some() {
+        eprintln!("note: reading {}", dir.display());
+    }
+    let rt = ap_build::explain::run_tries(&dir, run).map_err(err)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rt)?);
+        return Ok(());
+    }
+    let (width, color) = terminal_style();
+    print!(
+        "{}",
+        ap_build::explain::ansi(&ap_build::explain::render_run(&rt, width), color)
+    );
+    Ok(())
 }
 
 /// `explain`: print what the work directory says about one package.
@@ -76,7 +129,6 @@ fn explain_command(
     notes_dir: &Path,
     json: bool,
 ) -> color_eyre::Result<()> {
-    use std::io::IsTerminal;
     let err = |e: String| color_eyre::eyre::eyre!(e);
     let dir = ap_build::explain::resolve_project_dir(work_dir, project, arch, name).map_err(err)?;
     if project.is_some() {
@@ -98,16 +150,10 @@ fn explain_command(
         println!("{}", serde_json::to_string_pretty(&ex)?);
         return Ok(());
     }
-    let tty = std::io::stdout().is_terminal();
-    let width = if tty {
-        crossterm::terminal::size().map_or(100, |(w, _)| w as usize)
-    } else {
-        100
-    };
-    let color = tty && std::env::var_os("NO_COLOR").is_none();
+    let (width, color) = terminal_style();
     print!(
         "{}",
-        ap_build::explain::ansi(&ap_build::explain::render(&ex, width.clamp(40, 140)), color)
+        ap_build::explain::ansi(&ap_build::explain::render(&ex, width), color)
     );
     Ok(())
 }
@@ -127,11 +173,18 @@ mod tests {
     #[test]
     fn the_explain_flags_parse_with_their_defaults() {
         let w = Wrapper::try_parse_from(["x", "aws-c-http", "--json", "--run", "r1"]).unwrap();
-        assert_eq!(w.args.name, "aws-c-http");
+        assert_eq!(w.args.name.as_deref(), Some("aws-c-http"));
         assert!(w.args.json);
         assert_eq!(w.args.run.as_deref(), Some("r1"));
         assert_eq!(w.args.arch, "x86_64");
         assert_eq!(w.args.work_dir.to_str(), Some("ap-work"));
+    }
+
+    #[test]
+    fn without_a_package_explain_is_the_whole_run() {
+        let w = Wrapper::try_parse_from(["x", "--run", "r1"]).unwrap();
+        assert!(w.args.name.is_none());
+        assert_eq!(w.args.run.as_deref(), Some("r1"));
     }
 
     #[test]
