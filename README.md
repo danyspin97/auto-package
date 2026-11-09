@@ -157,12 +157,13 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
 - `--update-deps`: also branch and update dependencies that live in another
   project and that the package's BuildRequires need newer than that project
   has (see below). Dependencies are chosen when the package is prepared, from
-  the spec as the branch has it before the update, so a bound that the new
-  upstream release adds is only seen on the next run (a known limit). A package
-  waits for a dependency that is queued before it (or that an earlier package
-  queued); a dependency that another package queues later in the run is not
-  waited for, so the package may build against that dependency's origin
-  binaries (a known limit).
+  the spec as the branch has it before the update and, for a PyPI source, from
+  the `Requires-Dist` PyPI lists for the new release. For other sources a bound
+  that the new upstream release adds is only seen on the next run (a known
+  limit). A package waits for a dependency that is queued before it (or that
+  an earlier package queued); a dependency that another package queues later
+  in the run is not waited for, so the package may build against that
+  dependency's origin binaries (a known limit).
 - `--test-against-updates`: with `--update-deps`, branch and update every such
   dependency that has a newer release, so the package is tested against the
   updates instead of the origin's binaries (see below). A capability bound
@@ -343,8 +344,19 @@ needs it, when the package's BuildRequires need it: a bound (`>=`, `>`, `=`)
 the version its origin has misses and the new version meets. The
 requirements read are those of the branch's spec when the package is prepared:
 the origin's for a fresh branch, the updated one for a branch an earlier run
-updated. Any other dependency is used as its origin publishes it, through the
-build path, and the run says so. The package's submit request names the update
+updated. For a package whose source is PyPI, the `Requires-Dist` of its new
+release (one request to PyPI per package, made only when a dependency has a
+newer release) is judged the same way, so a bound the release adds is seen on
+the first run; the stronger of the two decides. It only applies to a
+dependency the spec already names, found by its source package
+(`python-<name>`) or a `python3-<name>`-style name; one the spec requires as
+`%{python_module <name>}` is not looked up (see above), so the prediction
+cannot reach it (a known limit). Requirements for an extra, or with a marker
+false on Linux and CPython, are left out; a `python_version` marker is kept.
+When the metadata cannot be fetched or read, the run says so and decides from
+the spec. Other sources still decide from the spec as it is before the update.
+Any other dependency is used as its origin publishes it, through the build
+path, and the run says so. The package's submit request names the update
 it requires (`Requires the update of <dependency> (request #N)`, or its branch
 package while it has no request; `--submit` creates the dependency's request
 first), and the dependency's request goes to its own origin project. Without the flag, such a dependency is only referenced through
