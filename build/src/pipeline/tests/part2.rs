@@ -17,17 +17,19 @@ fn a_linked_spelling_that_differs_in_separators_is_the_same_package() {
             .map(|s| s.to_string())
             .collect();
     // Found up to separators, and the classification says it is the same package.
-    let shipped = linked_spelling("python-pydantic_core", &listing).unwrap();
+    let shipped = linked_spelling("python-pydantic_core", &listing)
+        .unwrap()
+        .unwrap();
     assert_eq!(shipped, "python-pydantic-core");
     assert_eq!(
         osc::fuzzy_key(shipped),
         osc::fuzzy_key("python-pydantic_core")
     );
-    let shipped = linked_spelling("ruamel.yaml", &listing).unwrap();
+    let shipped = linked_spelling("ruamel.yaml", &listing).unwrap().unwrap();
     assert_eq!(shipped, "ruamel-yaml");
     assert_eq!(osc::fuzzy_key(shipped), osc::fuzzy_key("ruamel.yaml"));
     // A genuinely different name is not found at all.
-    assert_eq!(linked_spelling("python-yaml", &listing), None);
+    assert_eq!(linked_spelling("python-yaml", &listing), Ok(None));
     // An exact spelling wins over a variant, whatever the listing order.
     let both: std::collections::HashSet<String> = ["python-APScheduler", "python-apscheduler"]
         .iter()
@@ -35,11 +37,12 @@ fn a_linked_spelling_that_differs_in_separators_is_the_same_package() {
         .collect();
     assert_eq!(
         linked_spelling("python-apscheduler", &both),
-        Some("python-apscheduler")
+        Ok(Some("python-apscheduler"))
     );
     assert_eq!(
         linked_spelling("python-APSCHEDULER", &both),
-        Some("python-APScheduler")
+        Ok(Some("python-apscheduler")),
+        "the lowercase spelling of the request wins among case variants"
     );
 }
 
@@ -102,13 +105,19 @@ fn the_obs_name_is_the_listed_spelling_of_a_case_variant_and_rpm_name_otherwise(
     // The own project lists a case variant: that listed spelling is the OBS name.
     assert_eq!(
         resolve_obs_name("python-apscheduler", &own),
-        "python-APScheduler"
+        Ok("python-APScheduler".to_string())
     );
     // The own project lists it exactly as the pipeline names it.
-    assert_eq!(resolve_obs_name("python-pyyaml", &own), "python-pyyaml");
+    assert_eq!(
+        resolve_obs_name("python-pyyaml", &own),
+        Ok("python-pyyaml".to_string())
+    );
     // Not listed yet: rpm_name. A linked project's spelling does not enter
     // here, because the branch from it is made under rpm_name.
-    assert_eq!(resolve_obs_name("python-croniter", &own), "python-croniter");
+    assert_eq!(
+        resolve_obs_name("python-croniter", &own),
+        Ok("python-croniter".to_string())
+    );
 }
 
 #[test]

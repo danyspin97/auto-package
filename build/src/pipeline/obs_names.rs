@@ -57,61 +57,43 @@ pub(super) fn lookup_failure<T: Default>(
 /// How a project's package list stands against the name the pipeline uses.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum OwnName<'a> {
-    /// No package of the project matches the name, up to case and separators.
+    /// No package of the project is the same project as the name.
     Absent,
     /// The project has the package spelled exactly as the pipeline names it.
     Exact,
     /// The project has it under another spelling, which OBS keeps distinct.
     Variant(&'a str),
+    /// The project lists several spellings of the same project up to separators
+    /// and none matches the name up to case: nothing is chosen (see
+    /// [`osc::find_listed`]).
+    Ambiguous(Vec<&'a str>),
 }
 
-/// Where `rpm_name` stands in `own`. An exact spelling wins over a variant, and
-/// the variant reported is the smallest one, so the answer does not depend on
-/// the order of the listing.
+/// Where `rpm_name` stands in `own`, by [`osc::find_listed`]: an exact spelling
+/// wins, then a spelling that differs only in case, then a separator variant.
 pub(super) fn own_name<'a>(
     rpm_name: &str,
     own: &'a std::collections::HashSet<String>,
 ) -> OwnName<'a> {
-    let key = osc::fuzzy_key(rpm_name);
-    let mut variant: Option<&'a str> = None;
-    for p in own.iter().filter(|p| osc::fuzzy_key(p) == key) {
-        if p == rpm_name {
-            return OwnName::Exact;
-        }
-        if variant.is_none_or(|v| p.as_str() < v) {
-            variant = Some(p.as_str());
-        }
+    match osc::find_listed(rpm_name, own.iter().map(String::as_str)) {
+        osc::Listed::Absent => OwnName::Absent,
+        osc::Listed::Found(p) if p == rpm_name => OwnName::Exact,
+        osc::Listed::Found(p) => OwnName::Variant(p),
+        osc::Listed::Ambiguous(names) => OwnName::Ambiguous(names),
     }
-    variant.map_or(OwnName::Absent, OwnName::Variant)
 }
 
-/// The listed own spelling of `rpm_name` among `spellings`, which all share its
-/// fuzzy key: the one equal to the lowercase `rpm_name` when listed, else the
-/// lexicographically smallest. The same rule as [`own_name`], and independent
-/// of the order the listing came in.
-pub(super) fn preferred_own_spelling<'a>(
-    rpm_name: &str,
-    spellings: &[&'a String],
-) -> Option<&'a String> {
-    let lower = rpm_name.to_lowercase();
-    spellings
-        .iter()
-        .copied()
-        .find(|s| s.as_str() == lower)
-        .or_else(|| spellings.iter().copied().min())
-}
-
-/// The spelling a linked project lists `rpm_name`'s package under, up to case
-/// and separators: the exact spelling when listed, else the smallest variant,
-/// so the choice does not depend on the order of the listing.
+/// The spelling a linked project lists `rpm_name`'s package under, as
+/// [`own_name`] finds it. `Err` when the listing is ambiguous.
 pub(super) fn linked_spelling<'a>(
     rpm_name: &str,
     listing: &'a std::collections::HashSet<String>,
-) -> Option<&'a str> {
+) -> Result<Option<&'a str>, String> {
     match own_name(rpm_name, listing) {
-        OwnName::Exact => listing.get(rpm_name).map(String::as_str),
-        OwnName::Variant(v) => Some(v),
-        OwnName::Absent => None,
+        OwnName::Exact => Ok(listing.get(rpm_name).map(String::as_str)),
+        OwnName::Variant(v) => Ok(Some(v)),
+        OwnName::Absent => Ok(None),
+        OwnName::Ambiguous(names) => Err(osc::ambiguity_message(rpm_name, &names)),
     }
 }
 
@@ -120,11 +102,15 @@ pub(super) fn linked_spelling<'a>(
 /// case variant is the package. Otherwise the name is `rpm_name`, which is
 /// also the name a branch from a linked project is made under (see
 /// [`branch_from_linked`]), so a linked project's spelling never changes the
-/// answer and is not an input here.
-pub(super) fn resolve_obs_name(rpm_name: &str, own: &std::collections::HashSet<String>) -> String {
+/// answer and is not an input here. `Err` when the own listing is ambiguous.
+pub(super) fn resolve_obs_name(
+    rpm_name: &str,
+    own: &std::collections::HashSet<String>,
+) -> Result<String, String> {
     match own_name(rpm_name, own) {
-        OwnName::Variant(listed) => listed.to_string(),
-        OwnName::Exact | OwnName::Absent => rpm_name.to_string(),
+        OwnName::Variant(listed) => Ok(listed.to_string()),
+        OwnName::Exact | OwnName::Absent => Ok(rpm_name.to_string()),
+        OwnName::Ambiguous(names) => Err(osc::ambiguity_message(rpm_name, &names)),
     }
 }
 
@@ -147,10 +133,16 @@ pub(super) fn branch_from_linked(
             lookup_failure(reason, e.is_transient(), false, emit)?
         }
     };
-    let key = osc::fuzzy_key(rpm_name);
+    let key = osc::project_key(rpm_name);
     match own_name(rpm_name, &own) {
         OwnName::Exact | OwnName::Variant(_) => return Ok(None),
         OwnName::Absent => {}
+        OwnName::Ambiguous(names) => {
+            return Err(BranchError::Failed {
+                reason: osc::ambiguity_message(rpm_name, &names),
+                transient: false,
+            });
+        }
     }
     // Every project the own project builds against, transitively, nearest
     // first. A project that does not answer (see `lookup_failure`) is treated as
@@ -199,16 +191,23 @@ pub(super) fn branch_from_linked(
         },
     )?;
     for (path_project, _, listing) in linked {
-        let Some(shipped) = linked_spelling(rpm_name, &listing) else {
-            continue;
+        let shipped = match linked_spelling(rpm_name, &listing) {
+            Ok(Some(shipped)) => shipped,
+            Ok(None) => continue,
+            Err(reason) => {
+                return Err(BranchError::Failed {
+                    reason,
+                    transient: false,
+                });
+            }
         };
-        // The lookup is fuzzy, so a name that differs only in case or separators
-        // (PyYAML vs pyyaml, pydantic-core vs pydantic_core, ruamel.yaml vs
-        // ruamel-yaml) is the same package: the distro's spelling is the source
-        // of the branch, and the branch is named `rpm_name`. The own project then
-        // lists `rpm_name`, which is the OBS name `resolve_obs_name` gives it.
-        // Only a spelling that is not the same package up to that is refused.
-        if osc::fuzzy_key(shipped) != key {
+        // The lookup is up to case and separators (PyYAML vs pyyaml,
+        // pydantic-core vs pydantic_core, ruamel.yaml vs ruamel-yaml), so such a
+        // name is the same package: the distro's spelling is the source of the
+        // branch, and the branch is named `rpm_name`. The own project then lists
+        // `rpm_name`, which is the OBS name `resolve_obs_name` gives it. A
+        // spelling of another project (python-whois vs pythonwhois) is refused.
+        if osc::project_key(shipped) != key {
             return Err(BranchError::Renamed(format!(
                 "{path_project} ships it as {shipped}, not {rpm_name}"
             )));

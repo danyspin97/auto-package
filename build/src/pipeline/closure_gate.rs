@@ -41,7 +41,7 @@ pub(super) struct NodeFacts {
 
 /// The facts [`node_resolution`] needs about `node`. `settled` is the
 /// process-wide [`is_settled`] answer for it; `linked_fuzzy` holds the
-/// `fuzzy_key`s of the linked projects' listings.
+/// `project_key`s of the linked projects' listings.
 pub(super) fn node_facts(
     node: &ap_ecosystem::pip::Node,
     force: bool,
@@ -56,7 +56,7 @@ pub(super) fn node_facts(
         root_finished: finished.contains(&rpm),
         settled,
         system_alias: is_system_tool_alias(&node.name),
-        linked: linked_fuzzy.contains(&osc::fuzzy_key(&rpm)),
+        linked: linked_fuzzy.contains(&osc::project_key(&rpm)),
     }
 }
 

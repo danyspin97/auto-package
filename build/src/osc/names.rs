@@ -21,8 +21,9 @@ pub(super) fn anywhere() -> PathBuf {
 /// the dot (`ruamel.yaml`, `jaraco.classes`, `backports.zstd`) — confirmed by
 /// checking real openSUSE package listings, not derivable from the PyPI name
 /// alone. Never compare this against a real package list with `==`/
-/// `.contains()` for an existence check — use [`fuzzy_key`] on both sides, and
-/// when it matches, use the real listing's spelling, not this guess.
+/// `.contains()` for an existence check — use [`find_listed`] (or
+/// [`project_key`]) on both sides, and when it matches, use the real listing's
+/// spelling, not this guess.
 ///
 /// With `--nvidia-redist` a name of one of NVIDIA's CUDA components (the
 /// `nvidia-cublas` wheel, or the `cuda-cublas` package itself) is `cuda-<short>`
@@ -34,17 +35,21 @@ pub fn rpm_name(pypi_name: &str) -> String {
     format!("python-{}", pypi_name.to_lowercase())
 }
 
-/// A comparison-only key for matching two RPM/PyPI package names that might
-/// spell the same project with a different `-`/`_`/`.` choice (see
-/// [`rpm_name`] for why no single guess is reliable): lowercase with every
-/// `-`, `_`, and `.` removed entirely, so `pydantic_core`, `pydantic-core`,
-/// and `pydantic.core` all collapse to the same key. Two distinct real PyPI
-/// projects differing only in separator choice are not a realistic
-/// collision to worry about here.
+/// A loose comparison key: lowercase with every `-`, `_` and `.` removed, so
+/// `pydantic_core`, `pydantic-core` and `pydantic.core` share a key.
 ///
-/// Use this to test "does a package matching this name already exist",
-/// never to construct a name to actually build or commit under — when a
-/// match is found, use the real listing's own spelling instead.
+/// It is NOT an identity key. Separators are dropped, so two different PyPI
+/// projects share a key when they differ only in where a separator sits:
+/// `python-whois` and `pythonwhois`, `junit-xml` and `junitxml`,
+/// `retry-requests` and `retryrequests`, `uri-template` and `uritemplate`
+/// (and their OBS names `python-python-whois` and `python-pythonwhois`, and
+/// so on). Do not use it to decide that a listed package is the one a name
+/// asks for. Use [`find_listed`] for that, which keys on [`project_key`]
+/// (PEP 503), and keep this key for the callers that deliberately want the
+/// loose match.
+///
+/// Never use it to construct a name to build or commit under: when a match
+/// is found, use the real listing's own spelling.
 pub fn fuzzy_key(name: &str) -> String {
     name.chars()
         .filter(|c| !matches!(c, '-' | '_' | '.'))
@@ -140,25 +145,24 @@ pub fn strip_devel_wrapping(name: &str) -> &str {
 }
 
 /// The name OBS lists for the package `guess` refers to, or `guess` itself
-/// when nothing listed matches.
+/// when nothing listed matches. `Err` when the listing holds several packages
+/// that are the same project up to separators and none is `guess` up to
+/// case: the caller reports that instead of choosing one.
 ///
 /// `guess` is an [`rpm_name`] guess, which is lowercase and may spell the
-/// separators differently from the real package. A listed name matches when
-/// its [`fuzzy_key`] equals the guess's, so `python-apscheduler` finds
-/// `python-APScheduler`. Anything that checks out, builds or names a package
-/// in `project` must use this spelling, not the guess: osc, the checkout
-/// directory and the spec file all follow the real name.
-pub fn obs_name(listing: &std::collections::HashSet<String>, guess: &str) -> String {
-    if listing.contains(guess) {
-        return guess.to_string();
+/// separators differently from the real package. A listed name matches as
+/// [`find_listed`] describes, so `python-apscheduler` finds `python-APScheduler`
+/// and `python-pydantic-core` finds `python-pydantic_core`, but not
+/// `pythonwhois` for `python-whois`. Anything that checks out, builds or names
+/// a package in `project` must use this spelling, not the guess: osc, the
+/// checkout directory and the spec file all follow the real name.
+pub fn obs_name(
+    listing: &std::collections::HashSet<String>,
+    guess: &str,
+) -> Result<String, String> {
+    match find_listed(guess, listing.iter().map(String::as_str)) {
+        Listed::Found(name) => Ok(name.to_string()),
+        Listed::Absent => Ok(guess.to_string()),
+        Listed::Ambiguous(names) => Err(ambiguity_message(guess, &names)),
     }
-    let key = fuzzy_key(guess);
-    // Several listed spellings can share a key; take the first in sort order
-    // so the answer does not depend on hash iteration order.
-    listing
-        .iter()
-        .filter(|p| fuzzy_key(p) == key)
-        .min()
-        .cloned()
-        .unwrap_or_else(|| guess.to_string())
 }

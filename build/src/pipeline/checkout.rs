@@ -155,7 +155,16 @@ pub(super) fn preflight<'a>(
     // and until then the recorded name stands in (only local paths use it).
     let obs_name = match osc::try_list_project_packages(&config.project, Emit::run(reporter)) {
         Ok(own) => {
-            let obs_name = resolve_obs_name(&rpm_name, &own);
+            let obs_name = match resolve_obs_name(&rpm_name, &own) {
+                Ok(name) => name,
+                Err(reason) => {
+                    return Err(PipelineResult::Failed {
+                        rpm_name,
+                        reason,
+                        kind: FailureKind::Other,
+                    });
+                }
+            };
             if prior.obs_name.as_deref() != Some(obs_name.as_str()) {
                 update_state(&ws, reporter, |st| st.obs_name = Some(obs_name.clone()));
             }

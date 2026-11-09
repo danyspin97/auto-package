@@ -22,12 +22,12 @@ pub(crate) fn branch_for_patch(
     // A package this project already builds, with a defect a dependent found
     // (an RPM that lacks files it needs, a spec left unfinished): it is fixed
     // where it is, from its own recipe, not branched from anywhere.
-    let own_key = ap_build::osc::fuzzy_key(&rpm);
+    let own_key = ap_build::osc::project_key(&rpm);
     if let Some(real) = own_listing
         .iter()
         .find(|p| {
-            let k = ap_build::osc::fuzzy_key(p);
-            k == own_key || k == ap_build::osc::fuzzy_key(dep)
+            let k = ap_build::osc::project_key(p);
+            k == own_key || k == ap_build::osc::project_key(dep)
         })
         .cloned()
     {
@@ -45,8 +45,8 @@ pub(crate) fn branch_for_patch(
             listing
                 .iter()
                 .find(|p| {
-                    let k = ap_build::osc::fuzzy_key(p);
-                    k == ap_build::osc::fuzzy_key(&rpm) || k == ap_build::osc::fuzzy_key(dep)
+                    let k = ap_build::osc::project_key(p);
+                    k == ap_build::osc::project_key(&rpm) || k == ap_build::osc::project_key(dep)
                 })
                 .map(|p| (path_project.clone(), p.clone()))
         })
@@ -57,7 +57,7 @@ pub(crate) fn branch_for_patch(
             )
         })?;
     // The branch lives under the spelling the project already uses, if any.
-    let real = ap_build::osc::obs_name(own_listing, &shipped);
+    let real = ap_build::osc::obs_name(own_listing, &shipped)?;
     match ap_build::osc::branch_package(&origin, &shipped, project, false, emit) {
         Ok(ap_build::osc::BranchResult::Branched(b)) if b.target_package != shipped => {
             return Err(format!(
@@ -156,8 +156,8 @@ pub(crate) fn update_config_for_outdated(
     let real = own_listing
         .iter()
         .find(|p| {
-            let k = ap_build::osc::fuzzy_key(p);
-            k == ap_build::osc::fuzzy_key(&rpm) || k == ap_build::osc::fuzzy_key(dep)
+            let k = ap_build::osc::project_key(p);
+            k == ap_build::osc::project_key(&rpm) || k == ap_build::osc::project_key(dep)
         })
         .cloned()
         .unwrap_or(rpm);

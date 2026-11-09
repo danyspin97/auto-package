@@ -73,11 +73,11 @@ pub fn required_names(item: &Item) -> String {
     names.join(", ")
 }
 
-/// Whether `pkg` is named by `list`, compared the way the rest of the tool
-/// compares package names, so `Foo_Bar` finds `foo-bar`.
+/// Whether `pkg` is named by `list`, up to case and separators, so `Foo_Bar`
+/// finds `foo-bar`. `python-whois` does not find `python-pythonwhois`.
 pub fn name_listed(list: &[String], pkg: &str) -> bool {
-    let key = osc::fuzzy_key(pkg);
-    list.iter().any(|n| osc::fuzzy_key(n) == key)
+    let key = osc::project_key(pkg);
+    list.iter().any(|n| osc::project_key(n) == key)
 }
 
 /// The package to branch for a name `osc ls` listed: a multibuild flavor
@@ -132,7 +132,7 @@ pub fn check_pipeline_name(item: &Item) -> Result<(), String> {
     match &item.ecosystem {
         Ecosystem::Pypi { pypi_name } => {
             let built = osc::rpm_name(pypi_name);
-            if osc::fuzzy_key(&built) == osc::fuzzy_key(&item.pkg) {
+            if osc::project_key(&built) == osc::project_key(&item.pkg) {
                 Ok(())
             } else {
                 Err(format!(

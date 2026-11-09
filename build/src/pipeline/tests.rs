@@ -557,33 +557,7 @@ fn own_name_matches_a_package_up_to_case_and_separators() {
     assert_eq!(own_name("python-apscheduler", &both), OwnName::Exact);
     assert_eq!(
         own_name("python-APSCHEDULER", &both),
-        OwnName::Variant("python-APScheduler")
+        OwnName::Variant("python-apscheduler"),
+        "the lowercase spelling of the request wins among case variants"
     );
-}
-
-#[test]
-fn preferred_own_spelling_is_the_same_whatever_the_listing_order() {
-    let a = "python-APScheduler".to_string();
-    let b = "python-apscheduler".to_string();
-    // The lowercase rpm name wins when listed, in either order.
-    assert_eq!(
-        preferred_own_spelling("python-apscheduler", &[&a, &b]).map(String::as_str),
-        Some("python-apscheduler")
-    );
-    assert_eq!(
-        preferred_own_spelling("python-apscheduler", &[&b, &a]).map(String::as_str),
-        Some("python-apscheduler")
-    );
-    // Without the lowercase spelling, the smallest one, in either order.
-    let only_upper = "python-APScheduler".to_string();
-    let other = "python-APSCHEDULER".to_string();
-    assert_eq!(
-        preferred_own_spelling("python-apscheduler", &[&only_upper, &other]).map(String::as_str),
-        Some("python-APSCHEDULER")
-    );
-    assert_eq!(
-        preferred_own_spelling("python-apscheduler", &[&other, &only_upper]).map(String::as_str),
-        Some("python-APSCHEDULER")
-    );
-    assert_eq!(preferred_own_spelling("python-apscheduler", &[]), None);
 }

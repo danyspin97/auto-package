@@ -31,6 +31,11 @@ mod extract_unresolvable_tests;
 #[cfg(test)]
 mod fuzzy_key_tests;
 
+mod lookup;
+pub use lookup::*;
+#[cfg(test)]
+mod lookup_tests;
+
 mod distro;
 #[cfg(test)]
 mod strip_devel_wrapping_tests;

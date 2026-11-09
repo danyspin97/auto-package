@@ -5,7 +5,6 @@ use crate::pipeline::archive::*;
 use crate::pipeline::blocked::*;
 use crate::pipeline::gen_spec::*;
 use crate::pipeline::linked::*;
-use crate::pipeline::obs_names::*;
 use crate::pipeline::slots::*;
 
 /// Warnings for the packages `root`'s closure needs at a version another root
@@ -23,7 +22,7 @@ pub(super) fn version_conflicts(
     let (claimed, warned) = &mut *guard;
     let mut out = Vec::new();
     for node in nodes {
-        let key = osc::fuzzy_key(&node.name);
+        let key = osc::project_key(&node.name);
         let holders = claimed
             .entry((project.to_string(), key.clone()))
             .or_default();
@@ -50,7 +49,7 @@ pub(super) fn version_conflicts(
                                     !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
                                 })
                                 .unwrap_or(r.len());
-                            osc::fuzzy_key(&r[..name_end]) == osc::fuzzy_key(&node.name)
+                            osc::project_key(&r[..name_end]) == osc::project_key(&node.name)
                                 && r.contains("==")
                         })
                         .map(move |r| {
@@ -235,21 +234,21 @@ pub fn select_target(
     // `typing_extensions` keeps its underscore). Exact string equality against
     // the real project listings would make already-available packages like
     // `python-pydantic-core` look unresolvable and get queued as duplicates.
-    // Index both listings by a
-    // separator-blind `fuzzy_key` instead, and use the *real* listed name
-    // (not the guess) for the build-status lookup once a match is found.
-    // Several listed spellings can share a key (`python-APScheduler` and
-    // `python-apscheduler` are both real OBS packages): all are kept, and the
-    // choice among them is `preferred_own_spelling`, not the iteration order.
-    let mut own_fuzzy: std::collections::HashMap<String, Vec<&String>> =
+    // Index both listings by `project_key` (PEP 503: case and separator runs,
+    // not separators dropped, so `python-whois` and `python-pythonwhois` stay two
+    // projects), and use the *real* listed name (not the guess) for the
+    // build-status lookup once a match is found. Several listed spellings of one
+    // project are all kept: `find_listed` picks among them (exact, then case,
+    // then separators) and reports an ambiguous set instead of choosing.
+    let mut own_by_key: std::collections::HashMap<String, Vec<&String>> =
         std::collections::HashMap::new();
     for p in own_packages.iter() {
-        own_fuzzy.entry(osc::fuzzy_key(p)).or_default().push(p);
+        own_by_key.entry(osc::project_key(p)).or_default().push(p);
     }
     let linked_fuzzy: std::collections::HashSet<String> = linked_listings
         .iter()
         .flat_map(|(_, listing)| listing.iter())
-        .map(|p| osc::fuzzy_key(p))
+        .map(|p| osc::project_key(p))
         .collect();
 
     // How a node came to be resolvable, so the two very different reasons —
@@ -260,27 +259,37 @@ pub fn select_target(
         .iter()
         .map(|n| {
             let rpm = osc::rpm_name(&n.name);
-            let key = osc::fuzzy_key(&rpm);
             let facts = node_facts(n, force, finished_roots, is_settled(&rpm), &linked_fuzzy);
             node_resolution(
                 &facts,
                 || {
-                    own_fuzzy
-                        .get(&key)
-                        .and_then(|spellings| preferred_own_spelling(&rpm, spellings))
-                        .map(|real| {
-                            // A package OBS built that its dependents cannot install (see
-                            // `spec_with_published_defects_fixed`) is not resolved: it is
-                            // selected again, repaired and rebuilt.
-                            let spec = config
-                                .work_dir
-                                .join(&config.project)
-                                .join(real)
-                                .join(format!("{real}.spec"));
-                            status_is_resolvable(build_statuses.get(real))
-                                && !spec_has_published_defects(&spec, &config.rpms_dir)
-                                && !wheel_policy_pending(&config.source_urls, &n.name, &spec)
-                        })
+                    let spellings = own_by_key.get(&osc::project_key(&rpm))?;
+                    let real = match osc::find_listed(&rpm, spellings.iter().map(|s| s.as_str())) {
+                        osc::Listed::Found(real) => real,
+                        osc::Listed::Absent => return None,
+                        osc::Listed::Ambiguous(names) => {
+                            // Not resolved here, and not chosen: the node is built or
+                            // left to the local state, and the user is told why.
+                            reporter.report(&Event::Warning {
+                                step: None,
+                                message: osc::ambiguity_message(&rpm, &names),
+                            });
+                            return None;
+                        }
+                    };
+                    // A package OBS built that its dependents cannot install (see
+                    // `spec_with_published_defects_fixed`) is not resolved: it is
+                    // selected again, repaired and rebuilt.
+                    let spec = config
+                        .work_dir
+                        .join(&config.project)
+                        .join(real)
+                        .join(format!("{real}.spec"));
+                    Some(
+                        status_is_resolvable(build_statuses.get(real))
+                            && !spec_has_published_defects(&spec, &config.rpms_dir)
+                            && !wheel_policy_pending(&config.source_urls, &n.name, &spec),
+                    )
                 },
                 || built_in_state(config, n, &rpm),
             )
@@ -298,7 +307,7 @@ pub fn select_target(
             .zip(&resolution)
             .map(|(n, r)| {
                 *r == Resolution::Distro
-                    && linked_fuzzy.contains(&osc::fuzzy_key(&osc::rpm_name(&n.name)))
+                    && linked_fuzzy.contains(&osc::project_key(&osc::rpm_name(&n.name)))
             })
             .collect();
         let needs_build: Vec<bool> = resolution.iter().map(|r| *r == Resolution::No).collect();

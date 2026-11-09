@@ -51,12 +51,12 @@ fn the_listing_keeps_each_package_in_its_own_case() {
 fn obs_name_returns_the_listed_spelling_for_a_lowercase_guess() {
     let listing = parse_package_listing("python-APScheduler\npython-pydantic_core\n");
     assert_eq!(
-        obs_name(&listing, "python-apscheduler"),
+        obs_name(&listing, "python-apscheduler").unwrap(),
         "python-APScheduler"
     );
     // A separator difference between the guess and the listing still finds it.
     assert_eq!(
-        obs_name(&listing, "python-pydantic-core"),
+        obs_name(&listing, "python-pydantic-core").unwrap(),
         "python-pydantic_core"
     );
 }
@@ -64,9 +64,12 @@ fn obs_name_returns_the_listed_spelling_for_a_lowercase_guess() {
 #[test]
 fn obs_name_keeps_the_guess_when_nothing_is_listed() {
     let listing = parse_package_listing("python-APScheduler\n");
-    assert_eq!(obs_name(&listing, "python-croniter"), "python-croniter");
     assert_eq!(
-        obs_name(&listing, "python-APScheduler"),
+        obs_name(&listing, "python-croniter").unwrap(),
+        "python-croniter"
+    );
+    assert_eq!(
+        obs_name(&listing, "python-APScheduler").unwrap(),
         "python-APScheduler"
     );
 }
@@ -74,7 +77,7 @@ fn obs_name_keeps_the_guess_when_nothing_is_listed() {
 #[test]
 fn obs_name_is_stable_when_several_spellings_match() {
     let listing = parse_package_listing("python-Foo\npython-foo\n");
-    assert_eq!(obs_name(&listing, "python-FOO"), "python-Foo");
+    assert_eq!(obs_name(&listing, "python-FOO").unwrap(), "python-foo");
 }
 
 #[test]
