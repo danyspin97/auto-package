@@ -194,8 +194,8 @@ pub fn python3_name(pypi_name: &str) -> String {
 /// source package), which the spec requires by `names`, whose origin has
 /// `origin_version` and whose update brings `new_version`. `None` when no
 /// requirement names it: the package is matched as `python-<name>`, and a
-/// name the spec gives with a Python prefix (`python313-<name>`) by what
-/// follows it.
+/// name the spec gives with a Python prefix (`python313-<name>`, with or
+/// without its bound) by what follows it.
 pub fn predicted_need(
     requirements: &[PredictedRequirement],
     dep_pkg: &str,
@@ -204,9 +204,12 @@ pub fn predicted_need(
     new_version: &str,
 ) -> Option<DepNeed> {
     let key = fuzzy_key(dep_pkg);
+    // A name the spec gives with its bound (`python313-foo >= 1.0`) is
+    // matched by the name before the bound.
     let python_names: Vec<String> = names
         .iter()
-        .filter(|n| strip_rpm_prefix(n) != n.as_str())
+        .map(|n| n.split_whitespace().next().unwrap_or(n.as_str()))
+        .filter(|n| strip_rpm_prefix(n) != *n)
         .map(|n| fuzzy_key(strip_rpm_prefix(n)))
         .collect();
     let matched: Vec<&PredictedRequirement> = requirements

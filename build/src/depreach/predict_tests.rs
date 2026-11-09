@@ -195,6 +195,9 @@ fn a_dependency_is_matched_whatever_its_separators() {
         "0.3",
     );
     assert!(matches!(flavoured, Some(DepNeed::Update(_))));
+    // The spec's name of it may carry the bound it requires too.
+    let bounded = need_of(&["Foo>=2"], "foo", &["python313-foo >= 1"], "1.5", "2.4");
+    assert_eq!(bounded, Some(DepNeed::Update("python3-foo >= 2".into())));
     assert_eq!(
         need_of(&["cmake>=4"], "cmake", &["cmake"], "3.0", "4.1"),
         None
