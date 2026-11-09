@@ -163,7 +163,9 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
   limit). A package waits for a dependency that is queued before it (or that
   an earlier package queued); a dependency that another package queues later
   in the run is not waited for, so the package may build against that
-  dependency's origin binaries (a known limit).
+  dependency's origin binaries (a known limit). A package whose BuildRequires
+  need a newer version of another package of its source project waits for
+  the sweep to find that update, and is built after it (see below).
 - `--test-against-updates`: with `--update-deps`, branch and update every such
   dependency that has a newer release, so the package is tested against the
   updates instead of the origin's binaries (see below). A capability bound
@@ -368,6 +370,20 @@ it requires (`Requires the update of <dependency> (request #N)`, or its branch
 package while it has no request; `--submit` creates the dependency's request
 first), and the dependency's request goes to its own origin project. Without the flag, such a dependency is only referenced through
 a build path and never touched.
+
+The same rule applies to a package of the source project itself, with
+`--update-deps` and without `--test-against-updates`: when a package's
+BuildRequires need a version of another package of the source that is newer
+than the source has, judged as above, and this run's sweep finds that update,
+the package waits. It holds no build slot while it waits, and is built after
+the update. Its submit request names the update (`Requires the update of
+<package> (branch package <branch>/<package>)`, or the request for it once
+there is one). When the sweep finds no such update, or it finds one that is skipped or
+fails, the package builds against the source's version and the run says so.
+Two cases are not waited for, and the package builds against the source's
+version with a reason: a wait that would close a cycle (the other package
+waits for this one), and a wait with 25 packages already waiting. A package
+that waits is listed as not started if the run stops first.
 
 A branched dependency is the branch project's own package: until it has built,
 dependents in the branch project do not see the origin's binaries (OBS shows
