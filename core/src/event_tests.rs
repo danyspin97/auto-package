@@ -126,6 +126,7 @@ fn sweep_progress_names_its_package_and_old_logs_still_parse() {
                 to: "2.0".into(),
             },
         }),
+        total: None,
     };
     assert_eq!(
         serde_json::to_string(&e).unwrap(),
@@ -144,4 +145,45 @@ fn sweep_progress_names_its_package_and_old_logs_still_parse() {
             ..
         }
     ));
+}
+
+#[test]
+fn sweep_progress_carries_its_total_when_known() {
+    let e = Event::SweepProgress {
+        checked: 2,
+        to_update: 0,
+        up_to_date: 2,
+        skipped: 0,
+        finished: false,
+        package: None,
+        total: Some(120),
+    };
+    let json = serde_json::to_string(&e).unwrap();
+    assert!(json.contains(r#""total":120"#), "{json}");
+    let back: Event = serde_json::from_str(&json).unwrap();
+    assert!(matches!(
+        back,
+        Event::SweepProgress {
+            checked: 2,
+            total: Some(120),
+            ..
+        }
+    ));
+    // Without a total the key is not written, and an old line gives none.
+    let none = Event::SweepProgress {
+        checked: 2,
+        to_update: 0,
+        up_to_date: 2,
+        skipped: 0,
+        finished: false,
+        package: None,
+        total: None,
+    };
+    let json = serde_json::to_string(&none).unwrap();
+    assert!(!json.contains("total"), "{json}");
+    let old: Event = serde_json::from_str(
+        r#"{"event":"sweep_progress","checked":3,"to_update":0,"up_to_date":3,"skipped":0,"finished":true}"#,
+    )
+    .unwrap();
+    assert!(matches!(old, Event::SweepProgress { total: None, .. }));
 }

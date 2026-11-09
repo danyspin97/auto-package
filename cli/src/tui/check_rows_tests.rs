@@ -17,6 +17,7 @@ fn checked(name: &str, verdict: SweepVerdict) -> Msg {
                 name: name.to_string(),
                 verdict,
             }),
+            total: None,
         },
     }
 }

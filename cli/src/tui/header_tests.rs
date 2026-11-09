@@ -110,6 +110,7 @@ fn progress(checked: usize, finished: bool) -> Msg {
             skipped: 5,
             finished,
             package: None,
+            total: None,
         },
     }
 }

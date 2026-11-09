@@ -130,6 +130,7 @@ impl PlanReport {
             skipped: self.n_skipped,
             finished,
             package,
+            total: None,
         });
     }
 

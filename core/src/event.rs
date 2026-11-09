@@ -502,6 +502,10 @@ pub enum Event {
         finished: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         package: Option<crate::sweep_event::SweptPackage>,
+        /// How many packages the sweep will compare in all, once it is known
+        /// (the `checked` count out of it). Absent in logs from before it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total: Option<usize>,
     },
     /// The other-architecture check of an updated package: one entry per
     /// checked `(repo, arch)`, the failing ones with their detail.
