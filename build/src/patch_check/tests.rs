@@ -491,9 +491,11 @@ fn hunks_end_at_their_line_counts_so_a_removed_dash_line_is_not_a_header() {
         vec![Hunk {
             file: Some("f".into()),
             old: Some("f".into()),
-            context: vec![],
-            added: vec!["z".into()],
-            removed: vec!["-- x".into(), "y".into()],
+            lines: vec![
+                HunkLine::Removed("-- x".into()),
+                HunkLine::Removed("y".into()),
+                HunkLine::Added("z".into()),
+            ],
         }]
     );
     // A created file has no name to prove against, a deleted one no new name.

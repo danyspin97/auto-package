@@ -2,12 +2,32 @@
 //! hunk of the patch is in the new source archive. It needs no quilt, so it also
 //! judges a patch quilt did not run on.
 //!
-//! A hunk is proven by what it adds and what it removes: its added lines are one
-//! contiguous run of its file, its removed lines are gone from the file, and a
-//! hunk that only removes lines is proven by its context being there. A hunk that
-//! deletes a whole file is proven when that file is gone from the archive.
+//! A hunk that adds lines is proven by its post-image (see [`super::post_image`]):
+//! its context and added lines, in hunk order, are one contiguous run of its
+//! file. A hunk that only removes lines is proven by its context being one run
+//! of the file, with its removed lines not between the context lines. A hunk
+//! that deletes a whole file is proven when that file is gone from the archive.
 
 use std::path::{Path, PathBuf};
+
+/// One line of a hunk, without its leading marker, in hunk order.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HunkLine {
+    /// A line the hunk keeps around its change.
+    Context(String),
+    /// A line the hunk adds.
+    Added(String),
+    /// A line the hunk removes.
+    Removed(String),
+}
+
+impl HunkLine {
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            HunkLine::Context(t) | HunkLine::Added(t) | HunkLine::Removed(t) => t.as_str(),
+        }
+    }
+}
 
 /// One hunk of a unified diff, with the file it changes.
 #[derive(Debug, PartialEq, Eq)]
@@ -18,12 +38,8 @@ pub(crate) struct Hunk {
     /// The `---` name without its `-pN` components; `None` when the hunk
     /// creates the file.
     pub(crate) old: Option<String>,
-    /// The lines the hunk keeps around its change, without the leading space.
-    pub(crate) context: Vec<String>,
-    /// The lines the hunk adds, without the leading `+`.
-    pub(crate) added: Vec<String>,
-    /// The lines the hunk removes, without the leading `-`.
-    pub(crate) removed: Vec<String>,
+    /// The hunk's lines, in the order the diff gives them.
+    pub(crate) lines: Vec<HunkLine>,
 }
 
 /// Whether a line can prove anything: blank lines, lines of punctuation only
@@ -31,14 +47,6 @@ pub(crate) struct Hunk {
 /// file, so a line needs eight letters or digits.
 pub(super) fn is_substantive(line: &str) -> bool {
     line.chars().filter(|c| c.is_alphanumeric()).count() >= 8
-}
-
-/// Whether `needle` occurs in `lines` as one contiguous run, in order.
-fn contains_run(lines: &[String], needle: &[String]) -> bool {
-    !needle.is_empty()
-        && lines
-            .windows(needle.len())
-            .any(|w| w.iter().zip(needle).all(|(a, b)| a == b))
 }
 
 /// A line without the carriage return a CRLF file or patch leaves on it.
@@ -73,8 +81,7 @@ pub fn already_in_tarball(tarball: &Path, diff: &[u8], level: u32) -> bool {
 }
 
 /// Whether one hunk is in the tree at `root`: a deletion when the file is gone,
-/// else the file has the hunk's added run and no removed line, or, for a hunk
-/// that only removes lines, its context and a removed substantive line gone.
+/// else the hunk's post-image is in the file (see [`super::post_image`]).
 fn hunk_in_tree(root: &Path, hunk: &Hunk) -> bool {
     let Some(file) = &hunk.file else {
         return hunk
@@ -86,22 +93,11 @@ fn hunk_in_tree(root: &Path, hunk: &Hunk) -> bool {
         return false;
     };
     let lines: Vec<String> = text.lines().map(trimmed).collect();
-    let removed: Vec<String> = hunk.removed.iter().map(|l| trimmed(l)).collect();
-    let gone = removed
-        .iter()
-        .filter(|l| is_substantive(l))
-        .all(|l| !lines.contains(l));
-    if !hunk.added.is_empty() {
-        let added: Vec<String> = hunk.added.iter().map(|l| trimmed(l)).collect();
-        return added.iter().any(|l| is_substantive(l)) && contains_run(&lines, &added) && gone;
+    if hunk.lines.iter().any(|l| matches!(l, HunkLine::Added(_))) {
+        super::post_image::added_in_file(&lines, hunk)
+    } else {
+        super::post_image::removal_in_file(&lines, hunk)
     }
-    // A removal is proven only by a removed line that is substantive, gone, and
-    // a context that is there around it.
-    let context: Vec<String> = hunk.context.iter().map(|l| trimmed(l)).collect();
-    removed.iter().any(|l| is_substantive(l))
-        && gone
-        && context.iter().any(|l| is_substantive(l))
-        && contains_run(&lines, &context)
 }
 
 /// The one directory an archive unpacks into, or `src` itself.
@@ -127,28 +123,30 @@ pub(crate) fn hunks(diff: &str, level: u32) -> Vec<Hunk> {
     let mut left: Option<(usize, usize)> = None;
     for line in diff.lines() {
         if let Some((o, n)) = left {
-            let (o, n) = match line.as_bytes().first() {
-                Some(b'+') => {
-                    if let Some(h) = out.last_mut() {
-                        h.added.push(line[1..].to_string());
-                    }
-                    (o, n.saturating_sub(1))
-                }
-                Some(b'-') => {
-                    if let Some(h) = out.last_mut() {
-                        h.removed.push(line[1..].to_string());
-                    }
-                    (o.saturating_sub(1), n)
-                }
-                Some(b'\\') => (o, n),
+            let (o, n, kept) = match line.as_bytes().first() {
+                Some(b'+') => (
+                    o,
+                    n.saturating_sub(1),
+                    Some(HunkLine::Added(trimmed(&line[1..]))),
+                ),
+                Some(b'-') => (
+                    o.saturating_sub(1),
+                    n,
+                    Some(HunkLine::Removed(trimmed(&line[1..]))),
+                ),
+                Some(b'\\') => (o, n, None),
                 _ => {
-                    if let Some(h) = out.last_mut() {
-                        h.context
-                            .push(line.get(1..).unwrap_or_default().to_string());
-                    }
-                    (o.saturating_sub(1), n.saturating_sub(1))
+                    let text = trimmed(line.get(1..).unwrap_or_default());
+                    (
+                        o.saturating_sub(1),
+                        n.saturating_sub(1),
+                        Some(HunkLine::Context(text)),
+                    )
                 }
             };
+            if let (Some(h), Some(l)) = (out.last_mut(), kept) {
+                h.lines.push(l);
+            }
             left = (o > 0 || n > 0).then_some((o, n));
             continue;
         }
@@ -164,9 +162,7 @@ pub(crate) fn hunks(diff: &str, level: u32) -> Vec<Hunk> {
             out.push(Hunk {
                 file: file.clone(),
                 old: old.clone(),
-                context: Vec::new(),
-                added: Vec::new(),
-                removed: Vec::new(),
+                lines: Vec::new(),
             });
             // A header that does not parse leaves its hunk without lines, so no
             // proof is made from it.

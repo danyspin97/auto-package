@@ -21,6 +21,7 @@ use std::time::Duration;
 mod applied;
 #[cfg(test)]
 mod applied_tests;
+mod post_image;
 mod present;
 #[cfg(test)]
 mod present_tests;
