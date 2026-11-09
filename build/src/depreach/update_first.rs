@@ -14,6 +14,17 @@ use super::requirements::requirement_text;
 use super::*;
 use crate::spec::{Bound, Requirement};
 
+/// `version` with the package's `epoch` in front (`1:1.0`), so that
+/// [`dependency_need`] compares it as RPM does: a bound without an epoch
+/// counts as 0. The update keeps the spec's `Epoch:`, so the new version of
+/// the dependency carries the origin's epoch too.
+pub fn with_epoch(version: &str, epoch: Option<&str>) -> String {
+    match epoch {
+        Some(e) if !version.contains(':') => format!("{e}:{version}"),
+        _ => version.to_string(),
+    }
+}
+
 /// What a package's requirements need of a dependency that has a newer
 /// release.
 #[derive(Debug, Clone, PartialEq, Eq)]

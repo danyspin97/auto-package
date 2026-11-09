@@ -71,12 +71,15 @@ pub(super) fn choose_dependency(
     parent: &str,
     branch: &str,
 ) -> DepChoice {
+    let epoch = origin.epoch.as_deref();
+    let origin_version = depreach::with_epoch(&dep.old_version, epoch);
+    let new_version = depreach::with_epoch(&dep.new_version, epoch);
     let spec_need = depreach::dependency_need(
         reqs,
         &origin.names,
-        &dep.old_version,
+        &origin_version,
         &origin.provided,
-        &dep.new_version,
+        &new_version,
     );
     let (predicted, release) = match prediction {
         Prediction::Requirements {
@@ -87,8 +90,8 @@ pub(super) fn choose_dependency(
                 requirements,
                 &dep.pkg,
                 &origin.names,
-                &dep.old_version,
-                &dep.new_version,
+                &origin_version,
+                &new_version,
             ),
             version.as_str(),
         ),
@@ -123,7 +126,7 @@ pub(super) fn choose_dependency(
         origin_version: dep.old_version.clone(),
         request: None,
     };
-    let (pkg, origin, old, new) = (&dep.pkg, &dep.origin, &dep.old_version, &dep.new_version);
+    let (pkg, origin, old, new) = (&dep.pkg, &dep.origin, &origin_version, &new_version);
     match need {
         DepNeed::Update(requirement) => DepChoice::Update(Some(required(requirement))),
         _ if test_against_updates => DepChoice::Update(None),

@@ -57,6 +57,7 @@ fn choose_with(
         package: "libbar".into(),
         names: vec!["libbar-devel".to_string()],
         provided,
+        epoch: None,
     };
     let reqs = build_requirements(spec);
     choose_dependency(
@@ -81,6 +82,7 @@ fn python_bar() -> (Item, depreach::DependencyOrigin) {
         package: bar.pkg.clone(),
         names: vec!["python3-bar".to_string()],
         provided: Vec::new(),
+        epoch: None,
     };
     (bar, origin)
 }

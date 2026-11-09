@@ -45,6 +45,7 @@ fn a_provider_in_the_origin_that_misses_the_bound_makes_the_origin_a_dependency_
             package: "foo".into(),
             names: vec!["pkgconfig(foo) >= 2.1".into()],
             provided: vec![("pkgconfig(foo) >= 2.1".into(), "2.0".into())],
+            epoch: None,
         }]
     );
     // --test-against-updates keeps the origins it had: a missed bound adds none.
@@ -83,6 +84,7 @@ fn a_provider_that_meets_the_bound_gives_the_origin_its_provide_version() {
             package: "foo".into(),
             names: vec!["pkgconfig(foo) >= 2.1".into()],
             provided: vec![("pkgconfig(foo) >= 2.1".into(), "2.5".into())],
+            epoch: None,
         }]
     );
 }
@@ -150,6 +152,7 @@ mod python_module {
                 package: "python-numpy".into(),
                 names: vec!["python313-numpy".into()],
                 provided: Vec::new(),
+                epoch: None,
             }]
         );
         assert_eq!(

@@ -276,6 +276,10 @@ pub struct DependencyOrigin {
     /// `names`). A package name has none: it is compared by the package's
     /// version.
     pub provided: Vec<(String, String)>,
+    /// The `Epoch:` of the origin's spec, for the caller that reads the spec:
+    /// `None` here, and when the spec has none. The versions compared with it
+    /// are written with [`super::with_epoch`].
+    pub epoch: Option<String>,
 }
 
 /// The projects the dependencies will be built against that are not distro
@@ -311,6 +315,7 @@ pub fn dependency_origins(
                     package: pkg.clone(),
                     names: Vec::new(),
                     provided: Vec::new(),
+                    epoch: None,
                 });
                 out.last_mut().expect("just pushed")
             }

@@ -390,3 +390,65 @@ fn a_bound_release_is_not_compared_with_a_provide_without_one() {
     // The provide's `1.2.3` meets `= 1.2.3-4` as RPM does: no release to compare.
     assert_eq!(foo_need("= 1.2.3-4", "1.2.3", "1.3"), DepNeed::Origin);
 }
+
+#[test]
+fn an_origin_epoch_counts_against_a_bound_without_one() {
+    // Epoch 1 with version 1.0 is above `>= 2.0`, which has epoch 0.
+    let origin = with_epoch("1.0", Some("1"));
+    let new = with_epoch("2.0", Some("1"));
+    assert_eq!(
+        need(
+            "BuildRequires: libfoo-devel >= 2.0\n",
+            &["libfoo-devel"],
+            &origin,
+            &new
+        ),
+        DepNeed::Origin
+    );
+}
+
+#[test]
+fn a_bound_with_an_epoch_the_origin_misses_is_not_met() {
+    let origin = with_epoch("1.0", Some("1"));
+    let new = with_epoch("1.5", Some("1"));
+    assert_eq!(
+        need(
+            "BuildRequires: libfoo-devel >= 1:2.0\n",
+            &["libfoo-devel"],
+            &origin,
+            &new
+        ),
+        DepNeed::Unmet("libfoo-devel >= 1:2.0".into())
+    );
+}
+
+#[test]
+fn the_new_version_keeps_the_origin_epoch() {
+    // Without the epoch on the new version, 2.0 would be below `< 3.0` and
+    // the update would be taken as meeting it; with epoch 1 it is 1:2.0.
+    let origin = with_epoch("1.0", Some("1"));
+    let new = with_epoch("2.0", Some("1"));
+    assert_eq!(
+        need(
+            "BuildRequires: libfoo-devel < 3.0\n",
+            &["libfoo-devel"],
+            &origin,
+            &new
+        ),
+        DepNeed::Unmet("libfoo-devel < 3.0".into())
+    );
+}
+
+#[test]
+fn without_an_origin_epoch_the_versions_compare_as_before() {
+    assert_eq!(
+        need(
+            "BuildRequires: libfoo-devel >= 2.0\n",
+            &["libfoo-devel"],
+            "1.0",
+            "2.0"
+        ),
+        DepNeed::Update("libfoo-devel >= 2.0".into())
+    );
+    assert_eq!(with_epoch("1.0", None), "1.0");
+}

@@ -16,6 +16,14 @@ pub(super) fn arch_exclusion(item: &Item, arch: &str, ctx: &Ctx<'_>) -> Option<S
     ap_build::spec::arch_excluded_reason(&spec, arch)
 }
 
+/// The `Epoch:` of the spec of `pkg` in `project`, which a dependency's
+/// update keeps. `None` when the spec has none or cannot be read: the
+/// versions are then compared without one, as before.
+fn origin_epoch(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
+    let spec = osc::cat_file(project, pkg, &format!("{pkg}.spec"), emit)?;
+    ap_build::spec::parse_header(&spec)?.epoch
+}
+
 /// Whether `package` is absent from the branch project's listing taken before
 /// the branch call, so that call is what created it. A listing that could not
 /// be read proves nothing, so the package is not treated as created.
@@ -409,7 +417,7 @@ pub(super) fn dependency_items(
     let mut out = Vec::new();
     // Asked once, and only for a package that has a dependency to choose for.
     let prediction = std::cell::OnceCell::new();
-    for origin in
+    for mut origin in
         depreach::dependency_origins(verdicts, adds, branch, &a.source, !a.test_against_updates)
     {
         let (project, pkg) = (origin.project.clone(), origin.package.clone());
@@ -433,7 +441,11 @@ pub(super) fn dependency_items(
         });
         match plan {
             Ok(candidates) => {
-                for mut item in up::items_from_plan(&project, &candidates, &a.exclude) {
+                let items = up::items_from_plan(&project, &candidates, &a.exclude);
+                if !items.is_empty() {
+                    origin.epoch = origin_epoch(&project, &pkg, emit);
+                }
+                for mut item in items {
                     if up::check_pipeline_name(&item).is_err() {
                         ctx.warn(format!(
                             "not updating dependency {} of {}: the pipeline would name it differently",
