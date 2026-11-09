@@ -139,6 +139,15 @@ fn obs_listing(rev: &str, md5: &str) -> String {
     format!(r#"<directory name="foo" srcmd5="{rev}"><entry name="a" md5="{md5}"/></directory>"#)
 }
 
+/// What a failed restore reads from OBS: `listing`, and whether its head is
+/// the restore of this user.
+fn obs(listing: String, head_is_restore: bool) -> Result<ObsAfterRestore, String> {
+    Ok(ObsAfterRestore {
+        listing,
+        head_is_restore,
+    })
+}
+
 #[test]
 fn a_restore_osc_reports_as_failed_but_obs_holds_is_recorded_as_landed() {
     let co = checkout_at("aaa");
@@ -152,7 +161,7 @@ fn a_restore_osc_reports_as_failed_but_obs_holds_is_recorded_as_landed() {
             land(co.path(), "bbb");
             Err(Error::NotActionable("FileNotFoundError".into()))
         },
-        || Ok(obs_listing("bbb", "1")),
+        || obs(obs_listing("bbb", "1"), false),
     );
     assert!(res.is_ok());
     assert_eq!(restored_revisions(base.path()), vec!["bbb".to_string()]);
@@ -168,7 +177,7 @@ fn a_failed_restore_is_still_a_failure_when_obs_does_not_hold_it() {
         base.path(),
         co.path(),
         || Err(Error::NotActionable("refused".into())),
-        || Ok(obs_listing("aaa", "1")),
+        || obs(obs_listing("aaa", "1"), false),
     );
     assert!(res.is_err());
     // Another revision, but not the restored state.
@@ -180,7 +189,7 @@ fn a_failed_restore_is_still_a_failure_when_obs_does_not_hold_it() {
             land(co.path(), "bbb");
             Err(Error::NotActionable("failed".into()))
         },
-        || Ok(obs_listing("bbb", "2")),
+        || obs(obs_listing("bbb", "2"), false),
     );
     assert!(res.is_err());
     // Unreadable OBS: the failure stands.
@@ -199,14 +208,22 @@ fn landed_despite_error_needs_a_newer_head_the_checkout_holds_and_the_restored_l
     let rec = vec![("a".to_string(), "1".to_string())];
     let same = rec.clone();
     let other = vec![("a".to_string(), "2".to_string())];
-    assert!(landed_despite_error("aaa", Some("bbb"), "bbb", &rec, &same));
+    assert!(landed_despite_error(
+        "aaa",
+        Some("bbb"),
+        "bbb",
+        &rec,
+        &same,
+        false
+    ));
     // Head is the revision before the commit: nothing landed.
     assert!(!landed_despite_error(
         "aaa",
         Some("aaa"),
         "aaa",
         &rec,
-        &same
+        &same,
+        false
     ));
     // The checkout does not record the head.
     assert!(!landed_despite_error(
@@ -214,17 +231,125 @@ fn landed_despite_error_needs_a_newer_head_the_checkout_holds_and_the_restored_l
         Some("ccc"),
         "bbb",
         &rec,
-        &same
+        &same,
+        false
     ));
-    assert!(!landed_despite_error("aaa", None, "bbb", &rec, &same));
-    // Listing is not the restored state.
+    assert!(!landed_despite_error(
+        "aaa", None, "bbb", &rec, &same, false
+    ));
+    // Listing is not the restored state, and the head is not a restore.
     assert!(!landed_despite_error(
         "aaa",
         Some("bbb"),
         "bbb",
         &rec,
-        &other
+        &other,
+        false
     ));
-    // Nothing recorded to compare with.
-    assert!(!landed_despite_error("aaa", Some("bbb"), "bbb", &[], &[]));
+}
+
+#[test]
+fn an_empty_package_restored_to_empty_landed_despite_error() {
+    // A new package has no files before its first attempt: both listings are
+    // empty once the restore has put it back.
+    assert!(landed_despite_error(
+        "aaa",
+        Some("bbb"),
+        "bbb",
+        &[],
+        &[],
+        false
+    ));
+    // Empty when the baseline recorded none, but OBS holds files: not landed.
+    let obs = vec![("a".to_string(), "1".to_string())];
+    assert!(!landed_despite_error(
+        "aaa",
+        Some("bbb"),
+        "bbb",
+        &[],
+        &obs,
+        false
+    ));
+}
+
+#[test]
+fn a_head_that_is_the_restore_of_this_user_landed_despite_error() {
+    let rec = vec![("a".to_string(), "1".to_string())];
+    let other = vec![("a".to_string(), "2".to_string())];
+    assert!(landed_despite_error(
+        "aaa",
+        Some("bbb"),
+        "bbb",
+        &rec,
+        &other,
+        true
+    ));
+    // Another comment, another user: the head is not a restore, nothing landed.
+    assert!(!landed_despite_error(
+        "aaa",
+        Some("bbb"),
+        "bbb",
+        &rec,
+        &other,
+        false
+    ));
+}
+
+#[test]
+fn a_failed_restore_of_a_new_package_is_recorded_as_landed() {
+    let co = checkout_at("aaa");
+    let base = tempfile::tempdir().unwrap();
+    // No listing was recorded: the package had no files before the attempt,
+    // and OBS now holds it empty at the restored revision.
+    let res = record_restore(
+        base.path(),
+        co.path(),
+        || {
+            land(co.path(), "bbb");
+            Err(Error::NotActionable("FileNotFoundError".into()))
+        },
+        || {
+            obs(
+                r#"<directory name="foo" srcmd5="bbb"></directory>"#.to_string(),
+                false,
+            )
+        },
+    );
+    assert!(res.is_ok());
+    assert_eq!(restored_revisions(base.path()), vec!["bbb".to_string()]);
+}
+
+#[test]
+fn a_failed_restore_of_a_new_package_is_not_landed_when_obs_holds_files() {
+    let co = checkout_at("aaa");
+    let base = tempfile::tempdir().unwrap();
+    let res = record_restore(
+        base.path(),
+        co.path(),
+        || {
+            land(co.path(), "bbb");
+            Err(Error::NotActionable("failed".into()))
+        },
+        || obs(obs_listing("bbb", "1"), false),
+    );
+    assert!(res.is_err());
+    assert!(restored_revisions(base.path()).is_empty());
+}
+
+#[test]
+fn a_failed_restore_whose_head_is_this_users_restore_is_recorded_as_landed() {
+    let co = checkout_at("aaa");
+    let base = tempfile::tempdir().unwrap();
+    recorded_one_file(base.path());
+    let res = record_restore(
+        base.path(),
+        co.path(),
+        || {
+            land(co.path(), "bbb");
+            Err(Error::NotActionable("failed".into()))
+        },
+        || obs(obs_listing("bbb", "2"), true),
+    );
+    assert!(res.is_ok());
+    assert_eq!(restored_revisions(base.path()), vec!["bbb".to_string()]);
 }

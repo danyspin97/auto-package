@@ -120,3 +120,22 @@ fn a_commit_in_flight_is_named_as_a_possible_own_commit() {
     );
     assert!(why.contains("may not have been recorded"), "{why}");
 }
+
+fn revision_with(user: &str, comment: &str) -> LatestRevision {
+    LatestRevision {
+        rev: "8".to_string(),
+        srcmd5: "9e1f".to_string(),
+        user: user.to_string(),
+        time: 0,
+        comment: comment.to_string(),
+    }
+}
+
+#[test]
+fn a_head_is_a_restore_of_this_user_by_its_message_and_user() {
+    let restore = revision_with("dspinella", RESTORE_MESSAGE);
+    assert!(restore_head_by(&restore, "dspinella"));
+    assert!(!restore_head_by(&restore, "someone-else"));
+    let other = revision_with("dspinella", "auto-package: Update to 2.0.0");
+    assert!(!restore_head_by(&other, "dspinella"));
+}

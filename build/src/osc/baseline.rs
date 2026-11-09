@@ -482,8 +482,19 @@ pub fn restore_baseline_outcome(
                 || commit(checkout, message, files, None, emit),
                 || {
                     let (project, package) = checkout_project_package(checkout)?;
-                    source_listing_expanded_xml(&project, &package, Emit::quiet())
-                        .map_err(|e| e.to_string())
+                    let listing = source_listing_expanded_xml(&project, &package, Emit::quiet())
+                        .map_err(|e| e.to_string())?;
+                    let head_is_restore = match (
+                        source_history(&project, &package),
+                        current_user(Emit::quiet()).map_err(|e| e.to_string()),
+                    ) {
+                        (Ok(latest), Ok(me)) => restore_head_by(&latest, &me),
+                        _ => false,
+                    };
+                    Ok(ObsAfterRestore {
+                        listing,
+                        head_is_restore,
+                    })
                 },
             )
         },

@@ -68,6 +68,12 @@ pub fn source_history(project: &str, package: &str) -> Result<LatestRevision, St
     latest_revision(&xml).ok_or_else(|| format!("OBS history of {project}/{package} is empty"))
 }
 
+/// Whether `latest` is a restore commit made by `user`: the message a restore
+/// commits with (`RESTORE_MESSAGE`), by the user osc is configured for.
+pub fn restore_head_by(latest: &LatestRevision, user: &str) -> bool {
+    latest.comment == RESTORE_MESSAGE && latest.user == user
+}
+
 /// The refusal of a restore whose checkout may not be restored over: OBS holds
 /// `head`, the checkout `local`. `own` is the package's own srcmd5 from the
 /// unexpanded listing (for a link, its `lsrcmd5`). The refusal names the
