@@ -3,6 +3,9 @@
 
 use super::*;
 
+mod hand;
+use hand::Hand;
+
 /// The plan of an update, reported one package at a time as the sweep finds it.
 #[derive(Default)]
 pub(super) struct PlanReport {
@@ -207,6 +210,7 @@ fn swept_package(c: &ap_build::update::Candidate) -> ap_core::sweep_event::Swept
 /// finds it (see `update_project::queue_found`).
 pub(super) struct Sweep {
     pub(super) updates: std::sync::mpsc::Receiver<ap_build::update::Candidate>,
+    hand: Arc<Hand>,
     handle: std::thread::JoinHandle<Result<PlanReport, String>>,
 }
 
@@ -219,10 +223,12 @@ impl Sweep {
         queue: Option<Arc<dyn Reporter + Send + Sync>>,
     ) -> Self {
         let (tx, updates) = std::sync::mpsc::channel();
+        let hand = Arc::new(Hand::new(tx));
         let (project, only, exclude) = (project.to_string(), only.to_vec(), exclude.to_vec());
+        let thread_hand = hand.clone();
         let handle = std::thread::spawn(move || {
             let mut plan = PlanReport::default();
-            ap_build::update::plan_each(
+            let swept = ap_build::update::plan_each(
                 &project,
                 &|n| update_project::wanted_by(&only, &exclude, n),
                 ap_build::proc::Emit::run(reporter.as_ref()),
@@ -232,17 +238,33 @@ impl Sweep {
                         &c.decision,
                         ap_build::update::Decision::Update { ecosystem, .. } if ecosystem.can_build()
                     );
-                    if is_update && let Some(queue) = &queue {
-                        update_project::queue_found(queue.as_ref(), &project, &c, &exclude);
-                    }
-                    // A closed channel means the run gave up: stop checking.
-                    !is_update || tx.send(c).is_ok()
+                    // A closed hand-over means the run gave up: stop checking.
+                    !is_update
+                        || thread_hand.hand_over(c, |c| {
+                            if let Some(queue) = &queue {
+                                update_project::queue_found(queue.as_ref(), &project, c, &exclude);
+                            }
+                        })
                 },
-            )?;
+            );
+            // The channel ends with the sweep, whether it finished or failed.
+            thread_hand.close();
+            swept?;
             plan.finish(reporter.as_ref());
             Ok(plan)
         });
-        Self { updates, handle }
+        Self {
+            updates,
+            hand,
+            handle,
+        }
+    }
+
+    /// Stops the sweep: nothing more is queued or handed over, and the
+    /// candidates found but not taken are returned, in the order found.
+    pub(super) fn stop(&self) -> Vec<ap_build::update::Candidate> {
+        self.hand.close();
+        self.updates.try_iter().collect()
     }
 
     /// The plan for the one package `--only` names, read at `revision` and
@@ -256,17 +278,26 @@ impl Sweep {
         reporter: Arc<dyn Reporter + Send + Sync>,
     ) -> Self {
         let (tx, updates) = std::sync::mpsc::channel();
+        let hand = Arc::new(Hand::new(tx));
+        let thread_hand = hand.clone();
         let (project, only) = (project.to_string(), only.to_vec());
         let handle = std::thread::spawn(move || {
             let mut plan = PlanReport::default();
             let emit = ap_build::proc::Emit::run(reporter.as_ref());
-            let c = ap_build::branch_revision::plan_one(
+            let planned = ap_build::branch_revision::plan_one(
                 &project,
                 &|n| update_project::wanted_by(&only, &[], n),
                 revision.as_deref(),
                 to_version.as_deref(),
                 emit,
-            )?;
+            );
+            let c = match planned {
+                Ok(c) => c,
+                Err(e) => {
+                    thread_hand.close();
+                    return Err(e);
+                }
+            };
             plan.add(&c, reporter.as_ref());
             if let ap_build::update::Decision::Update {
                 ecosystem,
@@ -287,12 +318,17 @@ impl Sweep {
                         ),
                     });
                 }
-                let _ = tx.send(c);
+                let _ = thread_hand.hand_over(c, |_| {});
             }
+            thread_hand.close();
             plan.finish(reporter.as_ref());
             Ok(plan)
         });
-        Self { updates, handle }
+        Self {
+            updates,
+            hand,
+            handle,
+        }
     }
 
     /// How the sweep ended, once `updates` has run dry.

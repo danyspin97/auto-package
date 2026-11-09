@@ -450,6 +450,24 @@ fn prepare(
         }
         ready.push(Job::new(item, first_key, after));
     }
+    // The updates the sweep found but the loop did not take (a stop leaves
+    // them in its channel) are listed as not started: that closes the rows
+    // queue_found queued for them.
+    if sweep_queues && let Some(sweep) = &sweep {
+        for c in sweep.stop() {
+            let found = up::items_from_plan(&a.source, std::slice::from_ref(&c), &a.exclude);
+            if let Some(item) = found.into_iter().next()
+                && let Some(row) = row_name(&item)
+            {
+                sweep_rows.insert(row);
+                report.results.push(ItemResult {
+                    item,
+                    outcome: ItemOutcome::NotStarted,
+                    sr: SrOutcome::NotRequested,
+                });
+            }
+        }
+    }
     tui_row::close_dropped(ctx, &report.results, &mut closed_upto, &mut sweep_rows);
 
     if let Some(sweep) = sweep.take() {
