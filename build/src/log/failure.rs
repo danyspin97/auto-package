@@ -163,6 +163,26 @@ pub fn is_noise(line: &str) -> bool {
     NOISE.is_match(line)
 }
 
+/// Lines the OBS build worker prints from its own scriptlets, which are not
+/// the package's failure: a polkit rules file the worker cannot write while
+/// the buildroot is set up, the `%post` scriptlet that reports it, and the
+/// install progress bar of the package that ships the rules.
+static WORKER_NOISE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?x)
+        ^can't\x20open\x20/etc/polkit-1/rules\.d/
+      | ^warning:\x20%post\(polkit-default-privs-
+      | ^polkit-default-privs-\S+\x20+\#
+      ",
+    )
+    .expect("static")
+});
+
+/// Whether a line is OBS worker noise (see [`WORKER_NOISE`]).
+pub fn is_worker_noise(line: &str) -> bool {
+    WORKER_NOISE.is_match(line)
+}
+
 /// Locate and quote the failure.
 ///
 /// `lines` must already be timestamp-stripped; `spans` must come from
@@ -209,7 +229,7 @@ fn post_build_failure(lines: &[&str], spans: &[Span]) -> Option<Failure> {
     let post = spans.iter().find(|s| s.phase == Phase::PostBuild)?;
 
     let hits: Vec<usize> = (post.start..post.end)
-        .filter(|&i| POST_BUILD_PROBLEM.is_match(lines[i]))
+        .filter(|&i| POST_BUILD_PROBLEM.is_match(lines[i]) && !is_worker_noise(lines[i]))
         .collect();
     if hits.is_empty() {
         return None;
@@ -249,7 +269,11 @@ fn bare_error_line(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> Optio
     let idx = lines
         .iter()
         .rposition(|l| l.starts_with("error: "))
-        .or_else(|| lines.iter().rposition(|l| l.starts_with("warning: ")))?;
+        .or_else(|| {
+            lines
+                .iter()
+                .rposition(|l| l.starts_with("warning: ") && !is_worker_noise(l))
+        })?;
     let phase = span_at(spans, idx)
         .map(|s| s.phase.clone())
         .unwrap_or(Phase::Setup);
@@ -319,13 +343,16 @@ fn quote(
     let mut kept: Vec<&str> = Vec::new();
     let mut elided = 0;
     for line in region {
-        if is_noise(line) {
+        if is_noise(line) || is_worker_noise(line) {
             elided += 1;
         } else {
             kept.push(line);
         }
     }
-    let genre = if region.iter().any(|l| POST_BUILD_PROBLEM.is_match(l)) {
+    let genre = if region
+        .iter()
+        .any(|l| POST_BUILD_PROBLEM.is_match(l) && !is_worker_noise(l))
+    {
         Genre::PostBuildCheck
     } else {
         Genre::Unknown
@@ -409,3 +436,6 @@ fn finish(kept: Vec<&str>, elided: usize, genre: Genre, phase: Phase, located_by
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod worker_tests;
