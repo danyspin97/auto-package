@@ -487,6 +487,12 @@ fn run_stages(
     }
     let spec = generate_spec_stage(&ctx, &mut st)?;
     osc_service_stage(&ctx, &mut st, &spec)?;
+    // A package waiting on names that are still unbuilt ends here, before any
+    // turn: the review, the validation, the commit and a build try would only
+    // hear the same answer the last round gave.
+    if let Some(missing) = crate::pipeline::unresolvable::wait_record::precheck(&ctx) {
+        return Err(missing);
+    }
     check_signatures_early(&ctx)?;
     fetch_sdist_stage(&ctx, &mut st, spec.need_spec)?;
     // The zig vendor archive, rebuilt from the new source, before the first build.

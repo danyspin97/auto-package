@@ -113,23 +113,25 @@ fn save(ctx: &RunCtx, wait: Wait) {
     }
 }
 
-/// Before a build try: `MissingDeps` when the round that decided the last
-/// answer is still valid (see [`waiting_on`]), so no try is spent on it.
+/// Before the review turn of a try: `MissingDeps` when the round that decided
+/// the last answer is still valid (see [`waiting_on`]), so that no turn, no
+/// validation, no commit and no build try is spent on it. A record whose names
+/// are RPMs now is discarded, and the try goes on to build.
 pub fn precheck(ctx: &RunCtx) -> Option<PipelineResult> {
     let (spec, _) = current(ctx)?;
-    let record = load(ctx.ws.dir());
+    let record = load(ctx.ws.dir())?;
     let local = ctx.config.rpms_dir.join(osc::LOCAL_RPMS_DIR);
-    let deps = waiting_on(
-        record.as_ref(),
-        spec,
-        &[ctx.config.rpms_dir.as_path(), local.as_path()],
-    )?;
-    let Some(WaitRecord {
-        wait: Wait::Missing {
-            native, outdated, ..
-        },
-        ..
-    }) = record
+    let dirs = [ctx.config.rpms_dir.as_path(), local.as_path()];
+    let Some(deps) = waiting_on(Some(&record), spec, &dirs) else {
+        if record.spec == spec && matches!(record.wait, Wait::Missing { .. }) {
+            // Not waiting any more: the names are RPMs here, so the try builds.
+            let _ = std::fs::remove_file(ctx.ws.dir().join(RECORD_FILE));
+        }
+        return None;
+    };
+    let Wait::Missing {
+        native, outdated, ..
+    } = record.wait
     else {
         return None;
     };
