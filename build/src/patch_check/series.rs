@@ -12,7 +12,7 @@ pub(super) const REJECTS_LIMIT: usize = 4000;
 pub const MAX_ROUNDS: usize = 4;
 
 /// What quilt says when a patch that does not apply is already in the tree.
-pub(super) const REVERSE_APPLIED: &str = "can be reverse-applied";
+pub(crate) const REVERSE_APPLIED: &str = "can be reverse-applied";
 
 /// One patch of the series, as the spec applies it.
 #[derive(Debug, Clone, PartialEq, Eq)]

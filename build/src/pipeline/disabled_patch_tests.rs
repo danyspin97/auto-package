@@ -124,7 +124,7 @@ fn a_disabled_foreign_patch_is_refused() {
     assert!(
         judged.refused[0]
             .reason
-            .contains("added lines are not in the new tarball"),
+            .contains("its hunks are not all in the new tarball"),
         "{judged:?}"
     );
 }

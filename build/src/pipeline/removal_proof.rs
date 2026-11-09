@@ -12,7 +12,7 @@
 //! inputs; nothing is cached, so each ask runs the check again.
 
 use super::*;
-use crate::patch_check::{CheckReport, DropProof, PatchStatus};
+use crate::patch_check::{CheckReport, DropProof, PatchStatus, REVERSE_APPLIED};
 use crate::pipeline::archive::*;
 use crate::pipeline::rejection::*;
 use crate::pipeline::snapshot::*;
@@ -104,7 +104,7 @@ fn patch_files_of(
 
 /// The proof for removing `name`, given quilt's `report` on the patch files and
 /// the tarball. `Err` is why no proof was made.
-fn proof_of(
+pub(super) fn proof_of(
     report: &CheckReport,
     tarball: Option<&Path>,
     diff: Option<&[u8]>,
@@ -119,14 +119,20 @@ fn proof_of(
     {
         Some(PatchStatus::AlreadyApplied { .. }) => Ok(DropProof::ReverseApplies),
         // Only a patch quilt says does not apply may be proven by the archive:
-        // one that applies is not upstream.
-        Some(PatchStatus::Fails { .. }) => match (tarball, diff) {
+        // one that applies is not upstream. A patch quilt reverse-applies only
+        // with fuzz is one such patch, and its hunks are judged the same way.
+        Some(PatchStatus::Fails { output, .. }) => match (tarball, diff) {
             (Some(t), Some(d)) if crate::patch_check::already_in_tarball(t, d, level) => {
                 Ok(DropProof::InTarball)
             }
+            _ if output.contains(REVERSE_APPLIED) => Err(
+                "quilt says it `can be reverse-applied` only with fuzz, and not every hunk \
+                 is in the new tarball with its added and removed lines"
+                    .to_string(),
+            ),
             _ => Err(
                 "quilt checked it, it does not `can be reverse-applied` on the new sources, \
-                 and its added lines are not in the new tarball"
+                 and its hunks are not all in the new tarball"
                     .to_string(),
             ),
         },

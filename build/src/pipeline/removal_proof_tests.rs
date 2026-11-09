@@ -2,6 +2,7 @@
 //! did not check, which are refused.
 
 use super::removal_proof::*;
+use crate::patch_check::{CheckReport, DropProof, PatchResult, PatchStatus};
 
 #[test]
 fn a_security_patch_is_named_by_its_name_or_its_header() {
@@ -251,4 +252,49 @@ fn a_wheel_switch_drops_its_patches_without_a_proof_and_an_edit_does_not() {
     std::fs::write(&spec_path, &after).unwrap();
     assert_eq!(judge(false), None);
     assert_eq!(std::fs::read_to_string(&spec_path).unwrap(), after);
+}
+
+/// A report on one patch `name` that quilt failed, with `output` as its text.
+fn failed(name: &str, output: &str) -> CheckReport {
+    CheckReport {
+        patches: vec![PatchResult {
+            name: name.into(),
+            level: 1,
+            status: PatchStatus::Fails {
+                output: output.into(),
+                rejects: String::new(),
+            },
+            refreshed: None,
+        }],
+        not_run: None,
+    }
+}
+
+#[test]
+fn a_patch_quilt_reverse_applies_only_with_fuzz_is_proven_by_its_hunks() {
+    let dir = tempfile::tempdir().unwrap();
+    // The first hunk's context differs from the archive (quilt's fuzz) but its
+    // changed lines are there; the second deletes a file the archive lacks.
+    archive(
+        dir.path(),
+        "foo-1.0.tar.gz",
+        &[("f.py", "import os\nwarn('new')\nint answer = 42;\nend\n")],
+    );
+    let tar = dir.path().join("foo-1.0.tar.gz");
+    let diff = b"--- a/f.py\n+++ b/f.py\n@@ -1,3 +1,3 @@\n import sys\n-int answer = 41;\n+int answer = 42;\n end\n\
+                 --- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-import removed_module\n";
+    let fuzzy = failed(
+        "p.patch",
+        "Patching file f.py with fuzz 2\nPatch p.patch can be reverse-applied\n",
+    );
+    assert_eq!(
+        proof_of(&fuzzy, Some(&tar), Some(diff), 1, "p.patch"),
+        Ok(DropProof::InTarball)
+    );
+    // The added line differs in the archive: quilt's fuzz match is no proof.
+    let differs = b"--- a/f.py\n+++ b/f.py\n@@ -1,3 +1,3 @@\n import sys\n-int answer = 41;\n+int answer = 43;\n end\n";
+    let refused = proof_of(&fuzzy, Some(&tar), Some(differs), 1, "p.patch").unwrap_err();
+    assert!(refused.contains("only with fuzz"), "{refused}");
+    // Quilt's reverse-apply alone, with nothing to check the hunks against, is no proof.
+    assert!(proof_of(&fuzzy, None, Some(diff), 1, "p.patch").is_err());
 }
