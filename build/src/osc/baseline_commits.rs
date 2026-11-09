@@ -88,6 +88,22 @@ pub fn record_commit(
     Ok(())
 }
 
+/// Records `head` as a revision an attempt committed, once the checkout is
+/// known to hold it and it was judged the tool's own (see
+/// [`own_attempt_commit`]). The revision is appended to the attempts' log and
+/// the in-flight marker of its commit, which was never cleared, is removed.
+pub fn adopt_own_head(dir: &Path, head: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    fs::create_dir_all(dir)?;
+    let mut log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(COMMITTED))?;
+    writeln!(log, "{head}")?;
+    let _ = fs::remove_file(dir.join(PENDING_COMMIT));
+    Ok(())
+}
+
 /// Whether the package of `checkout` has a `_service`: the file in the checkout,
 /// or an entry of `.osc/_files`, which osc can leave out of the checkout (its
 /// `exclude_files` and size settings).

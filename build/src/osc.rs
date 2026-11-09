@@ -141,6 +141,10 @@ mod baseline_commits;
 pub use baseline_commits::*;
 mod baseline_head;
 pub use baseline_head::*;
+mod baseline_adopt;
+pub use baseline_adopt::*;
+#[cfg(test)]
+mod baseline_adopt_tests;
 #[cfg(test)]
 mod baseline_commits_tests;
 #[cfg(test)]

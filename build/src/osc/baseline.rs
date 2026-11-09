@@ -358,16 +358,32 @@ pub fn head_matches_checkout(
         return Ok(());
     }
     let latest = history(&project, &package);
-    let own = parse_directory_srcmd5(listing_xml);
-    Err(moved_on_reason(
-        &project,
-        &package,
-        &head,
-        &local,
-        own.as_deref(),
-        dir,
-        latest,
-    ))
+    let own = own_srcmd5(listing_xml);
+    let recorded = committed_revisions(dir);
+    let judged = match (&latest, current_user(Emit::quiet())) {
+        (Ok(latest), Ok(user)) => {
+            own_attempt_commit(&head, &local, own.as_deref(), latest, &user, &recorded)
+        }
+        (Err(e), _) => Err(format!("its history is not readable: {e}")),
+        (_, Err(e)) => Err(format!("the osc user is not known: {e}")),
+    };
+    match judged {
+        Ok(()) => adopt_own_head(dir, &head).map_err(|e| {
+            format!("cannot record {head} as the attempt's commit: {e}; nothing was written to OBS")
+        }),
+        Err(why) => Err(format!(
+            "{}; the head is not the attempt's own commit: {why}",
+            moved_on_reason(
+                &project,
+                &package,
+                &head,
+                &local,
+                own.as_deref(),
+                dir,
+                latest,
+            )
+        )),
+    }
 }
 
 /// What [`restore_baseline_outcome`] found on OBS.
