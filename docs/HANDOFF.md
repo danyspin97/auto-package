@@ -78,17 +78,19 @@ their test. Look at each in the run log / TUI:
 
 ## 5. Open defects and decisions
 
-Tool, ordered by likely value:
-- `update_project/items.rs:416-419` existence lookup still compares with
-  `fuzzy_key` (the separator collision `python-whois` / `python-pythonwhois`
-  was fixed everywhere else; `fuzzy_key` is not an identity key).
-- `append_landed` never records commits of a package with a `_service`; every
-  attempt commit of such a package depends on the adoption rule
-  (`osc/baseline_adopt.rs`).
-- A waited dependency can wait forever if its commit never reaches the branch
-  (no "built in this run" check; the precheck has no run-event access).
-- The package's own `Epoch:` is not read; capability bounds are compared with
-  the provide's version where known, else the package version.
+Fixed in the last round (each only unit-tested, see section 4): the last
+`fuzzy_key` existence lookup (`items.rs`, now the PEP 503 key); the origin's own
+`Epoch:` (parsed, compared with the RPM rule; `same_project.rs` and a provide's
+own epoch are still not epoch-aware); recording an attempt's commit for a
+`_service` package (`record_service_commit`, adoption stays the fallback); a
+wait that never ends (20 consultations or 6 h, then needs-a-human with the next
+step; the "built in this run" set is process-global, so a later outer run gets
+a fresh 20); an update's sdist -> wheel switch (refused in the generator and in
+agent edits; a `use_upstream_wheel` answer on an update still passes, because
+`validate_wheel_switch_why` only needs 20 characters, weaker than convention
+28 Exception 4: tighten it).
+
+Tool, still open, ordered by likely value:
 - Copyright header rewritten "2024 -> 2026 SUSE LLC and contributors" on a
   built package: the string is spec-cleaner's (`distro_copyright`), and no
   code here writes it. Not the service: a branch with no `_service` runs no
@@ -98,8 +100,12 @@ Tool, ordered by likely value:
   The rewrite happened silently between the carry and the commit, in a step
   that logs no spec change. Open: find that step (instrument the spec
   writes), before any fix.
-- `python-hypothesis` switched Source to a prebuilt wheel (convention 32 says
-  build from source): needs a human decision.
+- `python-hypothesis` got its wheel from the GENERATOR's fallback
+  (`try_wheel_fallback` in `gen_spec.rs`), not from an agent choice, after
+  "could not carry the existing recipe forward"; the branch decision is not
+  logged (inferred by elimination). The generator gate now stops an update that
+  switches sdist -> wheel; whether hypothesis can build from its sdist is still
+  a human question.
 - `config.update` stays false for a dependency by design; two review gates
   (`build_round.rs:310`, `review.rs:123`) still use it.
 - Product-owner recommendations NOT implemented: `--jobs` throttle when free
