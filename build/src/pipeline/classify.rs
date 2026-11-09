@@ -31,7 +31,12 @@ pub(super) fn classify_failure(
         Phase::Section(s) if s == "%prep" => ap_core::event::BuildFailure::PrepFailed,
         Phase::Section(s) if s == "%build" => ap_core::event::BuildFailure::BuildFailed,
         Phase::Section(s) if s == "%install" => ap_core::event::BuildFailure::InstallFailed,
-        Phase::Section(s) if s == "%check" => ap_core::event::BuildFailure::CheckFailed,
+        // rpm's file-list check runs after the last section and is attributed
+        // to it, so a `%check` that ended the rpm run can carry a file complaint.
+        // Only a section's own `Bad exit status` is a check failure.
+        Phase::Section(s) if s == "%check" && !failure.is_post_build_check() => {
+            ap_core::event::BuildFailure::CheckFailed
+        }
         // A source service failed before any rpm section ran: the sources were
         // never made. Not an install failure, whatever else the log says.
         _ if failure.genre == Genre::SourceService => ap_core::event::BuildFailure::Unclassified {
