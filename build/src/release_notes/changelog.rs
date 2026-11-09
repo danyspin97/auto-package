@@ -1,9 +1,11 @@
 //! The changes an update crosses, read from the changelog file that ships in
 //! the new source archive.
 
+use std::cmp::Ordering;
 use std::path::Path;
 
 use super::markdown::strip_links;
+use crate::version;
 
 /// The changelog file names looked for at the top of the source tree, in the
 /// order they are preferred.
@@ -89,11 +91,17 @@ pub(super) fn section_of_archive(archive: &Path, old: &str, new: &str) -> Option
 /// The lines of `changelog` above the heading of `old`, when `new` has a
 /// heading above it (the newest release first, as nearly every changelog is
 /// kept). `None` when either heading is missing or nothing lies between them.
+/// When `old` has no heading at all, the section is the top release only (see
+/// [`section_from_top`]).
 pub(super) fn section_between(changelog: &str, old: &str, new: &str) -> Option<String> {
     let lines: Vec<&str> = changelog.lines().collect();
-    let old_at = lines.iter().position(|l| is_heading_of(l, old))?;
-    let new_at = lines[..old_at].iter().position(|l| is_heading_of(l, new))?;
-    let section: String = lines[new_at..old_at].join("\n");
+    let section = match lines.iter().position(|l| is_heading_of(l, old)) {
+        Some(old_at) => {
+            let new_at = lines[..old_at].iter().position(|l| is_heading_of(l, new))?;
+            lines[new_at..old_at].join("\n")
+        }
+        None => section_from_top(&lines, old, new)?,
+    };
     let section = section.trim();
     if section.is_empty() {
         return None;
@@ -145,4 +153,54 @@ fn is_heading_of(line: &str, version: &str) -> bool {
         from = end;
     }
     false
+}
+
+/// The section of a changelog whose heading for `old` is missing. It is taken
+/// when `old` is older than every release heading in the file and `new` is the
+/// first one: the section runs from that heading to the next release heading
+/// of the same level, or to the end. `None` otherwise.
+fn section_from_top(lines: &[&str], old: &str, new: &str) -> Option<String> {
+    let releases: Vec<(usize, String)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| heading_version(l).map(|v| (i, v)))
+        .collect();
+    let (top, _) = releases.first()?;
+    if !is_heading_of(lines[*top], new)
+        || releases
+            .iter()
+            .any(|(_, v)| version::sort_cmp(old, v) != Ordering::Less)
+    {
+        return None;
+    }
+    let level = heading_level(lines[*top]);
+    let end = releases[1..]
+        .iter()
+        .map(|(i, _)| *i)
+        .find(|i| heading_level(lines[*i]) == level)
+        .unwrap_or(lines.len());
+    Some(lines[*top..end].join("\n"))
+}
+
+/// The version a heading line names: the first word of its first three that
+/// is a dotted version, with an optional `v` (`## v3.3.0 - 2020`,
+/// `Version 3.3.0`, `1.0.0 (2025-01-01)`). `None` for any other line.
+fn heading_version(line: &str) -> Option<String> {
+    heading_text(line)?
+        .split_whitespace()
+        .take(3)
+        .find_map(|word| {
+            let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            let word = word.strip_prefix(['v', 'V']).unwrap_or(word);
+            let dotted = word.contains('.')
+                && word.starts_with(|c: char| c.is_ascii_digit())
+                && word.chars().all(|c| c.is_ascii_digit() || c == '.');
+            dotted.then(|| word.to_string())
+        })
+}
+
+/// The markdown level of a heading: its count of leading `#`, zero for a
+/// heading without them (an underlined one).
+fn heading_level(line: &str) -> usize {
+    line.trim().chars().take_while(|c| *c == '#').count()
 }

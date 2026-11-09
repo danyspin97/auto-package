@@ -128,9 +128,13 @@ Version 3.3.0 (2023-01-01)
 
     #[test]
     fn a_bullet_that_names_a_version_is_not_its_heading() {
-        // The old version appears only inside a bullet: no heading, no section.
-        assert!(section_between(NEWS, "3.2.0", "3.4.0").is_none());
+        // No heading for 3.3.0, only a bullet: no section between headings.
         assert!(section_between("- fixed in 3.3.0\n", "3.3.0", "3.4.0").is_none());
+        // 3.2.0 has no heading and is older than every one: the top section.
+        assert_eq!(
+            section_between(NEWS, "3.2.0", "3.4.0").unwrap(),
+            "Version 3.4.0 (2024-05-01)\n- Add a thing\n- Fix a bug in 3.3.0 handling"
+        );
     }
 
     #[test]
@@ -169,6 +173,48 @@ Version 3.3.0 (2023-01-01)
             .unwrap(),
             "### v40.46.0\n- moved from v40.44.0"
         );
+    }
+
+    #[test]
+    fn an_old_release_older_than_every_heading_takes_the_top_section() {
+        // python-pylsqpack: the changelog starts at 1.0.0, and 0.3.24 has no
+        // heading of its own.
+        let text =
+            "1.0.0 (2026-01-01)\n------------------\n\n- Drop Python 3.8.\n- Faster parsing.\n";
+        assert_eq!(
+            section_between(text, "0.3.24", "1.0.0").unwrap(),
+            "1.0.0 (2026-01-01)\n------------------\n\n- Drop Python 3.8.\n- Faster parsing."
+        );
+        // A bullet that names the old version is not its heading either.
+        assert_eq!(
+            section_between(
+                "### v40.46.0\n- moved from v40.44.0\n",
+                "40.44.0",
+                "40.46.0"
+            )
+            .unwrap(),
+            "### v40.46.0\n- moved from v40.44.0"
+        );
+    }
+
+    #[test]
+    fn the_top_section_ends_at_the_next_release_heading_of_its_level() {
+        let text = "## 1.0.0\n- a\n## 0.9.0\n- b\n";
+        assert_eq!(
+            section_between(text, "0.8.0", "1.0.0").unwrap(),
+            "## 1.0.0\n- a"
+        );
+    }
+
+    #[test]
+    fn no_top_section_when_old_is_not_the_oldest_or_new_is_not_the_top() {
+        // 0.3.20 has a heading below 0.3.24: the old release is in the file.
+        let text = "1.0.0\n- a\n\n0.3.20\n- b\n";
+        assert!(section_between(text, "0.3.24", "1.0.0").is_none());
+        // The new release is not the first heading.
+        assert!(section_between("## 0.9.0\n## 1.0.0\n- a\n", "0.8.0", "1.0.0").is_none());
+        // No release heading at all.
+        assert!(section_between("- nothing 1.0.0\n", "0.8.0", "1.0.0").is_none());
     }
 
     #[test]
