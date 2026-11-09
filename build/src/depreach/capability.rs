@@ -197,7 +197,11 @@ fn judge_repo(
         match verdict {
             Match::Satisfied(version) => {
                 let mut hit = c.hit.clone();
-                hit.version = Some(version);
+                // The provide's version is the origin's side of a bound, and
+                // only a bound uses it; otherwise the package's version stays.
+                if req.bound.is_some() && !version.is_empty() {
+                    hit.version = Some(version);
+                }
                 return RepoVerdict::Ok(hit);
             }
             Match::Older(version) => {

@@ -260,7 +260,51 @@ fn an_unbounded_requirement_is_met_by_any_provider() {
         &[reach("16.1", &["openSUSE:Leap:16.1"], 0)],
         &cands,
     );
-    assert!(matches!(state, CapState::Provided { .. }), "{state:?}");
+    let CapState::Provided { provider } = state else {
+        panic!("{state:?}");
+    };
+    // Without a bound the provide's version is not used: the package's stays.
+    assert_eq!(provider.version.as_deref(), Some("1"));
+}
+
+#[test]
+fn a_bounded_provider_gives_the_hit_its_provide_version() {
+    let cands = [cand(
+        "openSUSE:Leap:16.1",
+        "standard",
+        "foo-devel",
+        &["pkgconfig(foo) = 2.80.0"],
+    )];
+    let state = judge_capability(
+        &req("pkgconfig(foo)", Some((">=", "2.70"))),
+        "pkgconfig(foo)",
+        &[reach("16.1", &["openSUSE:Leap:16.1"], 0)],
+        &cands,
+    );
+    let CapState::Provided { provider } = state else {
+        panic!("{state:?}");
+    };
+    assert_eq!(provider.version.as_deref(), Some("2.80.0"));
+}
+
+#[test]
+fn an_unversioned_provide_keeps_the_package_version_without_a_bound() {
+    let cands = [cand(
+        "openSUSE:Leap:16.1",
+        "standard",
+        "foo-devel",
+        &["pkgconfig(foo)"],
+    )];
+    let state = judge_capability(
+        &req("pkgconfig(foo)", None),
+        "pkgconfig(foo)",
+        &[reach("16.1", &["openSUSE:Leap:16.1"], 0)],
+        &cands,
+    );
+    let CapState::Provided { provider } = state else {
+        panic!("{state:?}");
+    };
+    assert_eq!(provider.version.as_deref(), Some("1"));
 }
 
 /// `provided_within` for `pkgconfig(foo)` with one bound, the provides given
