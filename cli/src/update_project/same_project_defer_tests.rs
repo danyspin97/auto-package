@@ -28,7 +28,7 @@ fn with(dep: &str, need: SameNeed) -> NeedSameProject {
 }
 
 fn defer(a: &str, needs: &[NeedSameProject], graph: &WaitGraph) -> Deferral {
-    defer_decision(a, needs, graph, MAX_DEFERRED, false)
+    defer_decision(a, needs, graph, MAX_DEFERRED, false, None)
 }
 
 fn deferred_on(on: &[&str]) -> Deferral {
@@ -100,7 +100,7 @@ fn the_end_of_the_sweep_releases_every_wait() {
     let mut g = WaitGraph::default();
     g.defer("b", &["c".into()]);
     g.defer("a", &["b".into()]);
-    let got = defer_decision("a", &[not_found("x"), needs("b")], &g, 0, true);
+    let got = defer_decision("a", &[not_found("x"), needs("b")], &g, 0, true, None);
     assert_eq!(
         got,
         Deferral::Proceed(Some(
@@ -170,7 +170,7 @@ fn the_cap_stops_new_deferrals_but_not_the_deferred() {
     let mut g = WaitGraph::default();
     g.defer("x", &["q".into()]);
     g.defer("y", &["q".into()]);
-    let got = defer_decision("a", &[not_found("b")], &g, 2, false);
+    let got = defer_decision("a", &[not_found("b")], &g, 2, false, None);
     assert_eq!(
         got,
         Deferral::BuildAgainstOrigin(
@@ -181,11 +181,11 @@ fn the_cap_stops_new_deferrals_but_not_the_deferred() {
     );
     // One already deferred is judged again without the cap.
     assert_eq!(
-        defer_decision("x", &[not_found("q")], &g, 2, false),
+        defer_decision("x", &[not_found("q")], &g, 2, false, None),
         deferred_on(&["q"])
     );
     assert_eq!(
-        defer_decision("a", &[not_found("b")], &g, 3, false),
+        defer_decision("a", &[not_found("b")], &g, 3, false, None),
         deferred_on(&["b"])
     );
 }
@@ -203,4 +203,30 @@ fn the_graph_folds_spellings_and_orders_releases() {
     assert_eq!(g.release_order().len(), 4);
     g.release("PY-A");
     assert!(!g.is_deferred("pya"));
+}
+
+#[test]
+fn a_dependency_of_another_package_is_never_deferred() {
+    let g = WaitGraph::default();
+    let got = defer_decision(
+        "d",
+        &[not_found("b"), needs("c")],
+        &g,
+        MAX_DEFERRED,
+        false,
+        Some("a"),
+    );
+    assert_eq!(
+        got,
+        Deferral::BuildAgainstOrigin(
+            "d is needed by a, which waits for it: not waiting for b, d builds against the \
+             source's"
+                .into()
+        )
+    );
+    // Nothing to wait for: it goes on silently, as any other package.
+    assert_eq!(
+        defer_decision("d", &[], &g, MAX_DEFERRED, false, Some("a")),
+        Deferral::Proceed(None)
+    );
 }

@@ -33,6 +33,8 @@
 //!   that says the run is stopping), then continue its preparation where it
 //!   left off. At the end of the sweep nothing gets `Defer`, so every
 //!   deferred package is released, each after those it waits for.
+//! - A dependency of another package (`Item::dependency_of`) is never
+//!   deferred: it goes on, and the package that needs it waits for it.
 //! - A package that ends deferred because the run stops is listed as
 //!   `NotStarted`, as the items dropped on a stop are.
 //! - The summary line for a package that waited: `waited for B`; for one
@@ -132,6 +134,10 @@ pub(super) enum Deferral {
 }
 
 /// Whether `a`, with `needs` of its source's packages, is deferred.
+/// `dependency_of` is the package `a` is a dependency of, when it is one: a
+/// dependency is never deferred, since the package that needs it is queued
+/// behind it (see `DepQueue::add`), and parking it would leave that package
+/// with a dependency that is never handed over.
 ///
 /// `a` waits for each `B` it needs that the sweep has not found yet
 /// ([`SameNeed::NotFoundYet`]), and for each found `B` it needs
@@ -148,6 +154,7 @@ pub(super) fn defer_decision(
     graph: &WaitGraph,
     cap: usize,
     sweep_finished: bool,
+    dependency_of: Option<&str>,
 ) -> Deferral {
     let blockers: Vec<&str> = needs
         .iter()
@@ -161,6 +168,13 @@ pub(super) fn defer_decision(
     let was_waiting = graph.is_deferred(a);
     if blockers.is_empty() {
         return Deferral::Proceed(was_waiting.then(|| format!("{a}: no longer waiting")));
+    }
+    if let Some(parent) = dependency_of {
+        return Deferral::BuildAgainstOrigin(format!(
+            "{a} is needed by {parent}, which waits for it: not waiting for {}, {a} builds \
+             against the source's",
+            blockers.join(", ")
+        ));
     }
     if sweep_finished {
         return Deferral::Proceed(Some(format!(

@@ -164,6 +164,7 @@ pub(super) fn judge(
         graph,
         MAX_DEFERRED,
         index.sweep_finished(),
+        held.item.dependency_of.as_deref(),
     );
     (deferral, needs)
 }
