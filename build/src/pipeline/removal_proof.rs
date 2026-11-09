@@ -1,8 +1,9 @@
 //! The proof a patch removal needs. A patch an edit removes is kept unless its
 //! change is already in the new sources: quilt reports it `can be
 //! reverse-applied`, or quilt reports it does not apply and each hunk's added
-//! lines are in the new archive. Every other removal is refused, one quilt did
-//! not check included.
+//! lines are in the new archive, or every file it patches is gone from the new
+//! archive (not for a security patch). Every other removal is refused, one quilt
+//! did not check included.
 //!
 //! A patch the edit keeps declared but stops applying (see
 //! [`disabled_patches`](crate::patch_check::disabled_patches)) is judged the
@@ -124,6 +125,14 @@ pub(super) fn proof_of(
         Some(PatchStatus::Fails { output, .. }) => match (tarball, diff) {
             (Some(t), Some(d)) if crate::patch_check::already_in_tarball(t, d, level) => {
                 Ok(DropProof::InTarball)
+            }
+            // A security patch is never dropped for its files being gone: the
+            // proof above is the only one such a patch gets.
+            (Some(t), Some(d))
+                if !is_security_patch(name, d)
+                    && crate::patch_check::targets_absent_in_tarball(t, d, level) =>
+            {
+                Ok(DropProof::TargetsAbsent)
             }
             _ if output.contains(REVERSE_APPLIED) => Err(
                 "quilt says it `can be reverse-applied` only with fuzz, and not every hunk \

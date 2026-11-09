@@ -347,3 +347,29 @@ fn a_web_address_patch_is_removed_with_its_quilt_proof() {
         vec![("foo-1.0.patch".to_string(), DropProof::ReverseApplies)]
     );
 }
+
+#[test]
+fn a_patch_whose_every_file_is_gone_from_the_archive_is_proven() {
+    let dir = tempfile::tempdir().unwrap();
+    archive(
+        dir.path(),
+        "foo-1.0.tar.gz",
+        &[("other.py", "int unrelated_line = 5;\n")],
+    );
+    let tar = dir.path().join("foo-1.0.tar.gz");
+    let gone =
+        b"--- a/gone.py\n+++ b/gone.py\n@@ -1 +1 @@\n-import old_module\n+import new_module\n";
+    let fails = failed("p.patch", "Patching file gone.py\nfailed\n");
+    assert_eq!(
+        proof_of(&fails, Some(&tar), Some(gone), 1, "p.patch"),
+        Ok(DropProof::TargetsAbsent)
+    );
+    // One of its two files is still in the archive: refused.
+    let mixed = b"--- a/other.py\n+++ b/other.py\n@@ -1 +1 @@\n-x\n+y\n--- a/gone.py\n+++ b/gone.py\n@@ -1 +1 @@\n-x\n+y\n";
+    assert!(proof_of(&fails, Some(&tar), Some(mixed), 1, "p.patch").is_err());
+    // A security patch is not dropped for its files being gone.
+    let cve = failed("fix-CVE-2024-1234.patch", "Patching file gone.py\nfailed\n");
+    assert!(proof_of(&cve, Some(&tar), Some(gone), 1, "fix-CVE-2024-1234.patch").is_err());
+    // Without the archive nothing is judged.
+    assert!(proof_of(&fails, None, Some(gone), 1, "p.patch").is_err());
+}

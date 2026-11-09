@@ -240,6 +240,10 @@ fn bullets_are_one_line_per_patch_without_the_version() {
         proven_drop_bullet("fix-bar.patch", DropProof::InTarball),
         "Drop fix-bar.patch: already applied upstream (already in the new tarball)"
     );
+    assert_eq!(
+        proven_drop_bullet("fix-bar.patch", DropProof::TargetsAbsent),
+        "Drop fix-bar.patch: the file it patches is gone from the new tarball"
+    );
 }
 
 #[test]

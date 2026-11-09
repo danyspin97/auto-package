@@ -312,6 +312,11 @@ pub fn refresh_bullet(names: &[&str]) -> String {
 pub enum DropProof {
     ReverseApplies,
     InTarball,
+    /// Every file the patch changes is gone from the new tarball. This is a
+    /// proof about the patch and the tarball only: whether the spec or the
+    /// project still needs the patch (say, for another Python version) is not
+    /// judged.
+    TargetsAbsent,
 }
 
 /// The `.changes` bullet for a patch removed because its change is already
@@ -320,6 +325,9 @@ pub fn proven_drop_bullet(name: &str, proof: DropProof) -> String {
     let how = match proof {
         DropProof::ReverseApplies => "reverse-applies cleanly",
         DropProof::InTarball => "already in the new tarball",
+        DropProof::TargetsAbsent => {
+            return format!("Drop {name}: the file it patches is gone from the new tarball");
+        }
     };
     format!("Drop {name}: already applied upstream ({how})")
 }

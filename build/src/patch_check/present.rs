@@ -60,24 +60,49 @@ fn trimmed(line: &str) -> String {
 /// archive does not unpack, a file is missing or a hunk is not proven.
 pub fn already_in_tarball(tarball: &Path, diff: &[u8], level: u32) -> bool {
     let hunks = hunks(&String::from_utf8_lossy(diff), level);
-    if hunks.is_empty() || hunks.iter().any(|h| h.file.is_none() && h.old.is_none()) {
+    let Some((_scratch, root)) = unpack_targets(tarball, &hunks) else {
         return false;
-    }
-    let targets: Vec<String> = hunks
+    };
+    hunks.iter().all(|h| hunk_in_tree(&root, h))
+}
+
+/// Whether every file `diff` changes is gone from the new archive `tarball`:
+/// none of the hunks' `+++` and `---` targets is in it. Only that is judged: a
+/// patch whose files are all gone cannot apply, and nothing says the spec no
+/// longer needs it. Same `level` and false cases as [`already_in_tarball`].
+pub fn targets_absent_in_tarball(tarball: &Path, diff: &[u8], level: u32) -> bool {
+    let hunks = hunks(&String::from_utf8_lossy(diff), level);
+    let Some((_scratch, root)) = unpack_targets(tarball, &hunks) else {
+        return false;
+    };
+    targets_of(&hunks)
+        .iter()
+        .all(|t| std::fs::symlink_metadata(root.join(t)).is_err())
+}
+
+/// The names the hunks change, in hunk order: `+++` and `---`, without `/dev/null`.
+fn targets_of(hunks: &[Hunk]) -> Vec<String> {
+    hunks
         .iter()
         .flat_map(|h| [h.file.clone(), h.old.clone()])
         .flatten()
-        .collect();
-    let Ok(scratch) = tempfile::tempdir() else {
-        return false;
-    };
+        .collect()
+}
+
+/// The archive unpacked, with only the hunks' targets, and the directory it
+/// unpacked into. None when the hunks name no file, a hunk names neither side,
+/// or the archive does not unpack.
+fn unpack_targets(tarball: &Path, hunks: &[Hunk]) -> Option<(tempfile::TempDir, PathBuf)> {
+    if hunks.is_empty() || hunks.iter().any(|h| h.file.is_none() && h.old.is_none()) {
+        return None;
+    }
+    let targets = targets_of(hunks);
+    let scratch = tempfile::tempdir().ok()?;
     let src = scratch.path().join("src");
     let wanted = |p: &Path| targets.iter().any(|t| p.ends_with(t));
-    if ap_ecosystem::sdist::extract_where(tarball, &src, wanted).is_err() {
-        return false;
-    }
+    ap_ecosystem::sdist::extract_where(tarball, &src, wanted).ok()?;
     let root = top_dir(&src);
-    hunks.iter().all(|h| hunk_in_tree(&root, h))
+    Some((scratch, root))
 }
 
 /// Whether one hunk is in the tree at `root`: a deletion when the file is gone,
