@@ -132,7 +132,11 @@ pub struct PipelineConfig {
 mod state;
 pub use state::*;
 mod different_retry;
+mod failure_key;
+#[cfg(test)]
+mod failure_key_tests;
 pub use different_retry::*;
+pub use failure_key::same_failure;
 
 /// The reserved `--source-url <package>=wheel` value: package this one from the
 /// upstream wheel, not from source (torch, whose Factory recipe is a multi-hour

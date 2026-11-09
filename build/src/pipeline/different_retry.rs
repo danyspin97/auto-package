@@ -16,6 +16,7 @@ use crate::workspace::Workspace;
 
 use super::PkgState;
 use super::agent::TurnCtx;
+use super::same_failure;
 
 /// Identical failures after the instruction before the package is given up.
 pub const INSTRUCTED_REPEATS: usize = 3;
@@ -66,7 +67,11 @@ impl RetryRecord {
                 ..Self::default()
             };
         }
-        if self.reasons.last().map(String::as_str) != Some(reason) {
+        if !self
+            .reasons
+            .last()
+            .is_some_and(|last| same_failure(last, reason))
+        {
             self.reasons.push(reason.to_string());
             if self.reasons.len() > MAX_REASONS {
                 self.reasons.remove(0);

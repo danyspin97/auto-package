@@ -49,13 +49,14 @@ pub(super) fn identical_stop_applies(kind: FailureKind) -> bool {
 
 /// Whether a failure with `reason` repeats the previous failure of the same
 /// package with no build finished in between: a retry would start from the
-/// same inputs and fail the same way.
+/// same inputs and fail the same way. The reasons are compared with what changes
+/// between attempts left out (a line number, a temporary path, a commit message).
 pub(super) fn repeats_without_change(
     prev: Option<&LastFailure>,
     reason: &str,
     builds: usize,
 ) -> bool {
-    prev.is_some_and(|p| p.reason == reason && p.builds == builds)
+    prev.is_some_and(|p| ap_build::pipeline::same_failure(&p.reason, reason) && p.builds == builds)
 }
 
 /// Whether a package that has failed `count` times has used up its `limit`.
@@ -352,6 +353,19 @@ mod tests {
         assert!(repeats_without_change(
             Some(&prev),
             "needs a human: 1 patch",
+            4
+        ));
+    }
+
+    #[test]
+    fn a_reason_that_differs_only_in_a_line_or_a_temporary_name_is_a_repeat() {
+        let prev = last(
+            "osc ci: python-chess.changes:23 INVALID DATE /tmp/.tmpAb12Cd/x",
+            4,
+        );
+        assert!(repeats_without_change(
+            Some(&prev),
+            "osc ci: python-chess.changes:25 INVALID DATE /tmp/.tmpZz98Yy/x",
             4
         ));
     }
