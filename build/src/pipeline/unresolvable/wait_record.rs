@@ -1,0 +1,174 @@
+//! What the last unresolvable-dependencies round concluded, kept with the
+//! spec and the RPMs it was decided on. A build try spends OBS time and an
+//! attempt; when nothing has changed since the round that decided its answer,
+//! the same try gets the same answer, so it is not started again.
+//!
+//! Two answers are recorded:
+//! - `Missing`: the names OBS reported are not built yet and the package now
+//!   waits on them (`MissingDeps`). While the spec is unchanged and none of
+//!   those names is an RPM here, the package waits without a build try.
+//! - `LocalRetry`: every name OBS reported is already an RPM here, so the
+//!   build is retried once. If OBS says unresolvable again with the same spec
+//!   and the same RPMs, the retry is not repeated.
+
+use super::*;
+use crate::pipeline::rpm_deps::rpm_satisfies_dep;
+use crate::pipeline::state::hash_spec;
+use serde::{Deserialize, Serialize};
+
+/// The file in the package's workspace directory that holds the record.
+const RECORD_FILE: &str = "unresolvable-wait.json";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Wait {
+    /// The package waits on these names, which are not built yet.
+    Missing {
+        deps: Vec<String>,
+        native: Vec<String>,
+        outdated: Vec<(String, Option<String>)>,
+    },
+    /// OBS reported names that are all RPMs here, and was retried once.
+    LocalRetry,
+}
+
+/// A decision and the state it was made in: the spec and the RPM directory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitRecord {
+    pub spec: u64,
+    pub rpms: u64,
+    pub wait: Wait,
+}
+
+/// Whether `record` still stands for `spec`: a `Missing` answer whose names
+/// are not RPMs yet in `rpms_dir` (as `satisfied` tells). Returns the names
+/// the package waits on, or `None` when a build try is needed.
+pub fn waiting_on(
+    record: Option<&WaitRecord>,
+    spec: u64,
+    satisfied: impl Fn(&str) -> bool,
+) -> Option<Vec<String>> {
+    let record = record?;
+    if record.spec != spec {
+        return None;
+    }
+    let Wait::Missing { deps, .. } = &record.wait else {
+        return None;
+    };
+    if deps.is_empty() || deps.iter().any(|d| satisfied(d)) {
+        return None;
+    }
+    Some(deps.clone())
+}
+
+/// Whether a retry with names that are all RPMs would repeat the last one:
+/// the spec and the RPM directory are the ones that retry saw.
+pub fn local_retry_repeats(record: Option<&WaitRecord>, spec: u64, rpms: u64) -> bool {
+    matches!(
+        record,
+        Some(r) if r.spec == spec && r.rpms == rpms && r.wait == Wait::LocalRetry
+    )
+}
+
+/// The names of the RPM files in `rpms_dir`, as one string, in sorted order.
+fn rpm_listing(rpms_dir: &Path) -> String {
+    let mut names: Vec<String> = std::fs::read_dir(rpms_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".rpm"))
+        .collect();
+    names.sort();
+    names.join("\n")
+}
+
+/// The spec and RPM-directory hashes as they are now.
+fn current(ctx: &RunCtx) -> Option<(u64, u64)> {
+    let spec = std::fs::read_to_string(&ctx.spec_path).ok()?;
+    Some((
+        hash_spec(&spec),
+        hash_spec(&rpm_listing(&ctx.config.rpms_dir)),
+    ))
+}
+
+fn load(ws_dir: &Path) -> Option<WaitRecord> {
+    let text = std::fs::read_to_string(ws_dir.join(RECORD_FILE)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn save(ctx: &RunCtx, wait: Wait) {
+    let Some((spec, rpms)) = current(ctx) else {
+        return;
+    };
+    let record = WaitRecord { spec, rpms, wait };
+    // Not saving only costs a later try that could have been skipped.
+    if let Ok(text) = serde_json::to_string(&record) {
+        let _ = std::fs::write(ctx.ws.dir().join(RECORD_FILE), text);
+    }
+}
+
+/// Before a build try: `MissingDeps` when the round that decided the last
+/// answer is still valid (see [`waiting_on`]), so no try is spent on it.
+pub fn precheck(ctx: &RunCtx) -> Option<PipelineResult> {
+    let (spec, _) = current(ctx)?;
+    let record = load(ctx.ws.dir());
+    let deps = waiting_on(record.as_ref(), spec, |d| {
+        rpm_satisfies_dep(&ctx.config.rpms_dir, d)
+    })?;
+    let Some(WaitRecord {
+        wait: Wait::Missing {
+            native, outdated, ..
+        },
+        ..
+    }) = record
+    else {
+        return None;
+    };
+    ctx.reporter.report(&Event::Progress {
+        step: None,
+        message: format!(
+            "{}: still waiting for {}; nothing changed since the last attempt, no build tried",
+            ctx.rpm_name,
+            deps.join(", ")
+        ),
+    });
+    Some(PipelineResult::MissingDeps {
+        rpm_name: ctx.rpm_name.clone(),
+        deps,
+        patches: Vec::new(),
+        native,
+        outdated,
+    })
+}
+
+/// Record that this round ends `MissingDeps` on `deps`.
+pub fn save_missing(
+    ctx: &RunCtx,
+    deps: &[String],
+    native: &[String],
+    outdated: &[(String, Option<String>)],
+) {
+    save(
+        ctx,
+        Wait::Missing {
+            deps: deps.to_vec(),
+            native: native.to_vec(),
+            outdated: outdated.to_vec(),
+        },
+    );
+}
+
+/// Whether the retry about to be made for names that are all RPMs here would
+/// repeat the last one (see [`local_retry_repeats`]). When it would not, the
+/// retry is recorded so the next one can be compared with it.
+pub fn local_retry_is_new(ctx: &RunCtx) -> bool {
+    let Some((spec, rpms)) = current(ctx) else {
+        return true;
+    };
+    if local_retry_repeats(load(ctx.ws.dir()).as_ref(), spec, rpms) {
+        return false;
+    }
+    save(ctx, Wait::LocalRetry);
+    true
+}

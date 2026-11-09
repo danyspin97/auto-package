@@ -11,6 +11,10 @@ mod extra_drop;
 mod extra_drop_tests;
 use extra_drop::*;
 
+pub(super) mod wait_record;
+#[cfg(test)]
+mod wait_record_tests;
+
 /// OBS reported unresolvable dependencies for the build.
 pub(super) fn unresolvable_deps_round(
     ctx: &RunCtx,
@@ -387,7 +391,16 @@ pub(super) fn unresolvable_deps_round(
         }
         // Every dep has a local RPM, so OBS should pick them up on
         // retry. Count the round anyway — if OBS keeps saying
-        // unresolvable we would otherwise spin here forever.
+        // unresolvable we would otherwise spin here forever. A retry with
+        // the same spec and RPMs as the last one gets the same answer, so
+        // it is not started again.
+        if !wait_record::local_retry_is_new(ctx) {
+            return Err(ctx.failed(format!(
+                "OBS keeps reporting unresolvable dependencies although every one has a \
+                 local RPM, and nothing changed since the last retry; log: {}",
+                build_log.display()
+            )));
+        }
         st.attempts += 1;
         persist_attempts(ws, &config.run_id, st.attempts);
         if st.attempts > config.max_attempts {
@@ -552,6 +565,7 @@ pub(super) fn unresolvable_deps_round(
                 .any(|b| osc::fuzzy_key(b) == osc::fuzzy_key(n))
         })
         .collect();
+    wait_record::save_missing(ctx, &to_build, &native, &outdated);
     Err(PipelineResult::MissingDeps {
         rpm_name: rpm_name.clone(),
         deps: to_build,

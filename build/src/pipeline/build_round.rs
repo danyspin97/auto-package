@@ -25,6 +25,11 @@ pub(super) fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, P
         ..
     } = ctx;
     let reporter = *reporter;
+    // The names the last round left the package waiting on are still unbuilt,
+    // and nothing else changed: the same try would only hear the same answer.
+    if let Some(missing) = crate::pipeline::unresolvable::wait_record::precheck(ctx) {
+        return Err(missing);
+    }
     let build_step = begin_or_fail!(
         pkg_run,
         reporter,
