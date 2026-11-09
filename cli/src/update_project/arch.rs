@@ -14,11 +14,17 @@ pub(super) fn wanted_arches(a: &UpdateProjectArgs) -> Result<Option<Vec<String>>
     arch_check::parse_arch_list(&a.arches.join(",")).map(Some)
 }
 
-/// The ports the check uses: every port under `--ports`, and the port of each
-/// arch that `--arches` names (which implies it), narrowed to `wanted`.
-pub(super) fn ports_for(a: &UpdateProjectArgs, wanted: Option<&[String]>) -> Vec<Port> {
+/// Whether the run checks the Factory ports: under `--ports`, or when
+/// `--arches` names the arch of a port (which implies its port).
+pub(super) fn ports_enabled(a: &UpdateProjectArgs, wanted: Option<&[String]>) -> bool {
     let named = wanted.is_some_and(|w| w.iter().any(|x| arch_check::port_for_arch(x).is_some()));
-    if a.ports || named {
+    a.ports || named
+}
+
+/// The ports the check uses: every port when the run checks them (see
+/// [`ports_enabled`]), narrowed to `wanted`.
+pub(super) fn ports_for(a: &UpdateProjectArgs, wanted: Option<&[String]>) -> Vec<Port> {
+    if ports_enabled(a, wanted) {
         arch_check::ports_wanted(wanted)
     } else {
         Vec::new()
@@ -83,6 +89,7 @@ pub(super) fn check_item(
         // so it is done only for the arches asked for by name.
         add_arches: wanted.is_some(),
         ports: ports.clone(),
+        include_ports: ports_enabled(a, wanted.as_deref()),
         // An in-place update's source is only read: it is never written.
         read_only: a.in_place,
         deadline: &ctx.arch_deadline,

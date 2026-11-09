@@ -510,6 +510,11 @@ fn the_ports_follow_the_flag_and_the_arches_named() {
     assert_eq!(arch::ports_for(&a, Some(&s390x)).len(), 1);
     let x86 = vec!["x86_64".to_string()];
     assert!(arch::ports_for(&a, Some(&x86)).is_empty());
+    // The check of the ports' repositories follows the same rule.
+    assert!(arch::ports_enabled(&a, Some(&s390x)));
+    assert!(!arch::ports_enabled(&a, Some(&x86)));
+    a.ports = true;
+    assert!(arch::ports_enabled(&a, Some(&x86)));
     a.arches = vec!["armv7l".into()];
     let err = arch::wanted_arches(&a).unwrap_err();
     assert!(err.contains("no Tumbleweed armv7l in OBS"), "{err}");

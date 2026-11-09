@@ -181,6 +181,7 @@ pub(super) fn request<'a>(
         wanted: None,
         add_arches,
         ports: Vec::new(),
+        include_ports: false,
         read_only,
         deadline: &NO_WAIT,
         meta_lock: &META_LOCK,

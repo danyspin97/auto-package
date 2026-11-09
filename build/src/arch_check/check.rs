@@ -29,6 +29,10 @@ pub struct CheckRequest<'a> {
     /// The ports to add to the branch (see `ports`), and enable for the
     /// package once they are there. Empty for none.
     pub ports: Vec<Port>,
+    /// The run checks the Factory ports (`--ports`). Without it, a port
+    /// repository the branch already has (from an earlier run) is neither
+    /// checked nor waited for; with it, every repository of the branch is.
+    pub include_ports: bool,
     /// The branch is only read here (the source of an in-place update): no
     /// architecture or port is added to it, whatever the other fields say.
     pub read_only: bool,
@@ -134,6 +138,7 @@ pub fn check_other_arches<O: ArchObs + ?Sized>(
     let keys: Vec<Key> = check_set(&branch, &origin, &arch_added, req.wanted)
         .into_iter()
         .filter(|(r, a)| (r.as_str(), a.as_str()) != req.primary)
+        .filter(|(r, _)| req.include_ports || !is_port_repo(r))
         .collect();
     // A port's result does not gate the submit, so the ports are not counted.
     let covered = branch

@@ -28,8 +28,32 @@ mod ports_check {
     fn check(fake: &FakeObs) -> CheckOutcome {
         let dir = tempfile::tempdir().unwrap();
         let say = |_: String| {};
-        let req = request(dir.path(), &say, false, false);
+        let mut req = request(dir.path(), &say, false, false);
+        req.include_ports = true;
         check_other_arches(fake, &req).unwrap()
+    }
+
+    #[test]
+    fn a_port_a_run_without_ports_is_not_checked_or_waited_for() {
+        let fake = fixture();
+        with_port(&fake);
+        port_result(&fake, "failed", None);
+        set_results(&fake, PORT, vec![entry("p", "standard", "s390x", "failed")]);
+        let dir = tempfile::tempdir().unwrap();
+        let say = |_: String| {};
+        let req = request(dir.path(), &say, false, false);
+        let out = check_other_arches(&fake, &req).unwrap();
+        assert!(out.rows.is_empty(), "{:?}", out.rows);
+        assert!(out.covered);
+        assert!(
+            !fake
+                .events
+                .borrow()
+                .iter()
+                .any(|e| e.starts_with("results:")),
+            "{:?}",
+            fake.events.borrow()
+        );
     }
 
     #[test]
@@ -217,6 +241,7 @@ mod ports_edit {
     ) -> CheckRequest<'a> {
         let mut req = request(log_dir, say, false, read_only);
         req.ports = ports_wanted(Some(&["s390x".to_string()]));
+        req.include_ports = true;
         req
     }
 
