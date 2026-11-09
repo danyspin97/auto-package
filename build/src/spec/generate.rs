@@ -141,6 +141,7 @@ fn post_process(
                 // `setuptools>=42` as it appears in pyproject.toml is exactly
                 // the form the conventions document as wrong; OBS needs
                 // `setuptools >= 42` inside the macro.
+                let req = super::build_requires::build_requires_spelling(&req);
                 out.push_str(&format!("BuildRequires:  %{{python_module {req}}}\n"));
             }
             if has_tests && !spec.contains("%{python_module pytest}") {

@@ -35,6 +35,7 @@ pub use expand::*;
 #[cfg(test)]
 mod conditions_tests;
 
+mod build_requires;
 mod generate;
 #[cfg(test)]
 mod tests;

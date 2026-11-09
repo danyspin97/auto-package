@@ -107,6 +107,7 @@ BuildRequires:  %{python_module pip}
 }
 mod skeleton;
 use skeleton::*;
+mod build_requires;
 mod requires;
 mod rpmlintrc;
 mod wheel_files;
