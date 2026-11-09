@@ -145,6 +145,8 @@ mod baseline_head;
 pub use baseline_head::*;
 mod baseline_adopt;
 pub use baseline_adopt::*;
+mod baseline_service_record;
+pub use baseline_service_record::*;
 #[cfg(test)]
 mod baseline_adopt_tests;
 #[cfg(test)]
@@ -153,6 +155,8 @@ mod baseline_commits_tests;
 mod baseline_head_tests;
 #[cfg(test)]
 mod baseline_recover_tests;
+#[cfg(test)]
+mod baseline_service_record_tests;
 #[cfg(test)]
 mod recipe_files_tests;
 

@@ -282,7 +282,7 @@ pub fn restore_baseline_with(
 
 /// The `project`/`package` a checkout belongs to (its `.osc/_project` and
 /// `.osc/_package`).
-fn checkout_project_package(checkout: &Path) -> Result<(String, String), String> {
+pub(super) fn checkout_project_package(checkout: &Path) -> Result<(String, String), String> {
     let read = |name: &str| {
         fs::read_to_string(checkout.join(".osc").join(name))
             .map(|s| s.trim().to_string())

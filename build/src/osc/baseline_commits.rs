@@ -53,7 +53,8 @@ fn revisions_in(dir: &Path, log: &str) -> Vec<String> {
 }
 
 /// Commit `files` of `checkout` to OBS for an attempt whose baseline is `dir`
-/// (see [`record_commit`]).
+/// (see [`record_commit`], and [`record_service_commit`] for a package with a
+/// `_service`).
 pub fn commit_attempt(
     dir: &Path,
     checkout: &Path,
@@ -62,9 +63,47 @@ pub fn commit_attempt(
     log: Option<&Path>,
     emit: Emit<'_>,
 ) -> Result<(), Error> {
-    record_commit(dir, checkout, || {
-        commit(checkout, message, files, log, emit)
-    })
+    let run = || commit(checkout, message, files, log, emit);
+    if has_service(checkout) {
+        return record_service_commit(dir, checkout, message, emit, run);
+    }
+    record_commit(dir, checkout, run)
+}
+
+/// [`record_commit`] for a package with a `_service`: the commit's revision is
+/// read from OBS after it lands (see `service_commit_head_on_obs`). When that
+/// cannot be proven the commit is not recorded and the marker stays, so the
+/// adoption rule (`baseline_adopt`) may still recognise it later.
+pub fn record_service_commit(
+    dir: &Path,
+    checkout: &Path,
+    message: &str,
+    emit: Emit<'_>,
+    commit: impl FnOnce() -> Result<(), Error>,
+) -> Result<(), Error> {
+    let before = checkout_revision(checkout).unwrap_or_default();
+    fs::create_dir_all(dir).map_err(|e| Error::NotActionable(e.to_string()))?;
+    fs::write(dir.join(PENDING_COMMIT), &before)
+        .map_err(|e| Error::NotActionable(format!("cannot note the commit: {e}")))?;
+    commit()?;
+    if checkout_revision(checkout).is_none_or(|after| after == before) {
+        return Ok(());
+    }
+    match service_commit_head_on_obs(checkout, message, emit) {
+        Ok(head) => {
+            if !committed_revisions(dir).contains(&head) {
+                adopt_own_head(dir, &head).map_err(|e| {
+                    Error::NotActionable(format!("cannot record the commit's revision: {e}"))
+                })?;
+            }
+            let _ = fs::remove_file(dir.join(PENDING_COMMIT));
+        }
+        Err(why) => ap_core::diag!(
+            "  the commit to {} landed but its revision is not recorded: {why}",
+            checkout.display()
+        ),
+    }
+    Ok(())
 }
 
 /// Runs `commit` for an attempt whose baseline is `dir`, with the marker set
@@ -117,7 +156,9 @@ fn has_service(checkout: &Path) -> bool {
 /// has a `_service` file: osc then waits for a server-side service run and
 /// rewrites `.osc/_files` to the head of the package, which may be a commit by
 /// someone else. The package has a `_service` whenever the server runs one for
-/// it, so that is the case to refuse. Returns whether it was appended.
+/// it, so that is the case to refuse; an attempt's commit to such a package is
+/// recorded from OBS instead (see [`record_service_commit`]). Returns whether it
+/// was appended.
 fn append_landed(dir: &Path, checkout: &Path, log: &str, before: &str) -> bool {
     if has_service(checkout) {
         ap_core::diag!(
