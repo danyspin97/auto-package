@@ -267,6 +267,7 @@ use checkout::*;
 use update_mode::*;
 mod generate_stage;
 mod recap_entry;
+mod unknown_build;
 
 mod update_mode;
 

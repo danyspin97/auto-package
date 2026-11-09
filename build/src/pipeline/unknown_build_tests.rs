@@ -2,7 +2,7 @@
 //! recipe its checkout holds is carried forward, or the run fails with the
 //! reason. No spec is generated for it.
 
-use super::generate_stage::{UnknownBuild, keeps_recipe_on_failed_carry, unknown_build_gate};
+use super::unknown_build::{UnknownBuild, keeps_recipe_on_failed_carry, unknown_build_gate};
 
 #[test]
 fn a_failed_carry_keeps_a_non_python_recipe_whatever_its_source() {
