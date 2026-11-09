@@ -42,6 +42,7 @@ impl DepLedger<'_> {
                     self.repeats.builds += 1;
                     self.repeats.last.remove(&dep_rpm);
                     ap_build::pipeline::clear_record(self.state_root, &dep_rpm);
+                    ap_build::pipeline::note_built(&dep_rpm);
                     self.dep_drops.note_outcome(
                         &dep_rpm,
                         "it was built this run, yet the package that needs it still \

@@ -11,12 +11,17 @@ mod extra_drop;
 mod extra_drop_tests;
 use extra_drop::*;
 
+mod built_in_run;
 mod rpm_names;
 #[cfg(test)]
 mod rpm_names_tests;
+pub use built_in_run::note_built;
 mod wait_bounds;
 #[cfg(test)]
 mod wait_bounds_tests;
+mod wait_patience;
+#[cfg(test)]
+mod wait_patience_tests;
 #[cfg(test)]
 mod wait_precheck_tests;
 pub(super) mod wait_record;

@@ -2,6 +2,7 @@
 //! names that are not built yet ends `MissingDeps` there, and a record whose
 //! names are RPMs now is discarded so the try builds.
 
+use super::wait_patience::MAX_CONSULTATIONS;
 use super::wait_record::*;
 use crate::pipeline::hygiene_tests::config;
 use crate::pipeline::{PipelineResult, RunCtx};
@@ -116,11 +117,64 @@ fn a_spec_bound_is_kept_and_checked_against_the_repository_copy() {
         std::fs::write(work.join("rpms/python313-foo-2.0-1.1.noarch.rpm"), b"").unwrap();
         let older = |_: &str, _: &str| false;
         assert!(matches!(
-            precheck_with(ctx, &older),
+            precheck_with(ctx, &older, &|_| None),
             Some(PipelineResult::MissingDeps { .. })
         ));
         assert!(ctx.ws.dir().join("unresolvable-wait.json").exists());
-        assert!(precheck_with(ctx, &|_, _| true).is_none());
+        assert!(precheck_with(ctx, &|_, _| true, &|_| None).is_none());
         assert!(!ctx.ws.dir().join("unresolvable-wait.json").exists());
+    });
+}
+
+/// A wait that never progresses ends as `NeedsMaintainer` on its last
+/// consultation, once, and its record is removed.
+#[test]
+fn a_wait_that_never_progresses_ends_as_needs_a_human() {
+    let reporter = Progress::default();
+    with_ctx(SPEC, &reporter, |ctx, _| {
+        save_waiting(ctx, SPEC);
+        let nothing_built = |_: &str, _: &str| true;
+        for _ in 1..MAX_CONSULTATIONS {
+            assert!(matches!(
+                precheck_with(ctx, &nothing_built, &|_| None),
+                Some(PipelineResult::MissingDeps { .. })
+            ));
+        }
+        let Some(PipelineResult::Failed { kind, reason, .. }) =
+            precheck_with(ctx, &nothing_built, &|_| None)
+        else {
+            panic!("expected a failure at the last consultation");
+        };
+        assert!(matches!(
+            kind,
+            crate::pipeline::FailureKind::NeedsMaintainer
+        ));
+        assert!(
+            reason.starts_with(&format!(
+                "needs a human: waited {MAX_CONSULTATIONS} times for foo, which is not built here"
+            )),
+            "{reason}"
+        );
+        assert!(!ctx.ws.dir().join("unresolvable-wait.json").exists());
+    });
+}
+
+/// A round that waits on something else (progress) starts the count again.
+#[test]
+fn progress_restarts_the_count_of_a_wait() {
+    let reporter = Progress::default();
+    with_ctx(SPEC, &reporter, |ctx, _| {
+        save_waiting(ctx, SPEC);
+        for _ in 0..5 {
+            precheck_with(ctx, &|_, _| true, &|_| None);
+        }
+        let read = || -> serde_json::Value {
+            let text =
+                std::fs::read_to_string(ctx.ws.dir().join("unresolvable-wait.json")).unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        assert_eq!(read()["consulted"], 5);
+        save_missing(ctx, &["foo".to_string()], &["libbar".to_string()], &[]);
+        assert_eq!(read()["consulted"], 0);
     });
 }

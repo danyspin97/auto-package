@@ -82,6 +82,7 @@ impl Frontier<'_> {
                 self.repeats.builds += 1;
                 self.repeats.last.remove(rpm_name);
                 ap_build::pipeline::clear_record(self.state_root, rpm_name);
+                ap_build::pipeline::note_built(rpm_name);
             }
             PipelineResult::AlreadyBuilt { .. } => {
                 ap_core::diag!("{rpm_name} {version} already built");

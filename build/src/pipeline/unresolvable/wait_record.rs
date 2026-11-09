@@ -11,8 +11,10 @@
 //!   build is retried once. If OBS says unresolvable again with the same spec
 //!   and the same RPMs, the retry is not repeated.
 
+use super::built_in_run::built_in_this_run;
 use super::rpm_names::{same_package, wait_dep_satisfied};
 use super::wait_bounds::spec_bounds;
+use super::wait_patience::{built_not_in_branch, carried, exhausted, needs_human_message};
 use super::*;
 use crate::pipeline::state::hash_spec;
 use serde::{Deserialize, Serialize};
@@ -38,11 +40,19 @@ pub enum Wait {
 }
 
 /// A decision and the state it was made in: the spec and the RPM directory.
+/// `consulted` counts the tries that found the wait still standing, and
+/// `since` is when the wait was made (unix seconds), both since the last
+/// progress (see `wait_patience`). A record written before they existed reads
+/// as fresh.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaitRecord {
     pub spec: u64,
     pub rpms: u64,
     pub wait: Wait,
+    #[serde(default)]
+    pub consulted: u32,
+    #[serde(default)]
+    pub since: u64,
 }
 
 /// Whether `record` still stands for `spec`: a `Missing` answer none of whose
@@ -135,29 +145,71 @@ fn load(ws_dir: &Path) -> Option<WaitRecord> {
     serde_json::from_str(&text).ok()
 }
 
+fn store(ws_dir: &Path, record: &WaitRecord) {
+    // Not saving only costs a later try that could have been skipped.
+    if let Ok(text) = serde_json::to_string(record) {
+        let _ = std::fs::write(ws_dir.join(RECORD_FILE), text);
+    }
+}
+
 fn save(ctx: &RunCtx, wait: Wait) {
     let Some((spec, rpms)) = current(ctx) else {
         return;
     };
-    let record = WaitRecord { spec, rpms, wait };
-    // Not saving only costs a later try that could have been skipped.
-    if let Ok(text) = serde_json::to_string(&record) {
-        let _ = std::fs::write(ctx.ws.dir().join(RECORD_FILE), text);
-    }
+    store(
+        ctx.ws.dir(),
+        &WaitRecord {
+            spec,
+            rpms,
+            wait,
+            consulted: 0,
+            since: 0,
+        },
+    );
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The version bound the record keeps for `dep`: from the spec's own lines, or
+/// the one OBS's outdated list gives.
+fn bound_of(
+    dep: &str,
+    bounds: &[(String, String)],
+    outdated: &[(String, Option<String>)],
+) -> Option<String> {
+    bounds
+        .iter()
+        .find(|(n, _)| same_package(n, dep))
+        .map(|(_, v)| v.clone())
+        .or_else(|| {
+            outdated
+                .iter()
+                .find(|(n, v)| v.is_some() && same_package(n, dep))
+                .and_then(|(_, v)| v.clone())
+        })
 }
 
 /// Before the review turn of a try: `MissingDeps` when the round that decided
 /// the last answer is still valid (see [`waiting_on`]), so that no turn, no
 /// validation, no commit and no build try is spent on it. A record whose names
-/// are RPMs now is discarded, and the try goes on to build.
+/// are RPMs now is discarded, and the try goes on to build. A wait that is
+/// exhausted (see `wait_patience`) ends the package as `NeedsMaintainer`.
 pub fn precheck(ctx: &RunCtx) -> Option<PipelineResult> {
-    precheck_with(ctx, &|dep, bound| branch_meets(ctx, dep, bound))
+    precheck_with(ctx, &|dep, bound| branch_meets(ctx, dep, bound), &|dep| {
+        branch_version(ctx, dep)
+    })
 }
 
-/// [`precheck`] with the repository's copy answered by `branch_meets`.
+/// [`precheck`] with the repository's copy answered by `branch_meets` and
+/// `branch_version` (`None` when it cannot be read).
 pub fn precheck_with(
     ctx: &RunCtx,
     branch_meets: &dyn Fn(&str, &str) -> bool,
+    branch_version: &dyn Fn(&str) -> Option<String>,
 ) -> Option<PipelineResult> {
     let (spec, _) = current(ctx)?;
     let record = load(ctx.ws.dir())?;
@@ -171,18 +223,67 @@ pub fn precheck_with(
         return None;
     };
     let Wait::Missing {
-        native, outdated, ..
-    } = record.wait
+        native,
+        outdated,
+        bounds,
+        ..
+    } = record.wait.clone()
     else {
         return None;
     };
+    let now = now_secs();
+    // A record without a creation time reads as made now.
+    let created = if record.since == 0 { now } else { record.since };
+    let consulted = record.consulted.saturating_add(1);
+    if let Some(why) = exhausted(consulted, created, now) {
+        let _ = std::fs::remove_file(ctx.ws.dir().join(RECORD_FILE));
+        let dep = deps
+            .iter()
+            .find(|d| bound_of(d, &bounds, &outdated).is_some())
+            .or(deps.first())?;
+        let bound = bound_of(dep, &bounds, &outdated);
+        let branch = bound.as_ref().and_then(|_| branch_version(dep));
+        return Some(ctx.failed_as(
+            FailureKind::NeedsMaintainer,
+            needs_human_message(
+                dep,
+                why,
+                bound.as_deref(),
+                branch.as_deref(),
+                built_in_this_run(dep),
+            ),
+        ));
+    }
+    store(
+        ctx.ws.dir(),
+        &WaitRecord {
+            consulted,
+            since: created,
+            ..record.clone()
+        },
+    );
+    // A dependency built in this run whose commit is not in the repository's
+    // copy yet: the wait says so, since it is the usual cause.
+    let notes: Vec<String> = deps
+        .iter()
+        .filter(|d| {
+            built_in_this_run(d)
+                && bound_of(d, &bounds, &outdated).is_some_and(|b| !branch_meets(d, &b))
+        })
+        .map(|d| built_not_in_branch(d))
+        .collect();
+    let mut message = format!(
+        "{}: still waiting for {}; nothing changed since the last attempt, no build tried",
+        ctx.rpm_name,
+        deps.join(", ")
+    );
+    for note in notes {
+        message.push_str("; ");
+        message.push_str(&note);
+    }
     ctx.reporter.report(&Event::Progress {
         step: None,
-        message: format!(
-            "{}: still waiting for {}; nothing changed since the last attempt, no build tried",
-            ctx.rpm_name,
-            deps.join(", ")
-        ),
+        message,
     });
     Some(PipelineResult::MissingDeps {
         rpm_name: ctx.rpm_name.clone(),
@@ -193,7 +294,9 @@ pub fn precheck_with(
     })
 }
 
-/// Record that this round ends `MissingDeps` on `deps`.
+/// Record that this round ends `MissingDeps` on `deps`. A record that waits on
+/// the same as the one it replaces keeps its counters; anything else is progress
+/// and starts them again (see `wait_patience::carried`).
 pub fn save_missing(
     ctx: &RunCtx,
     deps: &[String],
@@ -203,29 +306,47 @@ pub fn save_missing(
     let bounds = std::fs::read_to_string(&ctx.spec_path)
         .map(|text| spec_bounds(&text, deps))
         .unwrap_or_default();
-    save(
-        ctx,
-        Wait::Missing {
-            deps: deps.to_vec(),
-            native: native.to_vec(),
-            outdated: outdated.to_vec(),
-            bounds,
+    let wait = Wait::Missing {
+        deps: deps.to_vec(),
+        native: native.to_vec(),
+        outdated: outdated.to_vec(),
+        bounds,
+    };
+    let Some((spec, rpms)) = current(ctx) else {
+        return;
+    };
+    let previous = load(ctx.ws.dir());
+    let same = previous
+        .as_ref()
+        .is_some_and(|p| p.spec == spec && p.rpms == rpms && p.wait == wait);
+    let (consulted, since) = carried(previous.map(|p| (p.consulted, p.since)), same, now_secs());
+    store(
+        ctx.ws.dir(),
+        &WaitRecord {
+            spec,
+            rpms,
+            wait,
+            consulted,
+            since,
         },
     );
+}
+
+/// The version of `dep` the repository's own copy has, read from its spec.
+/// `None` when the copy cannot be read.
+fn branch_version(ctx: &RunCtx, dep: &str) -> Option<String> {
+    let emit = Emit::run(ctx.reporter);
+    let rpm = osc::rpm_name(dep);
+    let text = [rpm.as_str(), dep]
+        .iter()
+        .find_map(|name| crate::update::spec_for_package(&ctx.config.project, name, emit).ok())?;
+    crate::spec::parse_header(&text).map(|h| h.version)
 }
 
 /// Whether the repository's own copy of `dep` meets `required`, read from its
 /// spec. A copy that cannot be read does not say otherwise, so it meets.
 fn branch_meets(ctx: &RunCtx, dep: &str, required: &str) -> bool {
-    let emit = Emit::run(ctx.reporter);
-    let rpm = osc::rpm_name(dep);
-    let text = [rpm.as_str(), dep]
-        .iter()
-        .find_map(|name| crate::update::spec_for_package(&ctx.config.project, name, emit).ok());
-    let Some(header) = text.and_then(|t| crate::spec::parse_header(&t)) else {
-        return true;
-    };
-    !crate::update::is_newer(required, &header.version)
+    branch_version(ctx, dep).is_none_or(|v| !crate::update::is_newer(required, &v))
 }
 
 /// Whether the retry about to be made for names that are all RPMs here would

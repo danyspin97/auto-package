@@ -348,6 +348,7 @@ mod validate;
 use commit::*;
 mod build_round;
 mod unresolvable;
+pub use unresolvable::note_built;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 

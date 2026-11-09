@@ -14,6 +14,8 @@ fn missing(deps: &[&str]) -> WaitRecord {
             outdated: Vec::new(),
             bounds: Vec::new(),
         },
+        consulted: 0,
+        since: 0,
     }
 }
 
@@ -93,6 +95,8 @@ fn a_local_retry_is_not_repeated_with_the_same_spec_and_rpms() {
         spec: 1,
         rpms: 5,
         wait: Wait::LocalRetry,
+        consulted: 0,
+        since: 0,
     };
     // aws-c-http: the retry after its first answer saw the same spec and RPMs.
     assert!(local_retry_repeats(Some(&retried), 1, 5));
@@ -115,6 +119,8 @@ fn the_record_survives_a_round_trip_through_json() {
             outdated: vec![("bar".into(), Some("2.0".into())), ("baz".into(), None)],
             bounds: vec![("flit-core".into(), "3.9".into())],
         },
+        consulted: 3,
+        since: 1_794_000_000,
     };
     let text = serde_json::to_string(&record).expect("serialise");
     let back: WaitRecord = serde_json::from_str(&text).expect("parse");
