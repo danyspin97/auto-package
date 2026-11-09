@@ -136,6 +136,38 @@ fn capped_line_reader_bounds_a_huge_line_and_keeps_normal_lines() {
     assert_eq!(n, 0, "end of input");
 }
 
+/// The text of convention `n` (1-based), as the agent Reads it.
+fn convention(n: usize) -> &'static str {
+    crate::conventions_table::CONVENTIONS[n - 1].1
+}
+
+/// Convention 40 keeps file names and build narration out of a changelog bullet.
+#[test]
+fn changelog_bullets_name_no_file_and_no_own_fix() {
+    assert!(convention(40).contains("names no file"));
+    assert!(convention(40).contains("A cosmetic edit the gate did not force gets no bullet."));
+}
+
+/// Dropping an `rm` of installed files is judged on the installed tree, not the source.
+#[test]
+fn an_rm_of_installed_files_is_checked_against_the_installed_tree() {
+    assert!(convention(39).contains("INSTALLED tree"));
+    assert!(index_line(39).contains("an rm or %exclude of build output"));
+}
+
+/// A skip comment never blames a dependency of this run, which is built or reported.
+#[test]
+fn a_skip_comment_never_blames_a_dependency_that_failed_here() {
+    assert!(convention(11).contains("never that a dependency failed to build in this"));
+}
+
+/// An inherited description problem is left alone on an update, in 86 and in 63.
+#[test]
+fn an_inherited_description_problem_is_left_alone_on_an_update() {
+    assert!(convention(86).contains("is left as it is on an update"));
+    assert!(convention(63).contains("except a problem the origin's spec has too on an update"));
+}
+
 /// The convention numbers merged into another file, with the file each one joined.
 fn merged_targets() -> std::collections::BTreeMap<u32, u32> {
     crate::conventions_table::CONVENTIONS
@@ -236,28 +268,4 @@ fn index_triggers_in_brackets_are_merged_into_their_line() {
             rest = after;
         }
     }
-}
-
-/// The text of convention `n` (1-based), as the agent Reads it.
-fn convention(n: usize) -> &'static str {
-    crate::conventions_table::CONVENTIONS[n - 1].1
-}
-
-/// Dropping an `rm` of installed files is judged on the installed tree, not the source.
-#[test]
-fn an_rm_of_installed_files_is_checked_against_the_installed_tree() {
-    assert!(convention(39).contains("INSTALLED tree"));
-    assert!(index_line(39).contains("an rm or %exclude of build output"));
-}
-
-/// A skip comment never blames a dependency of this run, which is built or reported.
-#[test]
-fn a_skip_comment_never_blames_a_dependency_that_failed_here() {
-    assert!(convention(11).contains("never that a dependency failed to build in this"));
-}
-
-/// Convention 40 keeps file names and build narration out of a changelog bullet.
-#[test]
-fn changelog_bullets_name_no_file_and_no_own_fix() {
-    assert!(convention(40).contains("names no file"));
 }
