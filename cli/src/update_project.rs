@@ -40,6 +40,9 @@ mod audit;
 mod build_work;
 mod cmd;
 mod context;
+mod dep_listing;
+#[cfg(test)]
+mod dep_listing_tests;
 mod deprecated;
 mod deps;
 #[cfg(test)]
@@ -99,6 +102,7 @@ use audit::*;
 use build_work::*;
 use cmd::*;
 use context::*;
+use dep_listing::*;
 use deps::*;
 use dry_run::*;
 use items::*;

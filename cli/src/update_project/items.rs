@@ -413,12 +413,24 @@ pub(super) fn dependency_items(
         depreach::dependency_origins(verdicts, adds, branch, &a.source, !a.test_against_updates)
     {
         let (project, pkg) = (origin.project.clone(), origin.package.clone());
-        let key = osc::fuzzy_key(&pkg);
+        // PEP 503 key: `python-whois` and `python-pythonwhois` are two projects.
+        let key = osc::project_key(&pkg);
         let plan = update::plan_where(
             &project,
-            &|n| osc::fuzzy_key(up::branch_name(n)) == key,
+            &|n| osc::project_key(up::branch_name(n)) == key,
             emit,
-        );
+        )
+        .and_then(|candidates| -> Result<Vec<_>, String> {
+            let names: Vec<&str> = candidates
+                .iter()
+                .map(|c| up::branch_name(&c.rpm_name))
+                .collect();
+            let spelling = listed_spelling(&pkg, &names)?.map(str::to_string);
+            Ok(candidates
+                .into_iter()
+                .filter(|c| Some(up::branch_name(&c.rpm_name)) == spelling.as_deref())
+                .collect())
+        });
         match plan {
             Ok(candidates) => {
                 for mut item in up::items_from_plan(&project, &candidates, &a.exclude) {
