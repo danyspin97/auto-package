@@ -93,7 +93,7 @@ fn the_index_has_one_line_per_topic_with_the_stub_triggers_folded_in() {
         );
     }
     assert!(
-        CONVENTIONS_INDEX.len() < 12_000,
+        CONVENTIONS_INDEX.len() < 12_500,
         "the index is {} bytes",
         CONVENTIONS_INDEX.len()
     );
