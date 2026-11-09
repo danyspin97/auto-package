@@ -6,32 +6,7 @@ use super::*;
 pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     let task_desc = match req.task {
         Task::Review => review_task(req),
-        Task::FixAfterBuild => {
-            "Fix the spec after a failed `osc build`.\n\
-             \n\
-             For a %check failure, Read `conventions/10.md` and `conventions/11.md` first and \
-             follow them IN ORDER: diagnose and \
-             add missing test dependencies first (convention 10 — a BuildRequires or \
-             fixing an uninstalled test helper is almost always the right fix for an \
-             `ImportError`/`ModuleNotFoundError`/`fixture not found`), and only then \
-             consider convention 11's test-skip ladder for tests that genuinely \
-             cannot run in this environment (no network, no GPU, no display beyond \
-             what xvfb-run supplies, no shipped fixture). Skipping before you have \
-             checked what the test actually needs throws away coverage for a problem \
-             a BuildRequires would have fixed.\n\
-             \n\
-             The hint below is a heuristic extract of the failure; read build.log \
-             yourself whenever the extract looks like it caught the wrong thing.\n\
-             \n\
-             Before concluding a prior fix did not work, rule out a stale build.log: \
-             compare this attempt's build.log with the previous one (Read or Grep the \
-             VM boot timestamp and the line count: you have no md5sum). If they match, \
-             OBS has not actually rebuilt against your last commit yet, and this log says \
-             nothing about whether that fix worked. You cannot re-run the build: verify the \
-             fix statically (by reading the spec), say in your reasoning that the log looks \
-             stale, and return `no_change` rather than reverting a plausible fix on the \
-             strength of a stale log."
-        }
+        Task::FixAfterBuild => fix_after_build_task(),
         Task::RpmlintFix => {
             "Fix the spec after a SUCCESSFUL `osc build`. The RPMs built; rpmlint, which checks \
              them after the build, reported `E:` errors for them, listed under \"Context\". \
