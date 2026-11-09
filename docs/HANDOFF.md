@@ -90,8 +90,14 @@ Tool, ordered by likely value:
 - The package's own `Epoch:` is not read; capability bounds are compared with
   the provide's version where known, else the package version.
 - Copyright header rewritten "2024 -> 2026 SUSE LLC and contributors" on a
-  built package: not our code; comes from `spec-cleaner` or the OBS
-  `format_spec_file` service. Stage not identified.
+  built package: the string is spec-cleaner's (`distro_copyright`), and no
+  code here writes it. Not the service: a branch with no `_service` runs no
+  `format_spec_file`, locally or on OBS (python-aioquic has none). Not an
+  agent turn: no `spec_changed` diff of the run touches a comment line. The
+  carried spec (`spec.generated`) has 2024; the committed revision has 2026.
+  The rewrite happened silently between the carry and the commit, in a step
+  that logs no spec change. Open: find that step (instrument the spec
+  writes), before any fix.
 - `python-hypothesis` switched Source to a prebuilt wheel (convention 32 says
   build from source): needs a human decision.
 - `config.update` stays false for a dependency by design; two review gates
