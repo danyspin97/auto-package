@@ -62,11 +62,35 @@ impl ArchDeadline {
         *until = Some(deadline_after(at, self.bound, *until));
     }
 
+    /// A deadline that starts at `at`, `bound` after it: for a wait that is not
+    /// tied to a build of the run, such as a submit batch with none of its own.
+    pub fn starting_at(bound: Duration, at: Instant) -> Self {
+        let deadline = Self::new(bound);
+        deadline.build_ended(at);
+        deadline
+    }
+
+    /// Whether the deadline has started: a build of the run has ended, or it
+    /// was made by [`ArchDeadline::starting_at`].
+    pub fn started(&self) -> bool {
+        self.until
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+    }
+
     /// The time the waits may still go on at `now`.
     pub fn left(&self, now: Instant) -> Duration {
         let until = *self.until.lock().unwrap_or_else(|p| p.into_inner());
         time_left(until, self.bound, now)
     }
+}
+
+/// The deadline a submit's other-architecture wait ends by: the run's once a
+/// build of the run has ended, else `own`, the batch's own deadline (see
+/// [`ArchDeadline::starting_at`]), so the waits of one batch end together.
+pub fn submit_deadline<'a>(run: &'a ArchDeadline, own: &'a ArchDeadline) -> &'a ArchDeadline {
+    if run.started() { run } else { own }
 }
 
 /// The deadline after a build ended at `ended`, given the one already set: the
@@ -111,6 +135,31 @@ mod tests {
         let t2 = t0 + Duration::from_secs(900);
         d.build_ended(t2);
         assert_eq!(d.left(t1), t2.duration_since(t1) + BOUND);
+    }
+
+    #[test]
+    fn a_submit_waits_for_the_run_once_a_build_ended_and_for_its_own_before() {
+        let t0 = Instant::now();
+        let run = ArchDeadline::new(BOUND);
+        let own = ArchDeadline::starting_at(BOUND, t0);
+        assert!(!run.started());
+        assert!(std::ptr::eq(submit_deadline(&run, &own), &own));
+        let t1 = t0 + Duration::from_secs(600);
+        run.build_ended(t1);
+        assert!(std::ptr::eq(submit_deadline(&run, &own), &run));
+        assert_eq!(submit_deadline(&run, &own).left(t1), BOUND);
+    }
+
+    #[test]
+    fn the_packages_of_a_batch_without_a_build_share_one_bound() {
+        let t0 = Instant::now();
+        let own = ArchDeadline::starting_at(BOUND, t0);
+        assert!(own.started());
+        // The first package waits for the whole bound; a later one, after
+        // twenty minutes, gets what is left of that same bound, not a new one.
+        assert_eq!(own.left(t0), BOUND);
+        assert_eq!(own.left(t0 + Duration::from_secs(1200)), BOUND / 3);
+        assert_eq!(own.left(t0 + BOUND), Duration::ZERO);
     }
 
     #[test]

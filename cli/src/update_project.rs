@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use ap_build::arch_check::{ArchDeadline, submit_deadline};
 use ap_build::depreach::{self, DepResolver, DepState, DryRunObs, LiveObs};
 use ap_build::osc::{self, BranchResult, PathAddition};
 use ap_build::proc::Emit;
@@ -71,7 +72,7 @@ mod tests;
 use incomplete::obs_unavailable;
 
 pub use args::*;
-pub(crate) use request::prepare_request;
+pub(crate) use request::{ArchWait, prepare_request};
 pub use run::*;
 pub(crate) use submit::{review_gate, yes_refusal};
 pub(crate) use tidy::confirm_with;

@@ -1,5 +1,14 @@
 use super::*;
-use ap_build::arch_check::GateVerdict;
+use ap_build::arch_check::{ArchDeadline, GateVerdict};
+
+/// How a submit waits for the other architectures of a package.
+#[derive(Clone, Copy)]
+pub(crate) enum ArchWait<'a> {
+    /// The arch check awaited them when it ran: their results are read once.
+    Awaited,
+    /// Waits until the deadline (see [`ArchDeadline`]), which may be past.
+    Until(&'a ArchDeadline),
+}
 
 /// The submit request for `item`, after every check that decides whether one
 /// may be made: the update succeeded, the package built in the branch project
@@ -16,7 +25,7 @@ pub(crate) fn prepare_request(
     item: &Item,
     outcome: &ItemOutcome,
     allow_arch: bool,
-    arch_waited: bool,
+    arch_wait: ArchWait<'_>,
     reporter: &(dyn Reporter + Send + Sync),
     superseding: Option<&str>,
 ) -> Result<osc::SubmitRequest, SrOutcome> {
@@ -54,11 +63,11 @@ pub(crate) fn prepare_request(
     };
     let primary_repo = crate::choose_distro(distro, branch, arch);
     // The other architectures were awaited by the arch check when it ran: then
-    // their results are read once, not waited for again.
-    let overall_wait = if arch_waited {
-        std::time::Duration::ZERO
-    } else {
-        osc::OVERALL_MAX_WAIT
+    // their results are read once, not waited for again. Otherwise the wait
+    // ends by the deadline the caller shares with the other submits.
+    let overall_wait = match arch_wait {
+        ArchWait::Awaited => std::time::Duration::ZERO,
+        ArchWait::Until(deadline) => deadline.left(Instant::now()),
     };
     let overall = updated
         .then(|| {

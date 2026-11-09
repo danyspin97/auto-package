@@ -16,6 +16,11 @@ pub(super) struct SubmitBackend {
     pub(super) allow_arch: bool,
     /// The packages whose other-architecture check ran (see [`ArchChecked`]).
     pub(super) arch_checked: ArchChecked,
+    /// The run's other-architecture deadline (see `ArchDeadline`).
+    pub(super) arch_deadline: Arc<ArchDeadline>,
+    /// The one bounded wait of the submits made before any build of the run
+    /// ended (a TUI submit of an earlier run), started by the first of them.
+    pub(super) untied_wait: std::sync::OnceLock<ArchDeadline>,
     pub(super) reporter: Arc<dyn Reporter + Send + Sync>,
     pub(super) items: std::sync::Mutex<std::collections::HashMap<String, Item>>,
     /// `pkg: SR #id` for each request made from the TUI, for the run summary.
@@ -53,6 +58,14 @@ impl SubmitBackend {
         if let Some(lines) = yes_refusal(self.yes, &gate) {
             return Err(tui::SubmitFailure::Other(lines.join("; ")));
         }
+        let own = self
+            .untied_wait
+            .get_or_init(|| ArchDeadline::starting_at(osc::OVERALL_MAX_WAIT, Instant::now()));
+        let arch_wait = if self.arch_checked_for(&item.pkg) {
+            ArchWait::Awaited
+        } else {
+            ArchWait::Until(submit_deadline(&self.arch_deadline, own))
+        };
         // The rows offered are this run's items that were not forgotten (a
         // Skipped item is); whether the build succeeded is read again inside.
         match prepare_request(
@@ -63,7 +76,7 @@ impl SubmitBackend {
             &item,
             &ItemOutcome::Updated,
             self.allow_arch,
-            self.arch_checked_for(&item.pkg),
+            arch_wait,
             self.reporter.as_ref(),
             None,
         ) {
@@ -183,8 +196,17 @@ pub(super) fn submit_requests(
     ctx: &Ctx<'_>,
 ) -> color_eyre::Result<()> {
     let emit = Emit::run(ctx.reporter.as_ref());
+    // The packages not checked wait for one deadline: the run's once a build
+    // of the run ended, else one bound for this batch (not one per package).
+    let batch = ArchDeadline::starting_at(osc::OVERALL_MAX_WAIT, Instant::now());
+    let wait = submit_deadline(&ctx.arch_deadline, &batch);
     let mut pending: Vec<(usize, osc::SubmitRequest)> = Vec::new();
     for (idx, r) in results.iter_mut().enumerate() {
+        let checked = ctx
+            .arch_checked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&r.item.pkg);
         match prepare_request(
             branch,
             a.distro.as_deref(),
@@ -193,10 +215,11 @@ pub(super) fn submit_requests(
             &r.item,
             &r.outcome,
             a.allow_arch_failures,
-            ctx.arch_checked
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .contains(&r.item.pkg),
+            if checked {
+                ArchWait::Awaited
+            } else {
+                ArchWait::Until(wait)
+            },
             ctx.reporter.as_ref(),
             None,
         ) {

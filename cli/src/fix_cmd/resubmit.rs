@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use ap_build::arch_check::ArchDeadline;
 use ap_build::bugfix::ReviewFinding;
 use ap_build::osc;
 use ap_build::proc::Emit;
@@ -18,7 +19,7 @@ use super::FixArgs;
 use super::findings::*;
 use super::plan::*;
 use super::request::exit;
-use crate::update_project::{confirm_with, prepare_request, review_gate, yes_refusal};
+use crate::update_project::{ArchWait, confirm_with, prepare_request, review_gate, yes_refusal};
 
 /// What the submit step needs from the run.
 pub(super) struct SubmitCtx<'a> {
@@ -95,6 +96,8 @@ pub(super) fn submit(a: &FixArgs, c: SubmitCtx<'_>) -> color_eyre::Result<()> {
             .map(|f| format!("{} {}", f.id, f.message))
             .collect(),
     };
+    // One package, one bounded wait for its other architectures.
+    let wait = ArchDeadline::starting_at(osc::OVERALL_MAX_WAIT, std::time::Instant::now());
     let mut sr = match prepare_request(
         c.branch,
         a.distro.as_deref(),
@@ -105,7 +108,7 @@ pub(super) fn submit(a: &FixArgs, c: SubmitCtx<'_>) -> color_eyre::Result<()> {
         // item is resubmitted here; a branch with no change is refused inside.
         &ItemOutcome::Updated,
         false,
-        false,
+        ArchWait::Until(&wait),
         c.sink,
         Some(c.id),
     ) {
