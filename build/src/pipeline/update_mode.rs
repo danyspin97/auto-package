@@ -8,6 +8,9 @@ use crate::pipeline::commit::missing_license_problem;
 use std::collections::BTreeSet;
 use std::path::Path;
 
+pub(super) mod spec_changes;
+use spec_changes::SpecPasses;
+
 /// What the package's origin says about an update of it.
 pub(super) struct OriginBase {
     /// The `Version:` of the origin's spec.
@@ -140,43 +143,84 @@ pub(super) fn normalize_spec_text(
     update: bool,
     origin: Option<&str>,
     source: Option<&Path>,
-) -> String {
-    let fixed = crate::spec::normalize_python_module_versions(current);
-    let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
-    let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
+) -> SpecPasses {
     let pytest_needed = origin
         .is_some_and(|o| o.lines().any(crate::spec::is_pytest_build_requires))
         || source.is_none_or(crate::spec::tests_may_need_pytest);
-    let fixed = crate::spec::drop_unused_pytest_build_requires(&fixed, pytest_needed);
-    let fixed = if update {
-        fixed
+    let passes = SpecPasses::new(current)
+        .apply(
+            "normalize_python_module_versions",
+            crate::spec::normalize_python_module_versions,
+        )
+        .apply(
+            "fix_stray_dollar_macros",
+            crate::spec::fix_stray_dollar_macros,
+        )
+        .apply(
+            "fix_missing_alternatives_requires",
+            crate::spec::fix_missing_alternatives_requires,
+        )
+        .apply("drop_unused_pytest_build_requires", |s| {
+            crate::spec::drop_unused_pytest_build_requires(s, pytest_needed)
+        });
+    let passes = if update {
+        passes
     } else {
-        crate::spec::collapse_dist_info_license_lines(&fixed)
+        passes.apply(
+            "collapse_dist_info_license_lines",
+            crate::spec::collapse_dist_info_license_lines,
+        )
     };
-    let fixed = crate::spec::parenthesize_conditional_dependencies(&fixed);
-    let fixed = crate::spec::normalize_runtime_python_module(&fixed);
-    let fixed = crate::spec::hoist_dependency_tags(&fixed);
-    let fixed = if update {
-        fixed
+    let passes = passes
+        .apply(
+            "parenthesize_conditional_dependencies",
+            crate::spec::parenthesize_conditional_dependencies,
+        )
+        .apply(
+            "normalize_runtime_python_module",
+            crate::spec::normalize_runtime_python_module,
+        )
+        .apply("hoist_dependency_tags", crate::spec::hoist_dependency_tags);
+    let passes = if update {
+        passes
     } else {
-        crate::spec::normalize_nvidia_license(&fixed)
+        passes.apply(
+            "normalize_nvidia_license",
+            crate::spec::normalize_nvidia_license,
+        )
     };
-    let fixed = crate::spec::dedupe_changelog_header(&fixed);
-    let fixed = crate::spec_tidy::unwrap_python_expand_block(&fixed);
-    let fixed = if update {
-        fixed
+    let passes = passes
+        .apply(
+            "dedupe_changelog_header",
+            crate::spec::dedupe_changelog_header,
+        )
+        .apply(
+            "unwrap_python_expand_block",
+            crate::spec_tidy::unwrap_python_expand_block,
+        );
+    let passes = if update {
+        passes
     } else {
-        crate::spec_tidy::move_check_before_files(&fixed)
+        passes.apply(
+            "move_check_before_files",
+            crate::spec_tidy::move_check_before_files,
+        )
     };
-    let fixed = if update {
-        fixed
+    let passes = if update {
+        passes
     } else {
-        crate::spec_tidy::add_noarch_to_pure_python(&fixed)
+        passes.apply(
+            "add_noarch_to_pure_python",
+            crate::spec_tidy::add_noarch_to_pure_python,
+        )
     };
-    let fixed = crate::spec_tidy::use_version_macro(&fixed);
+    let passes = passes.apply("use_version_macro", crate::spec_tidy::use_version_macro);
     if update {
-        fixed
+        passes
     } else {
-        crate::spec_tidy::drop_unneeded_wheel_build_requires(&fixed)
+        passes.apply(
+            "drop_unneeded_wheel_build_requires",
+            crate::spec_tidy::drop_unneeded_wheel_build_requires,
+        )
     }
 }

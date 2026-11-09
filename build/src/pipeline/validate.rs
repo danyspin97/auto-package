@@ -10,6 +10,7 @@ use crate::pipeline::patch_check::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::render::*;
 use crate::pipeline::spec_edits::*;
+use crate::pipeline::update_mode::spec_changes::*;
 
 /// Step: ValidateSpec. A rejected spec runs a fix turn and asks for another
 /// round.
@@ -51,14 +52,25 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
         let unpacked = ws.dir().join("source");
         let origin = st.update.as_ref().and_then(|u| u.origin_spec.as_deref());
         let source = unpacked.is_dir().then_some(unpacked.as_path());
-        let fixed = normalize_spec_text(&current, st.update.is_some(), origin, source);
         // Bounds a distro package's newer release misses are dropped (the
         // dependency stays); see `relaxed_dependencies`.
-        let mut fixed = fixed;
-        fixed = spec_with_published_defects_fixed(&fixed, checkout_dir, &config.rpms_dir);
-        fixed = crate::spec::relax_dependencies(&fixed, &PkgState::load(ws).relaxed_dependencies);
-        if fixed != current {
-            write_or_warn(spec_path, &fixed);
+        let relaxed = PkgState::load(ws).relaxed_dependencies;
+        let passes = normalize_spec_text(&current, st.update.is_some(), origin, source)
+            .apply("spec_with_published_defects_fixed", |s| {
+                spec_with_published_defects_fixed(s, checkout_dir, &config.rpms_dir)
+            })
+            .apply("relax_dependencies", |s| {
+                crate::spec::relax_dependencies(s, &relaxed)
+            });
+        if passes.text != current {
+            write_or_warn(spec_path, &passes.text);
+            report_changes(
+                &passes.changes,
+                rpm_name,
+                Some(validate_step.id),
+                reporter,
+                ws.notes(),
+            );
         }
     }
 

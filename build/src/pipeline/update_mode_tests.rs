@@ -297,7 +297,7 @@ mod tidy_on_update {
     #[test]
     fn an_update_keeps_the_order_the_origin_chose() {
         // Only the version macro changes (see the test below): the order stays.
-        let kept = normalize_spec_text(CHECK_AFTER_FILES, true, None, None);
+        let kept = normalize_spec_text(CHECK_AFTER_FILES, true, None, None).text;
         assert_eq!(
             kept,
             CHECK_AFTER_FILES.replace("foo-2.0.tar.gz", "foo-%{version}.tar.gz")
@@ -306,7 +306,7 @@ mod tidy_on_update {
 
     #[test]
     fn a_new_spec_still_gets_the_section_order() {
-        let moved = normalize_spec_text(CHECK_AFTER_FILES, false, None, None);
+        let moved = normalize_spec_text(CHECK_AFTER_FILES, false, None, None).text;
         assert_ne!(moved, CHECK_AFTER_FILES);
         let check = moved.find("\n%check").expect("a %check");
         let files = moved.find("\n%files").expect("a %files");
@@ -317,7 +317,7 @@ mod tidy_on_update {
     fn an_update_fixes_a_requires_written_after_the_subpackages_it_belongs_to() {
         // A dependency tag after `%python_subpackages` attaches to the wrong
         // subpackage: an edit of this version is fixed on an update too.
-        let kept = normalize_spec_text(SUBPACKAGE_REQUIRES, true, None, None);
+        let kept = normalize_spec_text(SUBPACKAGE_REQUIRES, true, None, None).text;
         let tag = kept.find("Requires: python-bar").expect("the tag");
         let sub = kept.find("%python_subpackages").expect("the subpackages");
         assert!(tag < sub, "{kept}");
@@ -347,8 +347,21 @@ mod tidy_on_update {
     #[test]
     fn an_update_drops_a_pytest_build_requires_its_check_does_not_use() {
         let source = plain_tests();
-        let kept = normalize_spec_text(UNUSED_PYTEST, true, None, Some(source.path()));
+        let kept = normalize_spec_text(UNUSED_PYTEST, true, None, Some(source.path())).text;
         assert!(!kept.contains("%{python_module pytest}"), "{kept}");
+    }
+
+    #[test]
+    fn a_dropped_pytest_line_is_recorded_under_its_rule() {
+        let source = plain_tests();
+        let passes = normalize_spec_text(UNUSED_PYTEST, true, None, Some(source.path()));
+        let change = passes
+            .changes
+            .iter()
+            .find(|c| c.rule == "drop_unused_pytest_build_requires")
+            .expect("the drop is recorded");
+        assert_eq!(change.removed, ["BuildRequires: %{python_module pytest}"]);
+        assert!(change.added.is_empty());
     }
 
     #[test]
@@ -362,7 +375,7 @@ mod tidy_on_update {
         )
         .unwrap();
         let spec = pyunittest_check("BuildRequires: %{python_module pytest}");
-        let kept = normalize_spec_text(&spec, true, None, Some(source.path()));
+        let kept = normalize_spec_text(&spec, true, None, Some(source.path())).text;
         assert!(
             kept.contains("BuildRequires: %{python_module pytest}"),
             "{kept}"
@@ -373,7 +386,7 @@ mod tidy_on_update {
     fn a_pytest_line_the_origin_has_is_kept_though_nothing_uses_it() {
         let source = plain_tests();
         let spec = pyunittest_check("BuildRequires: %{python_module pytest}");
-        let kept = normalize_spec_text(&spec, true, Some(&spec), Some(source.path()));
+        let kept = normalize_spec_text(&spec, true, Some(&spec), Some(source.path())).text;
         assert!(
             kept.contains("BuildRequires: %{python_module pytest}"),
             "{kept}"
@@ -383,7 +396,7 @@ mod tidy_on_update {
     #[test]
     fn a_pytest_line_no_source_can_show_is_kept() {
         let spec = pyunittest_check("BuildRequires: %{python_module pytest}");
-        let kept = normalize_spec_text(&spec, true, None, None);
+        let kept = normalize_spec_text(&spec, true, None, None).text;
         assert!(
             kept.contains("BuildRequires: %{python_module pytest}"),
             "{kept}"
@@ -403,7 +416,7 @@ mod tidy_on_update {
     fn an_update_leaves_the_obsolete_constructs_for_lint() {
         // The hygiene passes of `lint` are not in the update's normalisation:
         // an update keeps the maintainer's recipe (convention 86).
-        let kept = normalize_spec_text(OBSOLETE, true, None, None);
+        let kept = normalize_spec_text(OBSOLETE, true, None, None).text;
         for construct in [
             "Group: Development/Tools",
             "BuildRoot: %{_tmppath}/%{name}",
