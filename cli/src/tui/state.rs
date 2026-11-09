@@ -129,9 +129,35 @@ impl TuiState {
         StageCounts::of(self.packages.values().map(|p| &p.status))
     }
 
+    /// The row of a package whose check has begun, created `checking` when it
+    /// has none. A build's row is not touched.
+    fn apply_checking(&mut self, obs_name: &str) {
+        if !self.packages.contains_key(obs_name) {
+            self.order.push(obs_name.to_string());
+            self.packages
+                .insert(obs_name.to_string(), PkgState::checking());
+            return;
+        }
+        if let Some(row) = self.packages.get_mut(obs_name) {
+            row.advance(Input::Checking);
+        }
+    }
+
     /// The row of a package the sweep checked, created when it has none.
     /// What the check found shows only on a row no build has taken over.
     fn apply_check(&mut self, swept: &SweptPackage) {
+        // A row begun under the OBS name moves to the name its answer gives,
+        // so the row that said `checking` is not left behind.
+        if !swept.obs_name.is_empty()
+            && swept.obs_name != swept.name
+            && self
+                .packages
+                .get(&swept.obs_name)
+                .is_some_and(|row| row.status == PkgStatus::Checking)
+        {
+            self.packages.remove(&swept.obs_name);
+            self.order.retain(|name| *name != swept.obs_name);
+        }
         if !self.packages.contains_key(&swept.name) {
             self.order.push(swept.name.clone());
             self.packages
@@ -211,6 +237,7 @@ impl TuiState {
                     finished: *finished,
                 });
             }
+            Event::SweepChecking { package } => self.apply_checking(package),
             Event::ResolveStarted { root } => {
                 self.add_global_log(LogLevel::Info, format!("Resolving {root}"));
             }

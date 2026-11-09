@@ -112,6 +112,8 @@ pub(super) enum Input<'a> {
     StepStarted { notes: bool },
     /// `StepFinished` of the step the package is on; `failed` when it failed.
     StepFinished { notes: bool, failed: bool },
+    /// `SweepChecking` for the package: its check has begun.
+    Checking,
     /// `SweepProgress` for the package: what its check found.
     Checked(&'a SweepVerdict),
     /// `PackageFinished`. `disk_full` when an earlier step of this attempt
@@ -199,6 +201,14 @@ impl PkgStatus {
             Input::Checked(SweepVerdict::UpToDate { .. }) => PkgStatus::UpToDate,
             Input::Checked(SweepVerdict::Update { .. }) => PkgStatus::NeedsUpdate,
             Input::Checked(SweepVerdict::Skipped { .. }) => PkgStatus::CheckSkipped,
+            // A check that begins takes a row only while it has no answer yet.
+            Input::Checking => match self {
+                PkgStatus::UpToDate | PkgStatus::NeedsUpdate | PkgStatus::CheckSkipped => {
+                    self.clone()
+                }
+                _ if self.is_check_only() => PkgStatus::Checking,
+                _ => self.clone(),
+            },
             Input::Selected => PkgStatus::Queued,
             // The notes turn only runs after a successful build, so the
             // package is already done; showing it as running would hide that.

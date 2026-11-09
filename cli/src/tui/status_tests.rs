@@ -265,3 +265,20 @@ fn only_the_check_statuses_are_check_only() {
         assert_eq!(from.is_check_only(), check, "{}", from.label());
     }
 }
+
+#[test]
+fn a_check_that_begins_takes_only_a_row_with_no_answer() {
+    for from in ALL {
+        let to = from.next(Input::Checking);
+        let want = if from.is_check_only()
+            && !matches!(
+                from,
+                PkgStatus::UpToDate | PkgStatus::NeedsUpdate | PkgStatus::CheckSkipped
+            ) {
+            PkgStatus::Checking
+        } else {
+            from.clone()
+        };
+        assert!(to == want, "{} -> {}", from.label(), to.label());
+    }
+}

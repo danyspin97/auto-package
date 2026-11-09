@@ -23,6 +23,15 @@ fn checked(name: &str, verdict: SweepVerdict) -> Msg {
     }
 }
 
+fn checking(name: &str) -> Msg {
+    Msg {
+        pkg: None,
+        event: Event::SweepChecking {
+            package: name.to_string(),
+        },
+    }
+}
+
 fn update() -> SweepVerdict {
     SweepVerdict::Update {
         from: "1.0".into(),
@@ -139,4 +148,79 @@ fn hiding_the_settled_rows_hides_the_up_to_date_ones_too() {
     assert_eq!(state.visible_order().len(), 2);
     state.show_all = false;
     assert_eq!(state.visible_order(), [&"newer".to_string()]);
+}
+
+#[test]
+fn a_started_check_shows_checking_until_its_answer_arrives() {
+    let mut state = TuiState::new(RunScope::default());
+    state.apply(checking("current"));
+    state.apply(checking("newer"));
+    assert_eq!(state.order, ["current", "newer"]);
+    assert_eq!(state.packages["current"].status_cell(), "checking");
+    // A check in flight is not a build stage.
+    assert_eq!(state.stage_counts(), StageCounts::default());
+    state.apply(checked(
+        "current",
+        SweepVerdict::UpToDate {
+            version: "3.1".into(),
+        },
+    ));
+    assert_eq!(state.packages["current"].status_cell(), "up-to-date");
+    assert_eq!(state.packages["current"].version_label(), "3.1");
+    assert_eq!(state.packages["newer"].status_cell(), "checking");
+    state.apply(checked("newer", update()));
+    assert_eq!(state.packages["newer"].status_cell(), "needs-update");
+    state.apply(checking("odd"));
+    state.apply(checked(
+        "odd",
+        SweepVerdict::Skipped {
+            reason: "no spec".into(),
+        },
+    ));
+    assert_eq!(state.packages["odd"].status_cell(), "skipped");
+}
+
+#[test]
+fn a_check_that_begins_does_not_undo_an_answer_or_a_build() {
+    let mut state = TuiState::new(RunScope::default());
+    state.apply(checked(
+        "current",
+        SweepVerdict::UpToDate {
+            version: "1".into(),
+        },
+    ));
+    state.apply(checking("current"));
+    assert_eq!(state.packages["current"].status_cell(), "up-to-date");
+    state.apply(selected("newer"));
+    state.apply(checking("newer"));
+    assert!(state.packages["newer"].status == PkgStatus::Queued);
+}
+
+#[test]
+fn a_row_begun_under_its_obs_name_moves_to_the_name_its_build_has() {
+    let mut state = TuiState::new(RunScope::default());
+    state.apply(checking("python-APScheduler"));
+    assert_eq!(state.order, ["python-APScheduler"]);
+    state.apply(Msg {
+        pkg: None,
+        event: Event::SweepProgress {
+            checked: 1,
+            to_update: 1,
+            up_to_date: 0,
+            skipped: 0,
+            finished: false,
+            package: Some(SweptPackage {
+                name: "python-apscheduler".into(),
+                obs_name: "python-APScheduler".into(),
+                verdict: update(),
+            }),
+            total: None,
+        },
+    });
+    assert_eq!(state.order, ["python-apscheduler"]);
+    assert!(!state.packages.contains_key("python-APScheduler"));
+    assert_eq!(
+        state.packages["python-apscheduler"].status_cell(),
+        "needs-update"
+    );
 }
