@@ -26,6 +26,9 @@ pub struct Header {
     pub expanded_source: Option<String>,
     /// Whether the spec is a Python package's: see [`is_python_spec`].
     pub python: bool,
+    /// The `Epoch:` tag with the simple defines expanded, as written (`1`),
+    /// `None` when the spec has none. An RPM epoch is a whole number.
+    pub epoch: Option<String>,
 }
 
 /// Whether a spec is a Python package's: its name has a `python-` or
@@ -62,6 +65,9 @@ pub fn parse_header(spec: &str) -> Option<Header> {
     let source = tag_value(spec, "Source:")
         .or_else(|| tag_value(spec, "Source0:"))
         .map(str::to_string);
+    let epoch = tag_value(spec, "Epoch:")
+        .map(|e| expand_simple_defines(e, &defines).trim().to_string())
+        .filter(|e| !e.is_empty());
     let mut macros = defines;
     macros.insert("name".to_string(), name.clone());
     macros.insert("version".to_string(), version.clone());
@@ -93,6 +99,7 @@ pub fn parse_header(spec: &str) -> Option<Header> {
         url,
         expanded_source,
         python,
+        epoch,
     })
 }
 

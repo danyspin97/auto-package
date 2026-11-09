@@ -485,3 +485,17 @@ Requires(postun): update-alternatives
                     %python_install_alternative x\n";
     assert_eq!(fix_missing_alternatives_requires(both), both);
 }
+
+#[test]
+fn parse_header_reads_the_epoch_and_none_when_absent() {
+    let with = "Name: foo\nEpoch: 1\nVersion: 1.0\n";
+    assert_eq!(parse_header(with).unwrap().epoch.as_deref(), Some("1"));
+    let without = "Name: foo\nVersion: 1.0\n";
+    assert_eq!(parse_header(without).unwrap().epoch, None);
+}
+
+#[test]
+fn parse_header_expands_a_define_referenced_from_epoch() {
+    let spec = "%define ep 3\nName: foo\nEpoch: %{ep}\nVersion: 1.0\n";
+    assert_eq!(parse_header(spec).unwrap().epoch.as_deref(), Some("3"));
+}
