@@ -21,9 +21,13 @@ mod parse;
 mod render;
 #[cfg(test)]
 mod tests;
+mod tries;
+#[cfg(test)]
+mod tries_tests;
 
 pub use collect::*;
 use logs::*;
 pub use model::*;
 use parse::*;
 pub use render::*;
+pub use tries::*;
