@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::pipeline::prompt_notes::*;
+use crate::pipeline::sdist_name::saved_sdist_name;
 use crate::pipeline::service_source::*;
 use crate::pipeline::sibling_specs::*;
 
@@ -32,9 +33,12 @@ pub(super) fn carry_forward_spec(
     let json = fetch_pypi_json(&config.pkg_name, &config.version)?
         .ok_or_else(|| format!("PyPI has no {} {}", config.pkg_name, config.version))?;
     let release = pypi::parse_release(&json).map_err(|e| format!("no usable sdist: {e}"))?;
+    // Saved under the name the spec's `Source` gives it, so the checkout has
+    // the file the spec names (OBS builds that name, not PyPI's spelling).
+    let saved = saved_sdist_name(&bumped, &release.sdist.filename);
     let tarball = release
         .sdist
-        .fetch(checkout_dir)
+        .fetch_as(checkout_dir, &saved)
         .map_err(|e| format!("downloading {}: {e}", release.sdist.url))?;
     let info = sdist::inspect(&tarball).map_err(|e| format!("inspecting the sdist: {e}"))?;
     if !info.subprojects.is_empty() {

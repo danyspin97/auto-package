@@ -385,6 +385,7 @@ mod ladder_memo;
 pub use ladder::*;
 use ladder_memo::*;
 mod logs;
+mod sdist_name;
 mod sibling;
 mod sibling_specs;
 #[cfg(test)]

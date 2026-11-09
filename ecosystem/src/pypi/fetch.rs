@@ -92,9 +92,16 @@ impl Sdist {
     /// Idempotent: if the file already exists and its hash matches, the
     /// download is skipped. A corrupted file (wrong hash) is overwritten.
     pub fn fetch(&self, dest_dir: &Path) -> Result<PathBuf, FetchError> {
-        let Some(name) = safe_filename(&self.filename) else {
+        self.fetch_as(dest_dir, &self.filename)
+    }
+
+    /// [`Sdist::fetch`], saved as `saved` in `dest_dir`: the same bytes, checked
+    /// the same way, under a name the caller chose (a spec's `Source` may spell
+    /// the file's name in another case than PyPI does).
+    pub fn fetch_as(&self, dest_dir: &Path, saved: &str) -> Result<PathBuf, FetchError> {
+        let Some(name) = safe_filename(saved) else {
             return Err(FetchError::Io {
-                path: PathBuf::from(&self.filename),
+                path: PathBuf::from(saved),
                 source: io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "filename is not a plain file name",
