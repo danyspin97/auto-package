@@ -14,6 +14,9 @@ pub(super) struct SubmitBackend {
     pub(super) yes: bool,
     /// `--allow-arch-failures` was given (see `prepare_request`).
     pub(super) allow_arch: bool,
+    /// The run checked the Factory ports, so their results gate a submit (see
+    /// `gate_counts_ports`).
+    pub(super) include_ports: bool,
     /// The packages whose other-architecture check ran (see [`ArchChecked`]).
     pub(super) arch_checked: ArchChecked,
     /// The run's other-architecture deadline (see `ArchDeadline`).
@@ -76,6 +79,7 @@ impl SubmitBackend {
             &item,
             &ItemOutcome::Updated,
             self.allow_arch,
+            self.include_ports,
             arch_wait,
             self.reporter.as_ref(),
             None,
@@ -221,6 +225,7 @@ pub(super) fn submit_requests(
             &r.item,
             &r.outcome,
             a.allow_arch_failures,
+            super::arch::gate_counts_ports(a),
             if checked {
                 ArchWait::Awaited
             } else {

@@ -140,7 +140,7 @@ pub fn check_other_arches<O: ArchObs + ?Sized>(
         .filter(|(r, a)| (r.as_str(), a.as_str()) != req.primary)
         .filter(|(r, _)| req.include_ports || !is_port_repo(r))
         .collect();
-    // A port's result does not gate the submit, so the ports are not counted.
+    // A port is not needed to cover the branch, checked or not.
     let covered = branch
         .repositories
         .iter()
@@ -394,14 +394,20 @@ pub fn read_results<O: ArchObs + ?Sized>(
 /// A failure carries its baseline: the origin's result for the same `(repo,
 /// arch)`, or for a port the port project's, which also judges the port's
 /// failure (see [`judge_port`]). A baseline is read only for a failure.
+///
+/// A port repository is a row only when `include_ports` is set, the run having
+/// checked the ports (see `check_other_arches`): a port the run did not check
+/// is not read, so an earlier run's result of it cannot refuse a submit.
 pub fn gate_inputs<O: ArchObs + ?Sized>(
     obs: &O,
     branch: &str,
     origin: &str,
     pkg: &str,
+    include_ports: bool,
 ) -> Result<Vec<GateRow>, String> {
     let mut rows: Vec<GateRow> = read_results(obs, branch, pkg)?
         .into_iter()
+        .filter(|((repo, _), _)| include_ports || !is_port_repo(repo))
         .map(|((repo, arch), state)| GateRow {
             repo,
             arch,

@@ -21,6 +21,13 @@ pub(super) fn ports_enabled(a: &UpdateProjectArgs, wanted: Option<&[String]>) ->
     a.ports || named
 }
 
+/// Whether the submit gate counts the port results of the run: the ports the
+/// arch check checked (see [`check_item`]). A run that checks nothing, or whose
+/// `--arches` do not parse, checked no port, so no port result is counted.
+pub(super) fn gate_counts_ports(a: &UpdateProjectArgs) -> bool {
+    !a.no_arch_check && !a.local && wanted_arches(a).is_ok_and(|w| ports_enabled(a, w.as_deref()))
+}
+
 /// The ports the check uses: every port when the run checks them (see
 /// [`ports_enabled`]), narrowed to `wanted`.
 pub(super) fn ports_for(a: &UpdateProjectArgs, wanted: Option<&[String]>) -> Vec<Port> {

@@ -209,7 +209,7 @@ fn the_gate_reads_a_missing_baseline_as_no_result_and_passes_with_a_note() {
         ],
     );
     set_absent(&fake, ORIGIN);
-    let rows = gate_inputs(&fake, BRANCH, ORIGIN, "p").unwrap();
+    let rows = gate_inputs(&fake, BRANCH, ORIGIN, "p", true).unwrap();
     let failing = rows.iter().find(|r| r.arch == "s390x").unwrap();
     assert!(failing.baseline.as_ref().unwrap().state.is_none());
     let verdict = gate_verdict("p", ("standard", "x86_64"), &rows, false, true);
@@ -267,7 +267,7 @@ mod gate_reads {
     const PRIMARY: (&str, &str) = ("standard", "x86_64");
 
     fn gate(fake: &FakeObs, allow: bool) -> GateVerdict {
-        let rows = gate_inputs(fake, BRANCH, ORIGIN, "p").unwrap();
+        let rows = gate_inputs(fake, BRANCH, ORIGIN, "p", true).unwrap();
         gate_verdict("p", PRIMARY, &rows, allow, true)
     }
 
@@ -332,7 +332,7 @@ mod gate_reads {
             vec![entry("p", "standard", "s390x", "failed")],
         );
         // Not a failed overall status: the scheduled arch is not one.
-        let rows = gate_inputs(&fake, BRANCH, ORIGIN, "p").unwrap();
+        let rows = gate_inputs(&fake, BRANCH, ORIGIN, "p", true).unwrap();
         assert!(matches!(
             gate_verdict("p", PRIMARY, &rows, false, false),
             GateVerdict::Pass { ref not_final, .. }
@@ -371,7 +371,7 @@ mod gate_reads {
             BRANCH,
             vec![entry("p", "standard", "x86_64", "succeeded")],
         );
-        let rows = gate_inputs(&fake, BRANCH, ORIGIN, "p").unwrap();
+        let rows = gate_inputs(&fake, BRANCH, ORIGIN, "p", true).unwrap();
         assert!(rows.iter().all(|r| r.baseline.is_none()));
         let origin_reads = format!("results:{ORIGIN}:");
         assert!(

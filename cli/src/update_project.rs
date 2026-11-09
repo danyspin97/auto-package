@@ -50,6 +50,8 @@ mod existing_lint;
 mod fix_landed;
 #[cfg(test)]
 mod fix_landed_tests;
+#[cfg(test)]
+mod gate_ports_tests;
 mod incomplete;
 mod items;
 mod maintenance;
@@ -63,6 +65,8 @@ mod schedule;
 #[cfg(test)]
 mod schedule_tests;
 mod submit;
+#[cfg(test)]
+mod submit_backend_tests;
 #[cfg(test)]
 mod submit_wait_tests;
 mod throttle;

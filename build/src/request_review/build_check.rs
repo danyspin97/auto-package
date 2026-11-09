@@ -163,6 +163,7 @@ pub fn build_report(obs: &dyn RequestObs, a: &ActionInputs) -> Result<Vec<Findin
         &a.source.project,
         &a.target.project,
         &a.source.package,
+        true,
     )
     .map_err(|e| format!("the build results could not be read: {e}"))?;
     let target = read_results(&read_only, &a.target.project, package)

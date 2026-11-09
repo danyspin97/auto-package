@@ -25,6 +25,7 @@ pub(crate) fn prepare_request(
     item: &Item,
     outcome: &ItemOutcome,
     allow_arch: bool,
+    include_ports: bool,
     arch_wait: ArchWait<'_>,
     reporter: &(dyn Reporter + Send + Sync),
     superseding: Option<&str>,
@@ -111,6 +112,7 @@ pub(crate) fn prepare_request(
                 primary,
                 allow_arch,
                 failed,
+                include_ports,
                 emit,
             ) {
                 Ok(GateVerdict::Pass {
@@ -287,7 +289,8 @@ fn is_arch_failure(status: &osc::BuildStatus) -> bool {
 
 /// The arch gate of a submit: the verdict on `pkg`'s results in the branch,
 /// each failure compared with its baseline (see `gate_inputs`). `failed` is
-/// whether the overall build status is a failure.
+/// whether the overall build status is a failure; `include_ports` is whether
+/// the run checked the ports.
 fn arch_gate(
     branch: &str,
     origin: &str,
@@ -295,10 +298,11 @@ fn arch_gate(
     primary: (&str, &str),
     allow: bool,
     failed: bool,
+    include_ports: bool,
     emit: Emit<'_>,
 ) -> Result<GateVerdict, String> {
     let obs = ap_build::arch_check::LiveArchObs { emit };
-    let rows = ap_build::arch_check::gate_inputs(&obs, branch, origin, pkg)?;
+    let rows = ap_build::arch_check::gate_inputs(&obs, branch, origin, pkg, include_ports)?;
     Ok(ap_build::arch_check::gate_verdict(
         pkg, primary, &rows, allow, failed,
     ))

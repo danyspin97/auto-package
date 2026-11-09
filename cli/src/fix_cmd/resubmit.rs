@@ -108,6 +108,8 @@ pub(super) fn submit(a: &FixArgs, c: SubmitCtx<'_>) -> color_eyre::Result<()> {
         // item is resubmitted here; a branch with no change is refused inside.
         &ItemOutcome::Updated,
         false,
+        // A fix run runs no arch check, so it checked no port (see `gate_counts_ports`).
+        false,
         ArchWait::Until(&wait),
         c.sink,
         Some(c.id),

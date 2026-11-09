@@ -400,6 +400,8 @@ not fail it too. A failure on an architecture the origin has no result row for
 at all is a note and does not block. A port is judged against Factory's port
 project the same way. A failure the origin reports as unresolvable or broken
 counts as a failure there, so the branch's failure is informational.
+A port blocks `--submit` only when the run checked it (`--ports`, or
+`--arches` naming its arch); a port result left by an earlier run does not.
 
 #### Submit requests
 

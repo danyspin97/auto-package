@@ -211,6 +211,7 @@ pub(super) fn run_on(
                 state_root: ctx.state_root.clone(),
                 yes: a.yes,
                 allow_arch: a.allow_arch_failures,
+                include_ports: super::arch::gate_counts_ports(&a),
                 arch_checked: arch_checked.clone(),
                 arch_deadline: ctx.arch_deadline.clone(),
                 untied_wait: Default::default(),

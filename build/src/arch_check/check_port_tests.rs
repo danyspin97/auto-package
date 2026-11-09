@@ -170,7 +170,7 @@ mod gate_ports {
     const REPO: &str = "openSUSE_Factory_zSystems";
 
     fn gate(fake: &FakeObs) -> GateVerdict {
-        let rows = gate_inputs(fake, BRANCH, ORIGIN, "p").unwrap();
+        let rows = gate_inputs(fake, BRANCH, ORIGIN, "p", true).unwrap();
         gate_verdict("p", ("standard", "x86_64"), &rows, false, false)
     }
 
@@ -225,6 +225,50 @@ mod gate_ports {
         assert!(matches!(gate(&fake), GateVerdict::Pass { .. }));
         branch_with_port(&fake, "scheduled");
         assert!(matches!(gate(&fake), GateVerdict::Pass { .. }));
+    }
+
+    fn gate_with_ports(fake: &FakeObs, include_ports: bool) -> GateVerdict {
+        let rows = gate_inputs(fake, BRANCH, ORIGIN, "p", include_ports).unwrap();
+        gate_verdict("p", ("standard", "x86_64"), &rows, false, false)
+    }
+
+    #[test]
+    fn a_failing_port_the_run_did_not_check_does_not_refuse() {
+        let fake = fixture();
+        branch_with_port(&fake, "failed");
+        set_results(
+            &fake,
+            PORT,
+            vec![entry("p", "standard", "s390x", "succeeded")],
+        );
+        assert!(matches!(
+            gate_with_ports(&fake, false),
+            GateVerdict::Pass { ref notes, .. } if notes.is_empty()
+        ));
+        assert!(
+            !fake
+                .events
+                .borrow()
+                .iter()
+                .any(|e| e.starts_with(&format!("results:{PORT}"))),
+            "the baseline of an unchecked port is not read: {:?}",
+            fake.events.borrow()
+        );
+    }
+
+    #[test]
+    fn a_failing_port_the_run_checked_still_refuses() {
+        let fake = fixture();
+        branch_with_port(&fake, "failed");
+        set_results(
+            &fake,
+            PORT,
+            vec![entry("p", "standard", "s390x", "succeeded")],
+        );
+        let GateVerdict::Refuse(why) = gate_with_ports(&fake, true) else {
+            panic!("a port the run checked and Factory builds blocks the submit");
+        };
+        assert!(why.contains(&format!("{REPO}/s390x")), "{why}");
     }
 }
 
