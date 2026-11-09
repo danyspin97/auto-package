@@ -1,4 +1,5 @@
 use super::same_wait::{Held, SameWait, go_on, settle};
+use super::unbuilt_waits;
 use super::*;
 
 pub(super) fn cmd_update_project(
@@ -92,6 +93,9 @@ pub(super) fn cmd_update_project(
         prepared
     });
     merge_built(report, built);
+    for line in unbuilt_waits::unbuilt_waits(&report.results) {
+        ctx.warn(line);
+    }
     if prepared? && a.submit {
         submit_requests(a, branch, &mut report.results, ctx)?;
     }

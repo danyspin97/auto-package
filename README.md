@@ -379,7 +379,11 @@ the package waits. It holds no build slot while it waits, and is built after
 the update. Its submit request names the update (`Requires the update of
 <package> (branch package <branch>/<package>)`, or the request for it once
 there is one). When the sweep finds no such update, or it finds one that is skipped or
-fails, the package builds against the source's version and the run says so.
+fails to branch, the package builds against the source's version and the run
+says so. When the update is branched and its build fails, the package still
+waits for that build to end, then builds in the branch project, where the
+failed update has no binaries: the package may be unresolvable there, and the
+run warns about it.
 Two cases are not waited for, and the package builds against the source's
 version with a reason: a wait that would close a cycle (the other package
 waits for this one), and a wait with 25 packages already waiting. A package

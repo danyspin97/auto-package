@@ -82,6 +82,7 @@ mod submit_wait_tests;
 mod throttle;
 mod tidy;
 mod tui_row;
+mod unbuilt_waits;
 
 #[cfg(test)]
 mod tests;
