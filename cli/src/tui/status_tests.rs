@@ -254,10 +254,10 @@ fn a_check_result_moves_only_a_row_no_build_has_taken() {
 }
 
 #[test]
-fn only_a_row_obs_excludes_is_excluded() {
+fn only_a_skipped_row_is_skipped_on_purpose() {
     for from in ALL {
         assert_eq!(
-            from.is_excluded(),
+            from.is_skipped_on_purpose(),
             from == PkgStatus::Skipped,
             "{}",
             from.label()

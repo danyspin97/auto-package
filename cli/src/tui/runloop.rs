@@ -42,9 +42,9 @@ pub(super) fn run(
 /// close by itself and the run exits 0.
 ///
 /// A package is settled once its own build has finished with a built outcome
-/// (`Built` or `AlreadyBuilt`) and no retry is asked for, or once OBS excludes
-/// it for this repository and arch (`Skipped`): nothing can be built for it,
-/// and it is not a failure. Nothing else settles a row: one parked on missing
+/// (`Built` or `AlreadyBuilt`) and no retry is asked for, or once it is
+/// skipped (`Skipped`), by choice or by OBS (excluded for this repository and
+/// arch): nothing is left to do for it, and it is not a failure. Nothing else settles a row: one parked on missing
 /// deps is not settled, even once its dependencies are built, and neither is a
 /// failed row.
 ///
@@ -71,7 +71,9 @@ pub(super) fn run_is_done(state: &TuiState, work_left: usize) -> bool {
         return matches!(state.run_outcome, Some(RunOutcome::Success));
     }
     rows.all(|p| {
-        p.finished && !p.retry_requested && (p.status.is_built() || p.status.is_excluded())
+        p.finished
+            && !p.retry_requested
+            && (p.status.is_built() || p.status.is_skipped_on_purpose())
     })
 }
 

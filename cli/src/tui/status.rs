@@ -187,9 +187,9 @@ impl PkgStatus {
         self.stage() == Stage::Done
     }
 
-    /// Whether OBS excludes the package for this repository and arch: nothing
-    /// can be built for it, and it is not a failure, so it settles the run.
-    pub(super) fn is_excluded(&self) -> bool {
+    /// Whether the package is skipped by choice or by OBS: nothing is left to
+    /// do for it, and it is not a failure, so it settles the run.
+    pub(super) fn is_skipped_on_purpose(&self) -> bool {
         *self == PkgStatus::Skipped
     }
 
