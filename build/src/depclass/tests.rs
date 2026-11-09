@@ -73,6 +73,27 @@ fn the_interpreter_and_its_subpackages_are_never_built() {
 }
 
 #[test]
+fn the_stdlib_subpackages_of_cpython_are_interpreter_capabilities() {
+    // Each is a subpackage of Factory's python313 (`python313:base`,
+    // `python313:doc`, `python313`); none is a PyPI project of that name.
+    for raw in [
+        "python-dbm",
+        "python3-dbm",
+        "python313-dbm",
+        "python314-dbm",
+        "python313-curses",
+        "python313-idle",
+        "python313-tk",
+        "python313-doc-devhelp",
+        "python313-testsuite",
+        "python313-tools",
+    ] {
+        assert!(matches!(skipped(raw), Skip::Interpreter(_)), "{raw}");
+    }
+    assert!(built("python-dbm-extra").is_some());
+}
+
+#[test]
 fn a_system_tool_alias_is_skipped_under_any_spelling() {
     assert!(matches!(skipped("python313-ninja"), Skip::SystemTool(_)));
     assert!(matches!(skipped("ninja"), Skip::SystemTool(_)));

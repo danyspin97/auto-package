@@ -131,8 +131,10 @@ pub enum Fallback {
 const PYTHON_INTERPRETER_STEMS: &[&str] = &[
     "base",
     "curses",
+    "dbm",
     "devel",
     "doc",
+    "doc-devhelp",
     "idle",
     "rpm-generators",
     "rpm-macros",
