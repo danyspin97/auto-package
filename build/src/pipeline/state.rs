@@ -214,6 +214,10 @@ pub struct PkgState {
     pub rpmlint_shown: Vec<String>,
     #[serde(default)]
     pub rpmlint_shown_version: Option<String>,
+    /// The failures this package repeated, and whether its next attempt is
+    /// told to try a different approach (see [`super::different_retry`]).
+    #[serde(default)]
+    pub retry: super::different_retry::RetryRecord,
 }
 
 impl PkgState {
