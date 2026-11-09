@@ -10,8 +10,7 @@
 //!
 //! # Wiring contract (for `cmd.rs`'s preparation loop)
 //!
-//! Nothing here is called yet; the wiring task adds the calls below and
-//! changes nothing else.
+//! The preparation loop makes these calls through `same_wait`.
 //!
 //! 1. Keep one [`FoundIndex`] for the run. Call [`FoundIndex::insert`] for
 //!    every item `incoming()` returns from the sweep (before the checks that

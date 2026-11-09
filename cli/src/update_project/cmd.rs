@@ -1,4 +1,4 @@
-use super::same_wait::{Held, SameWait, go_on};
+use super::same_wait::{Held, SameWait, go_on, settle};
 use super::*;
 
 pub(super) fn cmd_update_project(
@@ -186,8 +186,7 @@ fn prepare(
     // The same-project waits of `--update-deps`: a sweep the dependencies
     // are judged against, and the jobs queued so far. Nothing is judged
     // without a sweep (lint, backport) or with `--test-against-updates`.
-    let same_active = a.update_deps && !a.test_against_updates && sweep.is_some();
-    let mut same = SameWait::default();
+    let mut same = SameWait::new(a.update_deps && !a.test_against_updates && sweep.is_some());
     let mut admitted = 0;
     let mut dependency_count = 0;
     let mut branch_checked = false;
@@ -195,6 +194,28 @@ fn prepare(
     let module_flavors = std::cell::OnceCell::new();
     loop {
         tui_row::close_dropped(ctx, &report.results, &mut closed_upto, &mut sweep_rows);
+        // A parked package whose wait is over goes on before the next item.
+        if let Some(decided) = same.release_next(&a.source, branch, ctx) {
+            if !a.dry_run && !builds.work().throttle.admit() {
+                not_started(
+                    report,
+                    std::iter::once(decided.held.item).chain(queue.drain(..)),
+                );
+                break;
+            }
+            go_on(
+                decided,
+                a,
+                branch,
+                ctx,
+                &mut queue,
+                &mut visited,
+                &mut dependency_count,
+                &mut same,
+                &mut ready,
+            );
+            continue;
+        }
         let mut item = match queue.pop_front() {
             Some(item) => item,
             None => {
@@ -207,15 +228,14 @@ fn prepare(
                 if ap_build::proc::shutting_down() {
                     break;
                 }
+                // The sweep is over: parked packages are released at the top of the loop.
                 let Some((item, style_only)) = incoming() else {
-                    if same_active {
-                        same.index.finish();
+                    if same.sweep_ended() {
+                        continue;
                     }
                     break;
                 };
-                if same_active {
-                    same.index.insert(&item);
-                }
+                same.found(&item);
                 if sweep_queues && let Some(row) = row_name(&item) {
                     sweep_rows.insert(row);
                 }
@@ -322,14 +342,7 @@ fn prepare(
                 // The run is stopping. This package and the dependencies queued
                 // for it were found but not branched: each is listed once as not
                 // started, and nothing more is taken from the sweep.
-                let left = std::iter::once(item).chain(queue.drain(..));
-                for item in left {
-                    report.results.push(ItemResult {
-                        item,
-                        outcome: ItemOutcome::NotStarted,
-                        sr: SrOutcome::NotRequested,
-                    });
-                }
+                not_started(report, std::iter::once(item).chain(queue.drain(..)));
                 break;
             }
             match branch_item(
@@ -438,25 +451,21 @@ fn prepare(
                     continue;
                 }
             };
-        go_on(
-            Held {
-                item,
-                first_key,
-                reqs: reqs.requirements,
-                verdicts,
-                adds,
-                prediction: None,
-            },
+        settle(
+            Held::new(item, first_key, reqs.requirements, verdicts, adds),
             a,
             branch,
             ctx,
+            &builds.work().throttle,
+            &mut same,
             &mut queue,
             &mut visited,
             &mut dependency_count,
-            &mut same,
             &mut ready,
         );
     }
+    // A package still parked when the run stopped is listed as not started, once.
+    not_started(report, same.into_parked_items());
     // The updates the sweep found but the loop did not take (a stop leaves
     // them in its channel) are listed as not started: that closes the rows
     // queue_found queued for them.
@@ -559,38 +568,13 @@ fn prepare(
     Ok(true)
 }
 
-/// What a run that checked no package ends with: an error when `--only` named
-/// packages (they were asked for and none could be checked), else nothing.
-fn none_checked(only: &[String], absent: bool) -> color_eyre::Result<()> {
-    if only.is_empty() {
-        return Ok(());
-    }
-    let why = if absent { "not on OBS: " } else { "" };
-    Err(eyre!(
-        "none of the requested packages could be checked: {why}{}",
-        only.join(", ")
-    ))
-}
-
-#[cfg(test)]
-mod none_checked_tests {
-    use super::none_checked;
-
-    #[test]
-    fn a_run_that_checked_nothing_fails_only_when_packages_were_asked_for() {
-        assert!(none_checked(&[], false).is_ok());
-        let err = none_checked(&["foo".to_string(), "bar".to_string()], false).unwrap_err();
-        assert!(
-            err.to_string()
-                .starts_with("none of the requested packages could be checked"),
-            "{err}"
-        );
-        let absent = none_checked(&["gone".to_string()], true)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(
-            absent,
-            "none of the requested packages could be checked: not on OBS: gone"
-        );
+/// Record `items`, which a stopping run does not start, as not started.
+fn not_started(report: &mut Report, items: impl IntoIterator<Item = Item>) {
+    for item in items {
+        report.results.push(ItemResult {
+            item,
+            outcome: ItemOutcome::NotStarted,
+            sr: SrOutcome::NotRequested,
+        });
     }
 }

@@ -56,22 +56,16 @@ mod incomplete;
 mod items;
 mod maintenance;
 mod origin;
+mod parked;
+#[cfg(test)]
+mod parked_tests;
 mod provenance;
 mod request;
 mod requested;
 mod rpmlint_audit;
 mod run;
-// Not called yet: the wiring into the preparation loop is a task of its own.
-#[allow(dead_code)]
 mod same_project;
-// Not called yet, as `same_project`.
-#[allow(dead_code)]
 mod same_project_defer;
-// Not called yet: the wiring into the preparation loop is a task of its own.
-#[allow(dead_code)]
-mod parked;
-#[cfg(test)]
-mod parked_tests;
 #[cfg(test)]
 mod same_project_defer_tests;
 #[cfg(test)]
@@ -91,7 +85,7 @@ mod tui_row;
 
 #[cfg(test)]
 mod tests;
-use incomplete::obs_unavailable;
+use incomplete::{none_checked, obs_unavailable};
 
 pub use args::*;
 pub(crate) use request::{ArchWait, prepare_request};
