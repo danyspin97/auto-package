@@ -8,6 +8,7 @@
 mod changelog;
 mod markdown;
 mod render;
+mod routine;
 mod summarize;
 #[cfg(test)]
 mod tests;

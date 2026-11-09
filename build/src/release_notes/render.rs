@@ -2,6 +2,7 @@
 //! bullets of the notes, cleaned, or the link-only form when they are too many.
 
 use super::markdown::strip_links;
+use super::routine::is_routine;
 use crate::sources::RepoRelease;
 
 /// The most bullets a recap lists as they are; more are summarized.
@@ -31,13 +32,21 @@ pub(super) fn classify(releases: &[RepoRelease]) -> Notes {
     if with_notes.is_empty() {
         return Notes::None;
     }
+    let every_release_has_bullets = with_notes.iter().all(|r| !bullets_of(&r.body).is_empty());
+    // Routine bullets (CI, bumps) are left out before the count: a release
+    // that has only those has nothing to list.
     let bullets: Vec<String> = with_notes
         .iter()
         .flat_map(|r| bullets_of(&r.body))
+        .filter(|b| !is_routine(b))
         .collect();
-    let every_release_has_bullets = with_notes.iter().all(|r| !bullets_of(&r.body).is_empty());
-    if every_release_has_bullets && bullets.len() <= MAX_BULLETS {
-        return Notes::Bullets(bullets);
+    if every_release_has_bullets {
+        if bullets.is_empty() {
+            return Notes::None;
+        }
+        if bullets.len() <= MAX_BULLETS {
+            return Notes::Bullets(bullets);
+        }
     }
     let text: String = with_notes
         .iter()

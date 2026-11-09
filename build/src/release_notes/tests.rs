@@ -314,3 +314,41 @@ fn the_changelog_of_the_sources_comes_before_the_releases() {
     // No section: the releases, as before.
     assert_eq!(recap(None, &r, never), ["* from the forge"]);
 }
+
+#[test]
+fn ci_and_bump_bullets_are_left_out_of_the_recap() {
+    // PyMySQL 1.2.0 -> 1.2.4: only the fix is news.
+    let body = "## What's Changed\n\
+        * Bump codecov/codecov-action from 4 to 5 by @dependabot[bot] in https://github.com/o/r/pull/1\n\
+        * ci: replace Python 3.9 with 3.15 by @x in https://github.com/o/r/pull/2\n\
+        * ci: adopt GitHub Actions workflow lockfile by @x in https://github.com/o/r/pull/3\n\
+        * Bump the all-dependencies group across 1 directory by @dependabot[bot] in https://github.com/o/r/pull/4\n\
+        * Fix connection leak on close by @bob in https://github.com/o/r/pull/5\n\
+        * chore(deps): refresh lockfile by @x in https://github.com/o/r/pull/6\n\
+        * Bump urllib3 to fix CVE-2026-1234 by @dependabot[bot] in https://github.com/o/r/pull/7";
+    assert_eq!(
+        recap(None, &[rel("v1.2.4", body)], never),
+        [
+            "* Fix connection leak on close",
+            "* Bump urllib3 to fix CVE-2026-1234",
+        ]
+    );
+}
+
+#[test]
+fn a_release_with_only_routine_bullets_says_nothing() {
+    let body = "- ci: pin actions\n- docs: reword the readme\n- test: add cases";
+    assert!(recap(None, &[rel("v1.2.4", body)], never).is_empty());
+}
+
+#[test]
+fn the_routine_bullets_do_not_count_toward_the_limit() {
+    let mut body: String = (0..9).map(|i| format!("- change {i}\n")).collect();
+    body.push_str(
+        &(0..5)
+            .map(|i| format!("- ci: step {i}\n"))
+            .collect::<String>(),
+    );
+    let got = recap(None, &[rel("v2", &body)], never);
+    assert_eq!(got.len(), 9);
+}
