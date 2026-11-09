@@ -11,8 +11,8 @@
 //!   build is retried once. If OBS says unresolvable again with the same spec
 //!   and the same RPMs, the retry is not repeated.
 
+use super::rpm_names::wait_dep_satisfied;
 use super::*;
-use crate::pipeline::rpm_deps::rpm_satisfies_dep;
 use crate::pipeline::state::hash_spec;
 use serde::{Deserialize, Serialize};
 
@@ -40,22 +40,27 @@ pub struct WaitRecord {
     pub wait: Wait,
 }
 
-/// Whether `record` still stands for `spec`: a `Missing` answer whose names
-/// are not RPMs yet in `rpms_dir` (as `satisfied` tells). Returns the names
-/// the package waits on, or `None` when a build try is needed.
+/// Whether `record` still stands for `spec`: a `Missing` answer none of whose
+/// names is an RPM in `rpms_dirs` yet (as [`wait_dep_satisfied`] tells, with
+/// the bounds the record holds). Returns the names the package waits on, or
+/// `None` when a build try is needed.
 pub fn waiting_on(
     record: Option<&WaitRecord>,
     spec: u64,
-    satisfied: impl Fn(&str) -> bool,
+    rpms_dirs: &[&Path],
 ) -> Option<Vec<String>> {
     let record = record?;
     if record.spec != spec {
         return None;
     }
-    let Wait::Missing { deps, .. } = &record.wait else {
+    let Wait::Missing { deps, outdated, .. } = &record.wait else {
         return None;
     };
-    if deps.is_empty() || deps.iter().any(|d| satisfied(d)) {
+    if deps.is_empty()
+        || deps
+            .iter()
+            .any(|d| wait_dep_satisfied(rpms_dirs, d, outdated))
+    {
         return None;
     }
     Some(deps.clone())
@@ -113,9 +118,12 @@ fn save(ctx: &RunCtx, wait: Wait) {
 pub fn precheck(ctx: &RunCtx) -> Option<PipelineResult> {
     let (spec, _) = current(ctx)?;
     let record = load(ctx.ws.dir());
-    let deps = waiting_on(record.as_ref(), spec, |d| {
-        rpm_satisfies_dep(&ctx.config.rpms_dir, d)
-    })?;
+    let local = ctx.config.rpms_dir.join(osc::LOCAL_RPMS_DIR);
+    let deps = waiting_on(
+        record.as_ref(),
+        spec,
+        &[ctx.config.rpms_dir.as_path(), local.as_path()],
+    )?;
     let Some(WaitRecord {
         wait: Wait::Missing {
             native, outdated, ..
