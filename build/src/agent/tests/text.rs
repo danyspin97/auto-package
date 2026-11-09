@@ -255,3 +255,9 @@ fn an_rm_of_installed_files_is_checked_against_the_installed_tree() {
 fn a_skip_comment_never_blames_a_dependency_that_failed_here() {
     assert!(convention(11).contains("never that a dependency failed to build in this"));
 }
+
+/// Convention 40 keeps file names and build narration out of a changelog bullet.
+#[test]
+fn changelog_bullets_name_no_file_and_no_own_fix() {
+    assert!(convention(40).contains("names no file"));
+}
