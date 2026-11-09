@@ -109,12 +109,12 @@ pub fn bound_violation(
     shipped: &str,
 ) -> Option<(Kind, String)> {
     let version = parse_version(shipped)?;
-    let wanted = fuzzy_key(dependency);
+    let wanted = crate::osc::project_key(dependency);
     for line in requires_dist {
         let Some((name, spec, marker)) = parse_requirement(line) else {
             continue;
         };
-        if fuzzy_key(&name) != wanted
+        if crate::osc::project_key(&name) != wanted
             || spec.is_empty()
             || crate::redist::component(&name).is_some()
         {

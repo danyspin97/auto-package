@@ -251,14 +251,14 @@ pub fn published_respelling(
 pub(super) fn respelling_among(name: &str, published: &[String]) -> Option<String> {
     let bare = strip_rpm_prefix(name);
     let prefix = &name[..name.len() - bare.len()];
-    let key = fuzzy_key(bare);
+    let key = project_key(bare);
     if published.iter().any(|p| p == name) {
         return None;
     }
     let mut found: Vec<&str> = published
         .iter()
         .filter_map(|p| p.strip_prefix(prefix))
-        .filter(|p| *p != bare && fuzzy_key(p) == key && strip_rpm_prefix(p) == *p)
+        .filter(|p| *p != bare && project_key(p) == key && strip_rpm_prefix(p) == *p)
         .collect();
     found.sort_unstable();
     found.first().map(|p| p.to_string())

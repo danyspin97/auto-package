@@ -14,7 +14,7 @@ use super::*;
 pub fn plan(project: &str, only: Option<&str>, emit: Emit<'_>) -> Result<Vec<Candidate>, String> {
     plan_where(
         project,
-        &|n| only.is_none_or(|o| osc::fuzzy_key(o) == osc::fuzzy_key(n)),
+        &|n| only.is_none_or(|o| osc::project_key(o) == osc::project_key(n)),
         emit,
     )
 }

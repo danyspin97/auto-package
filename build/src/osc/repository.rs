@@ -4,19 +4,19 @@ use super::*;
 
 /// The name `dep` has in `listing` when the project has it built
 /// (`succeeded`) in the repository/architecture `statuses` was read for, else
-/// `None`. Names are matched by [`fuzzy_key`], with or without the `python-`
+/// `None`. Names are matched by [`project_key`], with or without the `python-`
 /// prefix, and the listing's own spelling is returned.
 pub fn built_in_project(
     listing: &std::collections::HashSet<String>,
     statuses: &HashMap<String, BuildStatus>,
     dep: &str,
 ) -> Option<String> {
-    let bare = fuzzy_key(dep);
-    let rpm = fuzzy_key(&rpm_name(dep));
+    let bare = project_key(dep);
+    let rpm = project_key(&rpm_name(dep));
     listing
         .iter()
         .filter(|p| {
-            let k = fuzzy_key(p);
+            let k = project_key(p);
             k == bare || k == rpm
         })
         .find(|p| statuses.get(*p).is_some_and(BuildStatus::is_success))

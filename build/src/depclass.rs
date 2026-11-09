@@ -495,7 +495,7 @@ pub enum Availability {
     },
 }
 
-/// Where `dep` is, matching by [`osc::fuzzy_key`] with or without the
+/// Where `dep` is, matching by [`osc::project_key`] with or without the
 /// `python-` prefix. The own project wins over a linked one; among several
 /// spellings in it the one that is built (then in flight) is the one reported,
 /// whatever order the listing came in.
@@ -505,10 +505,10 @@ pub fn availability(
     own_statuses: &HashMap<String, BuildStatus>,
     linked: &[(String, Arc<HashSet<String>>)],
 ) -> Availability {
-    let bare = osc::fuzzy_key(dep);
-    let rpm = osc::fuzzy_key(&osc::rpm_name(dep));
+    let bare = osc::project_key(dep);
+    let rpm = osc::project_key(&osc::rpm_name(dep));
     let matches = |p: &String| {
-        let k = osc::fuzzy_key(p);
+        let k = osc::project_key(p);
         k == bare || k == rpm
     };
     let rank = |p: &String| match own_statuses.get(p) {

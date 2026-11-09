@@ -39,14 +39,14 @@ fn spec_dependency_names(spec: &str) -> Vec<String> {
 /// Sibling packages that have a checkout in the project, among a spec's
 /// dependencies.
 pub(super) fn sibling_names(spec: &str, available: &[String], own: &str) -> Vec<String> {
-    let own_key = osc::fuzzy_key(own);
+    let own_key = osc::project_key(own);
     let mut out: Vec<String> = Vec::new();
     for dep in spec_dependency_names(spec) {
         for cand in [dep.clone(), osc::rpm_name(&dep)] {
             if let Some(hit) = available
                 .iter()
-                .find(|a| osc::fuzzy_key(a) == osc::fuzzy_key(&cand))
-                && osc::fuzzy_key(hit) != own_key
+                .find(|a| osc::project_key(a) == osc::project_key(&cand))
+                && osc::project_key(hit) != own_key
                 && !out.contains(hit)
             {
                 out.push(hit.clone());

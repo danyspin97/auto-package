@@ -322,7 +322,8 @@ pub(super) fn resolve_dependency_config(
             // which then fails spec generation and loops forever reselecting
             // the same broken version. Skip and keep trying other
             // candidates/repos instead.
-            if ap_build::osc::fuzzy_key(&dep_rpm) == ap_build::osc::fuzzy_key(&config.rpm_name) {
+            if ap_build::osc::project_key(&dep_rpm) == ap_build::osc::project_key(&config.rpm_name)
+            {
                 probe_failure_warnings.push(format!(
                     "{repo_url}: resolved back to this package's own rpm_name \
                      ({dep_rpm}) — likely the umbrella project of a devel-wrapped \

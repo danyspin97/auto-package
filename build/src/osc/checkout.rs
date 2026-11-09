@@ -68,7 +68,7 @@ pub fn ensure_package(
         list_project_packages(project, emit).map_err(|e| listing_failure_for_create(project, e))?;
     if let Some(existing) = listing
         .iter()
-        .filter(|p| fuzzy_key(p) == fuzzy_key(pkg_name))
+        .filter(|p| project_key(p) == project_key(pkg_name))
         .min()
     {
         return Err(Error::NotActionable(format!(

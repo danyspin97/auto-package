@@ -155,7 +155,7 @@ fn local_wheel_source(spec: &str, checkout_dir: &Path) -> Option<PathBuf> {
 /// How a linked project spells the package for `dep` (a bare name), when it is
 /// spelled differently: the source package `python-PyYAML` for `pyyaml`. The
 /// binary search is case-sensitive and cannot enumerate every mixed-case name, so
-/// the project listing (matched by `fuzzy_key`) settles what it cannot.
+/// the project listing (matched by `project_key`) settles what it cannot.
 pub(super) fn linked_package_spelling(
     ctx: &RunCtx,
     step: ap_core::event::StepId,
@@ -172,7 +172,7 @@ pub(super) fn linked_package_spelling(
         return None;
     };
     let spelled = osc::strip_rpm_prefix(&pkg).to_string();
-    (spelled != dep && osc::fuzzy_key(&spelled) == osc::fuzzy_key(dep)).then_some(spelled)
+    (spelled != dep && osc::project_key(&spelled) == osc::project_key(dep)).then_some(spelled)
 }
 
 /// The version a linked project ships of `dep` (a bare upstream name), or `None`

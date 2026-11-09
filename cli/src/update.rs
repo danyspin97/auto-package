@@ -240,11 +240,11 @@ pub(super) fn built_locally(state_root: &Path, rpm_name: &str) -> Option<String>
     // The RPM spelling of a PyPI name is only a guess (`_` may or may not become
     // `-`), so match the real state directories by fuzzy key instead of building
     // one path from the guess.
-    let wanted = ap_build::osc::fuzzy_key(rpm_name);
+    let wanted = ap_build::osc::project_key(rpm_name);
     let dir = std::fs::read_dir(state_root)
         .ok()?
         .filter_map(|e| e.ok())
-        .find(|e| ap_build::osc::fuzzy_key(&e.file_name().to_string_lossy()) == wanted)?;
+        .find(|e| ap_build::osc::project_key(&e.file_name().to_string_lossy()) == wanted)?;
     let state: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.path().join("state.json")).ok()?).ok()?;
     // A local build is available only to a local run: OBS never has it, so a

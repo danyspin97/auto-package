@@ -28,17 +28,17 @@ pub(super) fn distro_bound_plan(
     if to_fetch.is_empty() {
         return distro_bounds::Plan::default();
     }
-    // The linked projects nearest first, each by fuzzy key: the version is the
+    // The linked projects nearest first, each by project key: the version is the
     // first one that ships the package and has a source version for it.
     let by_project: Vec<(&str, std::collections::HashMap<String, &String>)> = linked
         .iter()
         .map(|(path_project, listing)| {
-            let by_key = listing.iter().map(|p| (osc::fuzzy_key(p), p)).collect();
+            let by_key = listing.iter().map(|p| (osc::project_key(p), p)).collect();
             (path_project.as_str(), by_key)
         })
         .collect();
     let lookup = |i: usize| -> Option<String> {
-        let key = osc::fuzzy_key(&osc::rpm_name(&nodes[i].name));
+        let key = osc::project_key(&osc::rpm_name(&nodes[i].name));
         by_project.iter().find_map(|(path_project, by_key)| {
             let real = by_key.get(&key)?;
             osc::source_version(path_project, real)
@@ -85,12 +85,12 @@ pub(super) fn find_explicit_target<'a>(
     nodes: &'a [ap_ecosystem::pip::Node],
     target: &str,
 ) -> Result<&'a ap_ecosystem::pip::Node, String> {
-    let target_key = osc::fuzzy_key(target);
+    let target_key = osc::project_key(target);
     nodes
         .iter()
         .find(|n| {
-            osc::fuzzy_key(&n.name) == target_key
-                || osc::fuzzy_key(&osc::rpm_name(&n.name)) == target_key
+            osc::project_key(&n.name) == target_key
+                || osc::project_key(&osc::rpm_name(&n.name)) == target_key
         })
         .ok_or_else(|| {
             let mut names: Vec<&str> = nodes.iter().map(|n| n.name.as_str()).collect();
