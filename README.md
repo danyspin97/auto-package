@@ -336,6 +336,12 @@ becomes a build path instead of a duplicate package being built.
 
 Capability-style requirements (`pkgconfig(foo)`, `%{python_module foo}`) cannot
 be looked up by name and are reported as not checked; the build finds those.
+With `--update-deps` (and not `--test-against-updates`), a plain
+`%{python_module <name>}` or `%{python_module <name> <op> <version>}` is read
+as the macro expands it, `<flavor>-<name>` with its bound for each Python
+flavor (those `flavors.toml` lists, else the host's `%{pythons}`), and looked
+up by that binary name to choose dependencies; no build path is added for it.
+Another form (a macro in the name, a condition) stays not checked.
 
 With `--update-deps`, a dependency that the build will use from a project other
 than the source, the branch project, a distribution project (`openSUSE:`,
@@ -350,9 +356,9 @@ release (one request to PyPI per package, made only when a dependency has a
 newer release) is judged the same way, so a bound the release adds is seen on
 the first run; the stronger of the two decides. It only applies to a
 dependency the spec already names, found by its source package
-(`python-<name>`) or a `python3-<name>`-style name; one the spec requires as
-`%{python_module <name>}` is not looked up (see above), so the prediction
-cannot reach it (a known limit). Requirements for an extra, or with a marker
+(`python-<name>`), a `python3-<name>`-style name or a `%{python_module <name>}`
+read for the flavors (see above); a `%{python_module}` form that is not read
+stays out of reach (a known limit). Requirements for an extra, or with a marker
 false on Linux and CPython, are left out; a `python_version` marker is kept.
 When the metadata cannot be fetched or read, the run says so and decides from
 the spec. Other sources still decide from the spec as it is before the update.
