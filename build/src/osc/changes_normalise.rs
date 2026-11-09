@@ -274,7 +274,17 @@ pub(super) fn normalise_with_notes(
             }
         }
     }
-    let mut text = format!("{}\n", out.join("\n").trim_end());
+    let body = out.join("\n");
+    let body = body.trim_end();
+    // The branch's own trailing blank lines stay when the rewrite does not
+    // reach the end of the file; otherwise the file ends in one newline.
+    let branch_end = branch.trim_end();
+    let tail = if branch_end.lines().last() == body.lines().last() {
+        branch[branch_end.len()..].replace("\r\n", "\n")
+    } else {
+        "\n".to_string()
+    };
+    let mut text = format!("{body}{tail}");
     if branch.contains("\r\n") {
         text = text.replace('\n', "\r\n");
     }

@@ -469,3 +469,38 @@ fn a_crlf_merge_stays_crlf() {
     );
     assert!(!out.replace("\r\n", "").contains('\n'), "{out:?}");
 }
+
+/// An entry with a placeholder bullet (so the rewrite changes it), then `tail`
+/// after its own final newline: "" leaves one newline at the end of the file,
+/// "\n" one blank line, "\n\n" two.
+fn file_ending_with(tail: &str) -> String {
+    let body = "- Update to 1.1\n  * No upstream changelog found or provided\n- Fix the build";
+    format!("{}{tail}", entry(HEADER, body))
+}
+
+#[test]
+fn the_trailing_blank_lines_of_the_file_are_kept() {
+    let none = normalise_unpublished_entries("", &file_ending_with(""), "1.1", "pkg").unwrap();
+    assert!(none.ends_with("- Fix the build\n"), "{none:?}");
+    assert!(!none.ends_with("\n\n"), "{none:?}");
+
+    let one = normalise_unpublished_entries("", &file_ending_with("\n"), "1.1", "pkg").unwrap();
+    assert!(
+        one.contains("- Update to 1.1\n- Fix the build\n"),
+        "{one:?}"
+    );
+    assert!(one.ends_with("- Fix the build\n\n"), "{one:?}");
+    assert!(!one.ends_with("\n\n\n"), "{one:?}");
+
+    let two = normalise_unpublished_entries("", &file_ending_with("\n\n"), "1.1", "pkg").unwrap();
+    assert!(two.ends_with("- Fix the build\n\n\n"), "{two:?}");
+    assert!(!two.ends_with("\n\n\n\n"), "{two:?}");
+}
+
+#[test]
+fn a_crlf_file_keeps_its_trailing_blank_lines_as_crlf() {
+    let branch = file_ending_with("\n").replace('\n', "\r\n");
+    let out = normalise_unpublished_entries("", &branch, "1.1", "pkg").unwrap();
+    assert!(out.ends_with("- Fix the build\r\n\r\n"), "{out:?}");
+    assert!(!out.replace("\r\n", "").contains('\n'), "{out:?}");
+}
