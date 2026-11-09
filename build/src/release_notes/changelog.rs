@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+use super::markdown::strip_links;
+
 /// The changelog file names looked for at the top of the source tree, in the
 /// order they are preferred.
 const NAMES: &[&str] = &[
@@ -99,24 +101,36 @@ pub(super) fn section_between(changelog: &str, old: &str, new: &str) -> Option<S
     Some(section.chars().take(MAX_SECTION_CHARS).collect())
 }
 
+/// The text of `line` as a heading, without its links, or `None` when the line
+/// is a bullet or too long for a heading. A `#` heading may run longer.
+fn heading_text(line: &str) -> Option<String> {
+    let t = strip_links(line.trim());
+    let longest = if t.starts_with('#') { 200 } else { 80 };
+    let bullet = ["- ", "* ", "+ "].iter().any(|m| t.starts_with(m));
+    (t.len() <= longest && !bullet).then_some(t)
+}
+
 /// Whether `line` is a heading for `version`: a short line that names the
 /// version as a whole token (`## 3.3.0`, `Version 3.3.0 (2020-01-01)`,
-/// `v3.3.0:`), not a bullet that mentions it.
+/// `v3.3.0:`, `## [v3.3.0](url) - 2020-01-01`), not a bullet that mentions it.
 fn is_heading_of(line: &str, version: &str) -> bool {
-    let t = line.trim();
-    if t.len() > 80
-        || t.starts_with("- ")
-        || t.starts_with("* ")
-        || t.starts_with("+ ")
-        || version.is_empty()
-    {
+    let Some(t) = heading_text(line) else {
+        return false;
+    };
+    if version.is_empty() {
         return false;
     }
     let mut from = 0;
     while let Some(i) = t[from..].find(version) {
         let at = from + i;
         let end = at + version.len();
-        let before = t[..at].chars().next_back();
+        // In `v3.3.0` the `v` is a prefix, not a word before the version.
+        let head = &t[..at];
+        let head = match head.strip_suffix(['v', 'V']) {
+            Some(rest) if !rest.ends_with(char::is_alphanumeric) => rest,
+            _ => head,
+        };
+        let before = head.chars().next_back();
         let after = t[end..].chars().next();
         let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric());
         // `1.2` is not the heading of `1.2.3`, nor `2.3` of `12.3`.

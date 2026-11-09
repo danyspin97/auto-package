@@ -6,6 +6,7 @@
 //! links the release pages. A package with no notes says so.
 
 mod changelog;
+mod markdown;
 mod render;
 mod summarize;
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! Turning the notes of releases into the lines of a `.changes` recap: the
 //! bullets of the notes, cleaned, or the link-only form when they are too many.
 
+use super::markdown::strip_links;
 use crate::sources::RepoRelease;
 
 /// The most bullets a recap lists as they are; more are summarized.
@@ -79,18 +80,7 @@ pub(super) fn bullets_of(body: &str) -> Vec<String> {
 /// One bullet's text without markdown links, emphasis and code ticks, and
 /// without the "by @user in <url>" tail GitHub adds to generated notes.
 fn tidy(item: &str) -> String {
-    let mut s = item.to_string();
-    // [text](url) -> text
-    while let Some(open) = s.find('[') {
-        let Some(mid) = s[open..].find("](").map(|i| open + i) else {
-            break;
-        };
-        let Some(close) = s[mid..].find(')').map(|i| mid + i) else {
-            break;
-        };
-        let text = s[open + 1..mid].to_string();
-        s.replace_range(open..=close, &text);
-    }
+    let mut s = strip_links(item);
     for mark in ["**", "__", "`"] {
         s = s.replace(mark, "");
     }

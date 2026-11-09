@@ -143,6 +143,43 @@ Version 3.3.0 (2023-01-01)
         assert!(section_between("## 11.2\n- a\n## 0.9\n", "0.9", "1.2").is_none());
     }
 
+    const FAKER: &str = "\
+# Changelog
+
+### [v40.46.0 - 2026-11-09](https://github.com/joke2k/faker/compare/v40.45.0...v40.46.0)
+- Add a provider
+
+### [v40.44.0 - 2026-10-01](https://github.com/joke2k/faker/compare/v40.43.0...v40.44.0)
+- Old change
+";
+
+    #[test]
+    fn a_heading_with_a_link_and_a_v_prefix_is_the_heading() {
+        let got = section_between(FAKER, "40.44.0", "40.46.0").unwrap();
+        assert!(got.starts_with("### [v40.46.0"), "{got}");
+        assert!(got.contains("Add a provider"));
+        assert!(!got.contains("Old change"));
+        // A bullet that names the old version is not its heading.
+        assert_eq!(
+            section_between(
+                "### v40.46.0\n- moved from v40.44.0\n### v40.44.0\n",
+                "40.44.0",
+                "40.46.0"
+            )
+            .unwrap(),
+            "### v40.46.0\n- moved from v40.44.0"
+        );
+    }
+
+    #[test]
+    fn a_long_hash_heading_is_still_a_heading() {
+        let text = "## 40.46.0 (released 2026-11-09 after a long review by the project maintainers)\n- a\n## 40.44.0\n";
+        assert_eq!(
+            section_between(text, "40.44.0", "40.46.0").unwrap(),
+            text.lines().take(2).collect::<Vec<_>>().join("\n")
+        );
+    }
+
     #[test]
     fn the_new_version_must_be_listed_above_the_old_one() {
         assert!(section_between("## 3.3.0\n- a\n", "3.3.0", "3.4.0").is_none());
