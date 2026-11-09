@@ -205,6 +205,7 @@ static SOURCE_SERVICE: LazyLock<Regex> = LazyLock::new(|| {
 /// [`super::phase::segment`] over the same slice.
 pub fn locate(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> Option<Failure> {
     rpm_reported_failure(lines, spans, mapper)
+        .or_else(|| conflict::packaged_twice_failure(lines))
         .or_else(|| post_build_failure(lines, spans))
         .or_else(|| source_service_failure(lines))
         .or_else(|| bare_error_line(lines, spans, mapper))
@@ -215,6 +216,8 @@ const BY_RPM_REPORT: &str = "rpm-reported-failure";
 const BY_POST_BUILD: &str = "post-build-check";
 const BY_SOURCE_SERVICE: &str = "source-service";
 const BY_BARE_ERROR: &str = "bare-error-line";
+/// `50-check-packaged-twice`: one file in two subpackages (see [`conflict`]).
+const BY_PACKAGED_TWICE: &str = "packaged-twice";
 
 /// The common case: rpm names the script that failed, which names the section.
 fn rpm_reported_failure(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> Option<Failure> {
@@ -474,6 +477,9 @@ fn finish(kept: Vec<&str>, elided: usize, genre: Genre, phase: Phase, located_by
     }
 }
 
+mod conflict;
+#[cfg(test)]
+mod conflict_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
