@@ -372,6 +372,7 @@ fn a_failed_checkout_still_finishes_its_step() {
     // before running anything.
     let config = PipelineConfig {
         patch_provenance: false,
+        carried_recipe: false,
         pkg_name: "foo".into(),
         rpm_name: "python-foo".into(),
         version: "1.0".into(),
@@ -424,6 +425,7 @@ fn a_failed_checkout_still_finishes_its_step() {
 fn no_agent_reports_the_agent_skip_only_once() {
     let mut config = PipelineConfig {
         patch_provenance: false,
+        carried_recipe: false,
         pkg_name: "foo".into(),
         rpm_name: "python-foo".into(),
         version: "1.0".into(),

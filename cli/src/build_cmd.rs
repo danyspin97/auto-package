@@ -129,6 +129,7 @@ pub(crate) fn cmd_build(
 
     let config = PipelineConfig {
         patch_provenance: branch.is_some_and(|b| b.improve.is_some() || b.update),
+        carried_recipe: branch.is_some_and(|b| b.update),
         pkg_name: name.to_string(),
         rpm_name: rpm_name.clone(),
         version: version.clone(),

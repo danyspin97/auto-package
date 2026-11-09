@@ -170,6 +170,7 @@ pub(super) fn resolve_dependency_config(
                 ap_core::diag!("  queuing missing dependency: {rpm_name} (NVIDIA {version})");
                 Some(PipelineConfig {
                     patch_provenance: false,
+                    carried_recipe: false,
                     pkg_name: dep.to_string(),
                     rpm_name,
                     version,
@@ -211,6 +212,7 @@ pub(super) fn resolve_dependency_config(
             );
             return Some(PipelineConfig {
                 patch_provenance: false,
+                carried_recipe: false,
                 pkg_name: dep.to_string(),
                 rpm_name: ap_build::osc::rpm_name(dep),
                 version,
@@ -337,6 +339,7 @@ pub(super) fn resolve_dependency_config(
             );
             return Some(PipelineConfig {
                 patch_provenance: false,
+                carried_recipe: false,
                 pkg_name: effective_name,
                 rpm_name: dep_rpm,
                 version,

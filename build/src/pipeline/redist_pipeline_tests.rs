@@ -61,6 +61,7 @@ fn a_generated_redist_spec_is_not_reviewed() {
 fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {
     PipelineConfig {
         patch_provenance: false,
+        carried_recipe: false,
         pkg_name: pkg.into(),
         rpm_name: osc::rpm_name(pkg),
         version: version.into(),

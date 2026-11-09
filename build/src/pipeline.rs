@@ -59,6 +59,12 @@ pub struct PipelineConfig {
     /// Set by `lint` and `update`: check the upstream state of the carried
     /// patches that are upstream requests, and act on it (`patch_provenance`).
     pub patch_provenance: bool,
+    /// The package's existing recipe is carried forward to a new version: a
+    /// bumped dependency, or the package of an update (`update`). Set for a
+    /// package whose spec existed before the run. Unlike `update`, a dependency
+    /// has it: the origin's spec is read for the problems the origin already
+    /// has, which are reported and not fixed (see `carried_origin`).
+    pub carried_recipe: bool,
     /// For an update of the package (`update`): the `Version:` the OBS branch
     /// was at when the update was planned. The checkout's spec must be at it
     /// before the first agent turn. `None` for every other run.

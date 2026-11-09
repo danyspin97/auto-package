@@ -334,6 +334,7 @@ pub(super) fn package_config(
     };
     PipelineConfig {
         patch_provenance: false,
+        carried_recipe: false,
         pkg_name: pkg_name.to_string(),
         rpm_name: rpm_name.to_string(),
         version: version.to_string(),
@@ -352,6 +353,7 @@ mod tests {
     fn root() -> PipelineConfig {
         PipelineConfig {
             patch_provenance: false,
+            carried_recipe: false,
             pkg_name: "cagebreak".into(),
             rpm_name: "cagebreak".into(),
             version: "3.2.1".into(),
@@ -420,6 +422,7 @@ mod tests {
         }));
         let config = PipelineConfig {
             patch_provenance: false,
+            carried_recipe: false,
             bug_fix: Some(task),
             ..root()
         };

@@ -34,6 +34,7 @@ pub(crate) fn as_dependency(config: &PipelineConfig) -> PipelineConfig {
         branch_version: None,
         // Root only: the checks of the root package's own patches.
         patch_provenance: false,
+        carried_recipe: false,
         // Root only: the root's repository, tag and monorepo directories. A
         // dependency is found by its own name.
         source_repo: None,
@@ -92,6 +93,8 @@ pub(crate) fn outdated_config(
         source_repo,
         force: true,
         regen: false,
+        // A bump keeps the recipe the dependency already has.
+        carried_recipe: true,
         ..as_dependency(config)
     }
 }
@@ -119,6 +122,7 @@ mod tests {
             regen: false,
             update: true,
             patch_provenance: true,
+            carried_recipe: true,
             branch_version: Some("6.20.0".into()),
             source_repo: Some("https://github.com/pyinstaller/pyinstaller".into()),
             upstream_tag: Some("v6.21.0".into()),
@@ -171,6 +175,7 @@ mod tests {
         assert_eq!(c.source_repo, repo);
         assert!(c.upstream_tag.is_none() && c.subprojects.is_empty());
         assert!(c.patch_request.is_none());
+        assert!(c.carried_recipe, "a bumped dependency carries its recipe");
     }
 
     #[test]
@@ -178,6 +183,7 @@ mod tests {
         let c = as_dependency(&root());
         assert_no_root_fields(&c);
         assert!(c.source_repo.is_none() && c.patch_request.is_none());
+        assert!(!c.carried_recipe, "a dependency is not a carried recipe");
         assert_eq!(c.run_id, "test");
     }
 
