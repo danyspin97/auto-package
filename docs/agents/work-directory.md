@@ -15,7 +15,9 @@ version was chosen, the outcome and the last build-log errors, every attempt
 cost, time), flaky-test verdicts, cost against the budget, the warnings that
 mattered, the package notes, and a list of what it cannot tell. `--run` picks
 an older run (default: the latest run that touched the package); `--json` is
-the same data for `jq`. In the TUI, `e` on a row shows the same report.
+the same data for `jq`. The report counts a package's tries (its builds started
+in the run). Without a package, `auto-package explain --run <id>` lists the tries
+of every package of the run. In the TUI, `e` on a row shows the same report.
 Use the recipes below only for what it does not answer.
 
 ## Layout
@@ -160,6 +162,8 @@ Recipes (`R=$P/runs/<run>/run.jsonl`, `K=<pkg>`):
 
     # how it ended
     jq -c 'select(.pkg==env.K and .event=="package_finished")' $R
+    # tries: builds started per package in the run (`explain --run <id>` shows them all)
+    jq -r 'select(.event=="step_started" and .kind=="Build")|.pkg' $R | sort | uniq -c | sort -rn
     # why did it fail: failed steps, then the log tail
     jq -c 'select(.pkg==env.K and .event=="step_finished" and .outcome=="Failed")' $R
     jq -r 'select(.pkg==env.K and .event=="build_failed")|.log' $R | tail -1 | xargs tail -60
