@@ -422,6 +422,9 @@ pub(crate) use patch_rules::{
 };
 pub(crate) use patch_rules_content::source_only_problems;
 pub(crate) use patch_rules_spec::spec_route_problems;
+mod patch_block_quilt;
+#[cfg(test)]
+mod patch_block_quilt_tests;
 mod patch_delta;
 #[cfg(test)]
 mod patch_delta_tests;

@@ -5,9 +5,9 @@ use super::*;
 use crate::agent::{Action, PatchReviewAnswer, PatchReviewVerdict as V};
 
 /// A patch that does not apply in the fake check.
-const OLD: &str = "Subject: s\nDescription: d\nUpstream: not yet reported\n---\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-x\n+old\n";
+pub(super) const OLD: &str = "Subject: s\nDescription: d\nUpstream: not yet reported\n---\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-x\n+old\n";
 /// What a rebase makes of it: the code changed, and the fake check applies it.
-const REBASED: &str = "Subject: s\nDescription: d\nUpstream: not yet reported\n---\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-x\n+clean\n";
+pub(super) const REBASED: &str = "Subject: s\nDescription: d\nUpstream: not yet reported\n---\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-x\n+clean\n";
 /// What a reviewer makes of the rebase.
 const BETTER: &str = "Subject: s\nDescription: d\nUpstream: not yet reported\n---\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n-x\n+clean\n+extra\n";
 
@@ -37,7 +37,7 @@ fn rebase(
 
 /// A run whose agent turns come from `agent` and review turns from `reviews`
 /// (each given the checkout and the review's context).
-fn reviewed(
+pub(super) fn reviewed(
     patches: &[(&str, &str)],
     agent: Vec<Script>,
     mut reviews: Vec<Box<dyn FnMut(&Path, &str) -> Reply>>,
@@ -64,11 +64,11 @@ fn reviewed(
     )
 }
 
-fn reply(verdict: V, reason: &'static str) -> Box<dyn FnMut(&Path, &str) -> Reply> {
+pub(super) fn reply(verdict: V, reason: &'static str) -> Box<dyn FnMut(&Path, &str) -> Reply> {
     Box::new(move |_, _| Ok(said(verdict, reason)))
 }
 
-fn read(case: &Case, name: &str) -> String {
+pub(super) fn read(case: &Case, name: &str) -> String {
     std::fs::read_to_string(case.checkout.join(name)).unwrap()
 }
 
@@ -430,40 +430,6 @@ fn a_stop_restores_every_rewritten_patch_the_review_did_not_reach() {
     assert_eq!(read(&case, "a.patch"), OLD);
     assert_eq!(read(&case, "b.patch"), OLD);
     assert!(!case.rerun_refused);
-}
-
-#[test]
-fn a_blocked_patch_with_a_clean_check_still_restores_the_unreviewed_rewrite() {
-    let blocked: Script = Box::new(|co, _| {
-        std::fs::write(co.join("a.patch"), REBASED).unwrap();
-        let mut out = outcome(Action::Edited, "Refresh a.patch");
-        for (name, status) in [
-            ("a.patch", crate::agent::PatchAnswerStatus::Rebased),
-            ("b.patch", crate::agent::PatchAnswerStatus::Blocked),
-        ] {
-            out.patch_answers.push(crate::agent::PatchAnswer {
-                name: name.into(),
-                status,
-                reason: "r".into(),
-            });
-        }
-        out
-    });
-    let case = reviewed(
-        &[("a.patch", OLD), ("b.patch", "clean")],
-        vec![blocked],
-        vec![],
-    );
-    assert!(case.result.is_err(), "{:?}", case.result);
-    assert!(
-        case.reviews.is_empty(),
-        "the blocked patch ends the package first"
-    );
-    assert_eq!(
-        read(&case, "a.patch"),
-        OLD,
-        "an unreviewed rewrite does not stay"
-    );
 }
 
 #[test]

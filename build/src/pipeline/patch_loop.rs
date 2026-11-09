@@ -1,5 +1,6 @@
 //! The patch loop: the patch stage with its turns.
 
+use super::patch_block_quilt::drop_blocks_quilt_clears;
 use super::*;
 use crate::pipeline::agent::*;
 use crate::pipeline::patch_check::*;
@@ -253,6 +254,7 @@ fn patch_stage_inner(
                     refreshed.extend(kept);
                     pop_source_patches(ctx);
                     let report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
+                    drop_blocks_quilt_clears(&mut blocked, &report, &mut lines);
                     // The rounds before this one keep their refreshed patches.
                     write_refresh_bullets(ctx, step_id, &refreshed);
                     let failing: Vec<&crate::patch_check::PatchResult> = report.failing().collect();
@@ -333,6 +335,7 @@ fn patch_stage_inner(
                 next.summary()
             ));
             report = next;
+            drop_blocks_quilt_clears(&mut blocked, &report, &mut lines);
             if stalled {
                 break format!(
                     "round {rounds} blocked every remaining patch and changed no file, so \
@@ -370,6 +373,7 @@ fn patch_stage_inner(
                             feedback = Some(why);
                             review_rejected = true;
                             report = check_and_settle(ctx, step_id, &mut lines, check, Refresh::No);
+                            drop_blocks_quilt_clears(&mut blocked, &report, &mut lines);
                         }
                     }
                 }
@@ -402,7 +406,9 @@ fn patch_stage_inner(
     }
     // What still fails is kept, never dropped: the package stops for a human.
     let failing: Vec<&crate::patch_check::PatchResult> = report.failing().collect();
-    // A patch the agent blocked ends the package too, whatever quilt says.
+    // A patch the agent blocked ends the package too, whatever quilt says, unless
+    // quilt shows it applies cleanly.
+    drop_blocks_quilt_clears(&mut blocked, &report, &mut lines);
     if !failing.is_empty() || !blocked.is_empty() {
         for p in &failing {
             lines.push(format!("- {}: still does not apply; kept ({stop})", p.name));

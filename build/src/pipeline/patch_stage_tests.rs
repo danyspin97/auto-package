@@ -1,6 +1,7 @@
 use super::*;
 use crate::patch_check::{CheckReport, PatchResult, PatchStatus, Refresh};
 
+mod blocked_quilt;
 mod disabled;
 mod new_patches;
 mod part2;
