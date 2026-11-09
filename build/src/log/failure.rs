@@ -63,6 +63,16 @@ pub enum Genre {
     Unknown,
 }
 
+impl Failure {
+    /// Whether the failure is a post-build check on the RPMs rpmbuild wrote,
+    /// and not a section that failed: rpm's own file-list check and the OBS
+    /// `50-check-*` scripts both report under this genre, but a section's
+    /// `Bad exit status` (the `%check` of a failing test run, say) does not.
+    pub fn is_post_build_check(&self) -> bool {
+        self.genre == Genre::PostBuildCheck && self.located_by != BY_RPM_REPORT
+    }
+}
+
 impl Genre {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -212,7 +222,7 @@ pub fn locate(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> Option<Fai
 }
 
 /// Names of the strategies in [`locate`], in the order they are tried.
-const BY_RPM_REPORT: &str = "rpm-reported-failure";
+pub(crate) const BY_RPM_REPORT: &str = "rpm-reported-failure";
 const BY_POST_BUILD: &str = "post-build-check";
 const BY_SOURCE_SERVICE: &str = "source-service";
 const BY_BARE_ERROR: &str = "bare-error-line";

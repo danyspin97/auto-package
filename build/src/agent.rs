@@ -36,6 +36,7 @@ pub(crate) use user_prompt::*;
 mod build_prompt;
 mod extra_item_text;
 mod fix_after_build_text;
+mod post_build_lead;
 use extra_item_text::*;
 use fix_after_build_text::*;
 mod fix_bug_text;

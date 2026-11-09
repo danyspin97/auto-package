@@ -1,6 +1,7 @@
 //! The user prompt of a turn, assembled from the request: the task, the
 //! workspace map, the failure hint, the dependency sections and the notes.
 
+use super::post_build_lead::post_build_lead;
 use super::*;
 
 pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
@@ -245,7 +246,9 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
     let context_section = format!("{context_section}{}", entry_section(req));
 
     let hint_section = if let Some(hint) = req.hint {
-        let mut s = String::new();
+        // A post-build check failure says so before anything else: the excerpt
+        // is then the check's complaint, and the tests above it passed.
+        let mut s = post_build_lead(hint).unwrap_or_default();
         // Lead with the mechanically-recognised cause, if any, so the agent
         // acts on it instead of re-deriving it from the log.
         let spec_text = std::fs::read_to_string(req.workspace.join("spec")).unwrap_or_default();
