@@ -295,23 +295,36 @@ pub fn fix_c_extension_arch(spec: &str) -> String {
 /// a `%python_expand` block, which binds `$python` per flavor — outside one
 /// they silently expand to `%{}` instead of failing loudly, so the bug only
 /// surfaces at actual install/build time (observed on python-nvidia-nvtx: a
-/// bare `chmod %{$python_sitelib}/...` line). Every real usage in this
-/// ecosystem's specs is single-line (`%python_expand <command...>`), so
-/// prefixing the whole line is sufficient; comment lines are left alone, and so
-/// are continuation lines (after a trailing `\`), which already belong to the
-/// command their first line started.
+/// bare `chmod %{$python_sitelib}/...` line). A reference is bare when no
+/// `%{` macro encloses it, so a reference inside a `%{python_expand ...}`
+/// block is left alone however many lines the block spans (the opener and
+/// the closing `}` may be on other lines). A bare reference gets its whole
+/// line prefixed, which is enough for the single-line `%python_expand
+/// <command...>` form. Comment lines are left alone, and so are continuation
+/// lines (after a trailing `\`), which already belong to the command their
+/// first line started.
 pub fn fix_stray_dollar_macros(spec: &str) -> String {
     let mut continued = false;
+    let mut depth = 0;
     let out: Vec<String> = spec
         .lines()
         .map(|line| {
             let is_continuation =
                 std::mem::replace(&mut continued, line.trim_end().ends_with('\\'));
             let trimmed = line.trim_start();
-            if is_continuation
+            let inside_block = depth > 0;
+            let bare = if trimmed.starts_with('#') {
+                false
+            } else {
+                let (next, bare) = scan_macro_braces(line, depth);
+                depth = next;
+                bare
+            };
+            if inside_block
+                || is_continuation
                 || trimmed.starts_with('#')
                 || trimmed.contains("%python_expand")
-                || !trimmed.contains("%{$")
+                || !bare
             {
                 return line.to_string();
             }
@@ -320,6 +333,32 @@ pub fn fix_stray_dollar_macros(spec: &str) -> String {
         })
         .collect();
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
+}
+
+/// The macro brace depth after `line`, starting from `depth`, and whether the
+/// line holds a `%{$...}` reference that no enclosing `%{` encloses. `%{`
+/// opens a macro, `}` closes one; the `%{` of the reference itself does not
+/// count as its enclosure.
+fn scan_macro_braces(line: &str, mut depth: usize) -> (usize, bool) {
+    let bytes = line.as_bytes();
+    let mut bare = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"%{$") {
+            bare |= depth == 0;
+            depth += 1;
+            i += 3;
+        } else if bytes[i..].starts_with(b"%{") {
+            depth += 1;
+            i += 2;
+        } else {
+            if bytes[i] == b'}' {
+                depth = depth.saturating_sub(1);
+            }
+            i += 1;
+        }
+    }
+    (depth, bare)
 }
 
 /// Put the parentheses RPM needs around a conditional dependency.

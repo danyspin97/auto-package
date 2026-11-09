@@ -151,6 +151,9 @@ mod pytest_use_tests;
 mod console_script_tests;
 
 #[cfg(test)]
+mod dollar_macro_block_tests;
+
+#[cfg(test)]
 mod check_probe_tests;
 mod deps;
 pub use deps::*;
