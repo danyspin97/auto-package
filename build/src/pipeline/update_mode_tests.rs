@@ -297,7 +297,7 @@ mod tidy_on_update {
     #[test]
     fn an_update_keeps_the_order_the_origin_chose() {
         // Only the version macro changes (see the test below): the order stays.
-        let kept = normalize_spec_text(CHECK_AFTER_FILES, true);
+        let kept = normalize_spec_text(CHECK_AFTER_FILES, true, None, None);
         assert_eq!(
             kept,
             CHECK_AFTER_FILES.replace("foo-2.0.tar.gz", "foo-%{version}.tar.gz")
@@ -306,7 +306,7 @@ mod tidy_on_update {
 
     #[test]
     fn a_new_spec_still_gets_the_section_order() {
-        let moved = normalize_spec_text(CHECK_AFTER_FILES, false);
+        let moved = normalize_spec_text(CHECK_AFTER_FILES, false, None, None);
         assert_ne!(moved, CHECK_AFTER_FILES);
         let check = moved.find("\n%check").expect("a %check");
         let files = moved.find("\n%files").expect("a %files");
@@ -317,16 +317,77 @@ mod tidy_on_update {
     fn an_update_fixes_a_requires_written_after_the_subpackages_it_belongs_to() {
         // A dependency tag after `%python_subpackages` attaches to the wrong
         // subpackage: an edit of this version is fixed on an update too.
-        let kept = normalize_spec_text(SUBPACKAGE_REQUIRES, true);
+        let kept = normalize_spec_text(SUBPACKAGE_REQUIRES, true, None, None);
         let tag = kept.find("Requires: python-bar").expect("the tag");
         let sub = kept.find("%python_subpackages").expect("the subpackages");
         assert!(tag < sub, "{kept}");
     }
 
+    /// A source tree whose tests do not import pytest.
+    fn plain_tests() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::write(
+            dir.path().join("tests/test_core.py"),
+            "import unittest
+",
+        )
+        .unwrap();
+        dir
+    }
+
+    /// `UNUSED_PYTEST` with its `%check` running unittest instead, as python-confuse
+    /// and python-arabic-reshaper did.
+    fn pyunittest_check(pytest_tag: &str) -> String {
+        UNUSED_PYTEST
+            .replace("%python_expand $python -c 'import foo'", "%pyunittest -v")
+            .replace("BuildRequires: %{python_module pytest}", pytest_tag)
+    }
+
     #[test]
     fn an_update_drops_a_pytest_build_requires_its_check_does_not_use() {
-        let kept = normalize_spec_text(UNUSED_PYTEST, true);
+        let source = plain_tests();
+        let kept = normalize_spec_text(UNUSED_PYTEST, true, None, Some(source.path()));
         assert!(!kept.contains("%{python_module pytest}"), "{kept}");
+    }
+
+    #[test]
+    fn a_pyunittest_check_keeps_pytest_when_the_tests_import_it() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("tests")).unwrap();
+        std::fs::write(
+            source.path().join("tests/test_core.py"),
+            "import pytest
+",
+        )
+        .unwrap();
+        let spec = pyunittest_check("BuildRequires: %{python_module pytest}");
+        let kept = normalize_spec_text(&spec, true, None, Some(source.path()));
+        assert!(
+            kept.contains("BuildRequires: %{python_module pytest}"),
+            "{kept}"
+        );
+    }
+
+    #[test]
+    fn a_pytest_line_the_origin_has_is_kept_though_nothing_uses_it() {
+        let source = plain_tests();
+        let spec = pyunittest_check("BuildRequires: %{python_module pytest}");
+        let kept = normalize_spec_text(&spec, true, Some(&spec), Some(source.path()));
+        assert!(
+            kept.contains("BuildRequires: %{python_module pytest}"),
+            "{kept}"
+        );
+    }
+
+    #[test]
+    fn a_pytest_line_no_source_can_show_is_kept() {
+        let spec = pyunittest_check("BuildRequires: %{python_module pytest}");
+        let kept = normalize_spec_text(&spec, true, None, None);
+        assert!(
+            kept.contains("BuildRequires: %{python_module pytest}"),
+            "{kept}"
+        );
     }
 
     /// The obsolete constructs `lint` removes from an existing spec, all in one.
@@ -342,7 +403,7 @@ mod tidy_on_update {
     fn an_update_leaves_the_obsolete_constructs_for_lint() {
         // The hygiene passes of `lint` are not in the update's normalisation:
         // an update keeps the maintainer's recipe (convention 86).
-        let kept = normalize_spec_text(OBSOLETE, true);
+        let kept = normalize_spec_text(OBSOLETE, true, None, None);
         for construct in [
             "Group: Development/Tools",
             "BuildRoot: %{_tmppath}/%{name}",

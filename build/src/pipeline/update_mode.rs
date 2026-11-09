@@ -132,11 +132,22 @@ pub(super) struct UpdateMode {
 ///   `add_noarch_to_pure_python` (the architecture the origin chose),
 ///   `drop_unneeded_wheel_build_requires` (a build dependency that is not needed,
 ///   only slower to build).
-pub(super) fn normalize_spec_text(current: &str, update: bool) -> String {
+///
+/// `origin` is the origin's spec on an update and `source` the unpacked sources,
+/// `None` when they are not there yet.
+pub(super) fn normalize_spec_text(
+    current: &str,
+    update: bool,
+    origin: Option<&str>,
+    source: Option<&Path>,
+) -> String {
     let fixed = crate::spec::normalize_python_module_versions(current);
     let fixed = crate::spec::fix_stray_dollar_macros(&fixed);
     let fixed = crate::spec::fix_missing_alternatives_requires(&fixed);
-    let fixed = crate::spec::drop_unused_pytest_build_requires(&fixed);
+    let pytest_needed = origin
+        .is_some_and(|o| o.lines().any(crate::spec::is_pytest_build_requires))
+        || source.is_none_or(crate::spec::tests_may_need_pytest);
+    let fixed = crate::spec::drop_unused_pytest_build_requires(&fixed, pytest_needed);
     let fixed = if update {
         fixed
     } else {

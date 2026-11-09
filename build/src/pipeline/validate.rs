@@ -48,7 +48,10 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
     // outside `%python_expand`; `%python_install_alternative` without
     // its `Requires(post/postun): update-alternatives`).
     if let Ok(current) = std::fs::read_to_string(spec_path) {
-        let fixed = normalize_spec_text(&current, st.update.is_some());
+        let unpacked = ws.dir().join("source");
+        let origin = st.update.as_ref().and_then(|u| u.origin_spec.as_deref());
+        let source = unpacked.is_dir().then_some(unpacked.as_path());
+        let fixed = normalize_spec_text(&current, st.update.is_some(), origin, source);
         // Bounds a distro package's newer release misses are dropped (the
         // dependency stays); see `relaxed_dependencies`.
         let mut fixed = fixed;

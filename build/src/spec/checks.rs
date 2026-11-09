@@ -454,30 +454,34 @@ pub fn auto_fixture_source(
     add_fixture_source(spec, &url, version, &dirs)
 }
 
+/// Whether `line` is the `BuildRequires: %{python_module pytest}` tag.
+pub fn is_pytest_build_requires(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with("BuildRequires:")
+        && t.trim_start_matches("BuildRequires:")
+            .split_whitespace()
+            .eq(["%{python_module", "pytest}"])
+}
+
 /// Drop the `python-pytest` BuildRequires of a spec whose `%check` never runs
 /// pytest (an import smoke test): the dependency only slows the build and
-/// pulls plugins in. A spec with no `%check` section, or one that mentions
-/// pytest, is left alone.
-pub fn drop_unused_pytest_build_requires(spec: &str) -> String {
+/// pulls plugins in. `needed` says the line is still wanted: the unpacked
+/// tests import pytest, or the origin spec already has the line. A spec with
+/// no `%check` section, or one that mentions pytest, is left alone.
+pub fn drop_unused_pytest_build_requires(spec: &str, needed: bool) -> String {
     let check = check_section(spec);
-    if check.is_empty()
+    if needed
+        || check.is_empty()
         || check
             .iter()
             .any(|l| !l.trim_start().starts_with('#') && l.contains("pytest"))
     {
         return spec.to_string();
     }
-    let mut out: Vec<&str> = Vec::new();
-    for line in spec.lines() {
-        let t = line.trim();
-        let is_pytest = t.starts_with("BuildRequires:")
-            && t.trim_start_matches("BuildRequires:")
-                .split_whitespace()
-                .eq(["%{python_module", "pytest}"]);
-        if !is_pytest {
-            out.push(line);
-        }
-    }
+    let out: Vec<&str> = spec
+        .lines()
+        .filter(|line| !is_pytest_build_requires(line))
+        .collect();
     out.join("\n") + if spec.ends_with('\n') { "\n" } else { "" }
 }
 

@@ -99,6 +99,8 @@ mod expand_order_tests;
 
 mod arch_tags;
 mod checks;
+mod pytest_use;
+pub use pytest_use::*;
 mod placeholders;
 pub use placeholders::*;
 mod upstream_tag;
@@ -142,6 +144,8 @@ mod sharp_edge_tests;
 
 #[cfg(test)]
 mod check_quality_tests;
+#[cfg(test)]
+mod pytest_use_tests;
 
 #[cfg(test)]
 mod console_script_tests;

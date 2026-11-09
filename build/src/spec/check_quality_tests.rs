@@ -20,11 +20,11 @@ fn many_ignores_are_flagged_and_few_are_not() {
 #[test]
 fn pytest_is_dropped_only_when_check_does_not_run_it() {
     let import = "BuildRequires:  %{python_module pytest}\nBuildRequires:  %{python_module pytest-xdist}\n%check\n%python_expand $python -c 'import x'\n\n%files\n";
-    let out = drop_unused_pytest_build_requires(import);
+    let out = drop_unused_pytest_build_requires(import, false);
     assert!(!out.contains("module pytest}"), "{out}");
     assert!(out.contains("pytest-xdist"));
     let runs = "BuildRequires:  %{python_module pytest}\n%check\n%pytest\n";
-    assert_eq!(drop_unused_pytest_build_requires(runs), runs);
+    assert_eq!(drop_unused_pytest_build_requires(runs, false), runs);
     let none = "BuildRequires:  %{python_module pytest}\n%files\n";
-    assert_eq!(drop_unused_pytest_build_requires(none), none);
+    assert_eq!(drop_unused_pytest_build_requires(none, false), none);
 }
