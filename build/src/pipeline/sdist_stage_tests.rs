@@ -1,6 +1,8 @@
 use super::*;
 use crate::pipeline::archive::find_sdist_top_level;
-use crate::pipeline::sdist_stage::{fetch_sdist_stage, unpacked_top_level};
+use crate::pipeline::sdist_stage::{
+    UNPACKED_SOURCE_MISSING, fetch_sdist_stage, unpacked_source_missing, unpacked_top_level,
+};
 
 /// Discards every event.
 struct Quiet;
@@ -85,10 +87,15 @@ fn an_empty_name_is_a_flat_unpack_and_stays_empty() {
     assert_eq!(unpacked_top_level(dir.path(), ""), "");
 }
 
-/// Runs the sdist stage on a checkout whose `AMQPStorm-1.0.tar.gz` holds
-/// `entries`, starting from the top-level name `hint`. Returns the run's
-/// temporary root, the workspace directory and the top-level name it ends with.
-fn fetch(entries: &[&str], hint: &str) -> (tempfile::TempDir, PathBuf, String) {
+/// Runs `f` on a checkout whose `AMQPStorm-1.0.tar.gz` holds `entries` (no
+/// tarball for `None`), with `_service` set to `service` when it is not empty,
+/// and the top-level name `hint`. The run's directories live for the call.
+fn with_checkout<R>(
+    entries: Option<&[&str]>,
+    hint: &str,
+    service: &str,
+    f: impl FnOnce(&RunCtx, &mut RunState) -> R,
+) -> R {
     let root = tempfile::tempdir().unwrap();
     let work = root.path().join("work");
     let state_root = work.join("state");
@@ -97,13 +104,17 @@ fn fetch(entries: &[&str], hint: &str) -> (tempfile::TempDir, PathBuf, String) {
     config.version = "1.0".into();
     let checkout = work.join("p/foo");
     std::fs::create_dir_all(&checkout).unwrap();
-    tarball(&checkout.join("AMQPStorm-1.0.tar.gz"), entries);
+    if let Some(entries) = entries {
+        tarball(&checkout.join("AMQPStorm-1.0.tar.gz"), entries);
+    }
+    if !service.is_empty() {
+        std::fs::write(checkout.join("_service"), service).unwrap();
+    }
     let spec_path = checkout.join("foo.spec");
     std::fs::write(&spec_path, "Name: foo\nVersion: 1.0\n").unwrap();
     let run = ap_core::run::RunDir::allocate(&work).unwrap();
     let pkg_run = run.pkg("foo");
     let ws = Workspace::open(&state_root, "foo").unwrap();
-    let ws_dir = ws.dir().to_path_buf();
     let ctx = RunCtx {
         config: &config,
         pkg_run: &pkg_run,
@@ -134,21 +145,73 @@ fn fetch(entries: &[&str], hint: &str) -> (tempfile::TempDir, PathBuf, String) {
         update: None,
         carried: None,
     };
-    fetch_sdist_stage(&ctx, &mut st, false).unwrap_or_else(|_| panic!("the stage fails"));
-    (root, ws_dir, st.sdist_top_level)
+    f(&ctx, &mut st)
 }
 
 #[test]
 fn the_source_link_follows_the_archive_directory() {
-    let (_root, ws_dir, top) = fetch(&["amqpstorm-1.0/x"], "AMQPStorm-1.0");
-    assert_eq!(top, "amqpstorm-1.0");
-    let link = ws_dir.join("source");
-    assert!(link.join("x").exists(), "source/ links the unpacked tree");
+    with_checkout(
+        Some(&["amqpstorm-1.0/x"]),
+        "AMQPStorm-1.0",
+        "",
+        |ctx, st| {
+            fetch_sdist_stage(ctx, st, false).unwrap_or_else(|_| panic!("the stage fails"));
+            assert_eq!(st.sdist_top_level, "amqpstorm-1.0");
+            let link = ctx.ws.dir().join("source");
+            assert!(link.join("x").exists(), "source/ links the unpacked tree");
+        },
+    );
 }
 
 #[test]
 fn a_tarball_with_several_top_entries_gets_no_link_to_a_guess() {
-    let (_root, ws_dir, top) = fetch(&["amqpstorm-1.0/x", "docs/y"], "AMQPStorm-1.0");
-    assert_eq!(top, "AMQPStorm-1.0");
-    assert!(ws_dir.join("source").symlink_metadata().is_err());
+    with_checkout(
+        Some(&["amqpstorm-1.0/x", "docs/y"]),
+        "AMQPStorm-1.0",
+        "",
+        |ctx, st| {
+            // No link is made, and the stage says so once instead of letting
+            // every patch round fail on it.
+            match fetch_sdist_stage(ctx, st, false) {
+                Err(PipelineResult::Failed { reason, .. }) => {
+                    assert_eq!(reason, UNPACKED_SOURCE_MISSING);
+                }
+                _ => panic!("the stage must stop"),
+            }
+            assert_eq!(st.sdist_top_level, "AMQPStorm-1.0");
+            assert!(ctx.ws.dir().join("source").symlink_metadata().is_err());
+        },
+    );
+}
+
+#[test]
+fn a_tarball_without_its_link_is_a_pipeline_fault() {
+    with_checkout(
+        Some(&["amqpstorm-1.0/x"]),
+        "AMQPStorm-1.0",
+        "",
+        |ctx, st| {
+            assert!(unpacked_source_missing(ctx), "no source/ yet");
+            fetch_sdist_stage(ctx, st, false).unwrap_or_else(|_| panic!("the stage fails"));
+            assert!(!unpacked_source_missing(ctx), "the stage made the link");
+        },
+    );
+}
+
+#[test]
+fn a_source_the_pipeline_does_not_unpack_is_not_a_fault() {
+    // No tarball at all.
+    with_checkout(None, "AMQPStorm-1.0", "", |ctx, _| {
+        assert!(!unpacked_source_missing(ctx));
+    });
+    // A source OBS makes at build time has no tarball to unpack.
+    let service = "<services><service name=\"obs_scm\" mode=\"buildtime\"/></services>\n";
+    with_checkout(
+        Some(&["amqpstorm-1.0/x"]),
+        "AMQPStorm-1.0",
+        service,
+        |ctx, _| {
+            assert!(!unpacked_source_missing(ctx));
+        },
+    );
 }

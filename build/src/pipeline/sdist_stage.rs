@@ -131,8 +131,30 @@ pub(super) fn fetch_sdist_stage(
             let _ = std::fs::remove_file(&source_link);
         }
     }
+    // Every patch round works in this link: a checkout whose tarball is there
+    // but whose link is not is stopped here, once, not in each round.
+    if unpacked_source_missing(ctx) {
+        return Err(ctx.failed(UNPACKED_SOURCE_MISSING.into()));
+    }
     Ok(())
 }
+
+/// Whether the checkout's source should be unpacked at `ws.dir()/source` and
+/// is not: the package has a tarball to unpack (not an OBS-made or redistributed
+/// source), but no `source/` link (a dangling one counts as missing). A patch
+/// round works in that link, so a missing one is a fault of the pipeline.
+pub(super) fn unpacked_source_missing(ctx: &RunCtx) -> bool {
+    if source_made_at_build_time(&ctx.checkout_dir)
+        || crate::redist::is_redist_package(&ctx.config.rpm_name)
+        || find_tarball(&ctx.checkout_dir, &ctx.config.version).is_none()
+    {
+        return false;
+    }
+    !ctx.ws.dir().join("source").exists()
+}
+
+/// The reason a patch round gives when [`unpacked_source_missing`] holds.
+pub(super) const UNPACKED_SOURCE_MISSING: &str = "internal: the unpacked source link is missing";
 
 /// The directory an extraction into `sdist_dir` is named by: `hint` when it
 /// exists, else the one entry the extraction holds when that is a single
