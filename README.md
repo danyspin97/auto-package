@@ -171,8 +171,9 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
   origin's `Provides:` gives it, when the search read one, and with the source
   package's version otherwise. The updated side is the new source version,
   since the new provide is only known once it is built. Epochs compare as RPM
-  does: a bound without one ignores the provide's epoch. The source package's
-  own `Epoch:` is not read, so it counts as 0 (known limits).
+  does, a missing epoch counting as 0: `1:1.2.3` does not meet `= 1.2.3`, but
+  meets `>= 2.0`. The source package's own `Epoch:` is not read, so it counts
+  as 0 (known limits).
 - `--min-free-gb`: as for `build` (default: 3, 0 = off).
 - `--local`, `--local-root`, `--local-min-free-gib`: as for `build`; `--local` cannot be combined with `--submit` or `--maintenance`.
 - `--nvidia <wheel|redist>` / `--nvidia-redist`: as for `build` (default: `wheel`, or what the work directory last used).

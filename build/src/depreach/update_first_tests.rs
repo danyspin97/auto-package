@@ -263,23 +263,53 @@ fn the_update_side_is_the_new_package_version() {
     );
 }
 
+// RPM facts, checked with the python rpm bindings (RPM 4.20.1) on a provide
+// `foo = 1:1.2.3-4`: it does not meet `foo = 1.2.3`, it meets `foo >= 2.0`,
+// and it does not meet `foo < 2.0`. A bound without an epoch reads it as 0.
+
 #[test]
-fn a_bound_without_an_epoch_ignores_the_epoch_of_the_provide() {
-    // The origin's provider gives 1:2.0 (Epoch: 1); RPM compares >= 2.0 and
-    // = 2.0 without the epoch, so the origin meets them and is not updated.
-    let spec = "BuildRequires: pkgconfig(foo) >= 2.0\nBuildRequires: pkgconfig(foo) = 2.0\n";
+fn an_equal_bound_without_an_epoch_is_not_met_by_a_provide_with_one() {
+    // The origin's 1:1.2.3 misses = 1.2.3 (epoch 1 against 0); the new 1.2.3
+    // meets it, so the dependency is updated first.
     assert_eq!(
         need_with(
-            spec,
-            &["pkgconfig(foo) >= 2.0", "pkgconfig(foo) = 2.0"],
-            "2.0",
-            &[
-                ("pkgconfig(foo) >= 2.0", "1:2.0"),
-                ("pkgconfig(foo) = 2.0", "1:2.0")
-            ],
+            "BuildRequires: pkgconfig(foo) = 1.2.3\n",
+            &["pkgconfig(foo) = 1.2.3"],
+            "1.2.3",
+            &[("pkgconfig(foo) = 1.2.3", "1:1.2.3-4")],
+            "1.2.3"
+        ),
+        DepNeed::Update("pkgconfig(foo) = 1.2.3".into())
+    );
+}
+
+#[test]
+fn a_lower_bound_without_an_epoch_is_met_by_a_provide_with_a_higher_epoch() {
+    // 1:1.2.3 is above 0:2.0 whatever its version, so the origin meets >= 2.0.
+    assert_eq!(
+        need_with(
+            "BuildRequires: pkgconfig(foo) >= 2.0\n",
+            &["pkgconfig(foo) >= 2.0"],
+            "1.2.3",
+            &[("pkgconfig(foo) >= 2.0", "1:1.2.3-4")],
             "2.3"
         ),
         DepNeed::Origin
+    );
+}
+
+#[test]
+fn an_upper_bound_without_an_epoch_is_not_met_by_a_provide_with_a_higher_epoch() {
+    // 1:1.2.3 is above 0:2.0, so the origin misses < 2.0; the new 1.5 meets it.
+    assert_eq!(
+        need_with(
+            "BuildRequires: pkgconfig(foo) < 2.0\n",
+            &["pkgconfig(foo) < 2.0"],
+            "1.2.3",
+            &[("pkgconfig(foo) < 2.0", "1:1.2.3-4")],
+            "1.5"
+        ),
+        DepNeed::Update("pkgconfig(foo) < 2.0".into())
     );
 }
 

@@ -97,18 +97,12 @@ fn required_by(req: &Requirement, names: &[String]) -> Option<String> {
 
 /// Whether `version` meets `bound`, `None` when the two cannot be compared.
 ///
-/// Compared as RPM compares a requirement with a candidate. A bound without
-/// an epoch ignores the candidate's epoch; a bound with one compares both,
-/// a candidate without one counting as epoch 0. Both sides are compared
-/// without a release: a provide's `1.2-3` is `1.2`.
+/// Compared as RPM compares a dependency with a candidate: the epochs first,
+/// a missing epoch counting as 0 on either side, then the versions. Both
+/// sides are compared without a release: a provide's `1.2-3` is `1.2`.
 fn meets(version: &str, bound: &Bound) -> Option<bool> {
     let wanted = strip_release(&bound.version);
     let have = strip_release(version);
-    let have = if wanted.contains(':') {
-        have
-    } else {
-        crate::version::split_epoch(have).1
-    };
     let ord = crate::version::cmp(have, wanted, crate::version::Scheme::Generic)?;
     Some(accepts(&bound.op, ord))
 }
