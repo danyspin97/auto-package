@@ -406,7 +406,7 @@ fn a_failed_checkout_still_finishes_its_step() {
     let pkg_run = run.pkg("python-foo");
     let recorder = Recorder::default();
 
-    let result = run_package_inner(&config, &pkg_run, &recorder);
+    let result = run_package_inner(&config, &pkg_run, &recorder, false);
 
     assert!(matches!(result, PipelineResult::Failed { .. }));
     let events = recorder.0.lock().unwrap();

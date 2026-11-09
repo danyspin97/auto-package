@@ -30,13 +30,26 @@ fn spec_version(text: &str) -> Option<String> {
 /// has: one of `listed` (the OBS head's files and the checkout's own). `read`
 /// answers the spec's text as it stands. A mismatch is re-read once from OBS;
 /// a checkout that still does not match is `Err`, with the reason.
+///
+/// `restored_at_start` says an OBS baseline was put back at the start of this
+/// run: `branch` was then read from the attempt the restore undid, so the
+/// version the restored spec carries is the one the update starts from. The
+/// settled version is returned (`branch` itself when nothing changed it).
 pub(super) fn settle_branch_version(
     read: impl Fn() -> Option<String>,
-    branch: &str,
+    held: &str,
     target: &str,
     reread: impl FnOnce() -> Result<(), String>,
     listed: impl Fn(&str) -> bool,
-) -> Result<(), String> {
+    restored_at_start: bool,
+) -> Result<String, String> {
+    let branch = if restored_at_start {
+        expected_after_restore(held, read().as_deref())
+    } else {
+        held.to_string()
+    };
+    let branch = branch.as_str();
+    let note = restore_note(restored_at_start);
     let check = || -> Result<(), String> {
         let text = read().ok_or("its spec is missing or cannot be read")?;
         let found = spec_version(&text).ok_or("its spec has no Version")?;
@@ -58,10 +71,35 @@ pub(super) fn settle_branch_version(
         }
     };
     if check().is_ok() {
-        return Ok(());
+        return Ok(branch.to_string());
     }
-    reread().map_err(|e| format!("the checkout does not match the branch: {e}"))?;
-    check().map_err(|why| format!("the checkout does not match the branch: {why}; a fresh checkout from OBS did not change that"))
+    reread().map_err(|e| format!("the checkout does not match the branch: {e}{note}"))?;
+    check().map(|()| branch.to_string()).map_err(|why| {
+        format!(
+            "the checkout does not match the branch: {why}; a fresh checkout from OBS did \
+                 not change that{note}"
+        )
+    })
+}
+
+/// The version an update starts from once an OBS baseline was restored at the
+/// start of the run: the restored spec's own `Version:`, or `held` when that
+/// spec has none. `held` was read from the attempt the restore undid.
+pub(super) fn expected_after_restore(held: &str, restored_spec: Option<&str>) -> String {
+    restored_spec
+        .and_then(spec_version)
+        .unwrap_or_else(|| held.to_string())
+}
+
+/// The note added to a mismatch when a baseline was restored at the start of
+/// the run: the restore is the likely reason the version is not the planned one.
+fn restore_note(restored_at_start: bool) -> &'static str {
+    if restored_at_start {
+        "; an OBS baseline of an earlier failed attempt was restored at the start of this run, \
+         which may be why the version is not the planned one"
+    } else {
+        ""
+    }
 }
 
 /// The file name a listing or checkout entry stands for: the output of a
@@ -251,6 +289,7 @@ impl CheckoutFacts {
 pub(super) fn checkout_stage(
     ctx: &RunCtx,
     st: &mut RunState,
+    restored_at_start: bool,
 ) -> Result<CheckoutFacts, PipelineResult> {
     let RunCtx {
         config,
@@ -340,15 +379,26 @@ pub(super) fn checkout_stage(
                         .map_err(|e| e.to_string())
                 },
                 |file| source_is_available(file, &head, checkout_dir),
+                restored_at_start,
             );
-            if let Err(reason) = settled {
-                let id = step.id;
-                step.finish(StepOutcome::Failed);
-                reporter.report(&Event::Warning {
-                    step: Some(id),
-                    message: reason.clone(),
-                });
-                return Err(ctx.failed(reason));
+            match settled {
+                Err(reason) => {
+                    let id = step.id;
+                    step.finish(StepOutcome::Failed);
+                    reporter.report(&Event::Warning {
+                        step: Some(id),
+                        message: reason.clone(),
+                    });
+                    return Err(ctx.failed(reason));
+                }
+                Ok(start) if start != *expected => reporter.report(&Event::Progress {
+                    step: Some(step.id),
+                    message: format!(
+                        "the update starts from {start}: the OBS baseline restored at the start \
+                         of this run replaces the planned {expected}"
+                    ),
+                }),
+                Ok(_) => {}
             }
             // The checkout's copy of a source may differ from the spec's name only
             // in case (PyPI's spelling). OBS builds the spec's name, so rename it.

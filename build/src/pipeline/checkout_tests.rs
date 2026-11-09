@@ -1,7 +1,9 @@
 //! The version guards of the checkout: the branch check before the first turn,
 //! and the `Version:` a turn or the time between turns may not change.
 
-use crate::pipeline::checkout::{settle_branch_version, source_is_available, version_stop};
+use crate::pipeline::checkout::{
+    expected_after_restore, settle_branch_version, source_is_available, version_stop,
+};
 use std::cell::Cell;
 
 fn spec(version: &str) -> String {
@@ -28,6 +30,7 @@ fn a_checkout_at_the_branch_version_is_not_reread() {
             Ok(())
         },
         all_listed,
+        false,
     );
     assert!(r.is_ok());
     assert_eq!(reread.get(), 0);
@@ -35,7 +38,14 @@ fn a_checkout_at_the_branch_version_is_not_reread() {
 
 #[test]
 fn a_checkout_at_the_target_version_is_accepted_dirty_or_committed() {
-    let r = settle_branch_version(|| Some(spec("2.0")), "1.0", "2.0", || Ok(()), all_listed);
+    let r = settle_branch_version(
+        || Some(spec("2.0")),
+        "1.0",
+        "2.0",
+        || Ok(()),
+        all_listed,
+        false,
+    );
     assert!(r.is_ok(), "{r:?}");
 }
 
@@ -51,6 +61,7 @@ fn a_checkout_fixed_by_one_reread_is_accepted() {
         "2.0",
         || Ok(()),
         all_listed,
+        false,
     );
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(reads.get(), 2);
@@ -68,6 +79,7 @@ fn a_third_version_stops_the_package_after_one_reread() {
             Ok(())
         },
         all_listed,
+        false,
     );
     let why = r.unwrap_err();
     assert_eq!(reread.get(), 1, "the reread runs once");
@@ -85,6 +97,7 @@ fn a_source_the_package_does_not_have_stops_the_package() {
         "2.0",
         || Ok(()),
         |file| file != "foo-1.0.tar.gz",
+        false,
     );
     let why = r.unwrap_err();
     assert!(why.contains("Source foo-1.0.tar.gz"), "{why}");
@@ -92,7 +105,7 @@ fn a_source_the_package_does_not_have_stops_the_package() {
 
 #[test]
 fn a_missing_spec_or_a_failed_reread_is_a_mismatch() {
-    let r = settle_branch_version(|| None, "1.0", "2.0", || Ok(()), all_listed);
+    let r = settle_branch_version(|| None, "1.0", "2.0", || Ok(()), all_listed, false);
     assert!(r.is_err());
     let r = settle_branch_version(
         || Some(spec("3.0")),
@@ -100,9 +113,91 @@ fn a_missing_spec_or_a_failed_reread_is_a_mismatch() {
         "2.0",
         || Err("osc up failed".into()),
         all_listed,
+        false,
     );
     let why = r.unwrap_err();
     assert!(why.contains("osc up failed"), "{why}");
+}
+
+/// A version derived before an OBS baseline was restored (2.3.2, the attempt
+/// the restore undid) is not the one the restored spec carries (2.3.1).
+#[test]
+fn a_restore_at_the_start_takes_the_restored_version() {
+    let reread = Cell::new(0);
+    let r = settle_branch_version(
+        || Some(spec("2.3.1")),
+        "2.3.2",
+        "2.3.2",
+        || {
+            reread.set(reread.get() + 1);
+            Ok(())
+        },
+        all_listed,
+        true,
+    );
+    assert_eq!(r, Ok("2.3.1".to_string()));
+    assert_eq!(reread.get(), 0, "no fresh checkout is needed");
+}
+
+/// Without a restore the same spec is a mismatch, and the reason says nothing
+/// about a restore.
+#[test]
+fn the_same_spec_without_a_restore_is_still_a_mismatch() {
+    let r = settle_branch_version(
+        || Some(spec("2.3.1")),
+        "2.3.2",
+        "2.3.2",
+        || Ok(()),
+        all_listed,
+        false,
+    );
+    let why = r.unwrap_err();
+    assert!(why.contains("expects 2.3.2"), "{why}");
+    assert!(!why.contains("restored"), "{why}");
+}
+
+/// A restore that still leaves a mismatch names the restore as the likely cause.
+#[test]
+fn a_mismatch_after_a_restore_names_the_restore() {
+    let r = settle_branch_version(
+        || None,
+        "2.3.2",
+        "2.3.2",
+        || Err("osc up failed".into()),
+        all_listed,
+        true,
+    );
+    let why = r.unwrap_err();
+    assert!(why.contains("osc up failed"), "{why}");
+    assert!(why.contains("restored at the start of this run"), "{why}");
+}
+
+/// The restored spec's source must still be a file of the package.
+#[test]
+fn a_restore_does_not_excuse_a_missing_source() {
+    let r = settle_branch_version(
+        || Some(spec("2.3.1")),
+        "2.3.2",
+        "2.3.2",
+        || Ok(()),
+        |file| file != "foo-2.3.1.tar.gz",
+        true,
+    );
+    let why = r.unwrap_err();
+    assert!(why.contains("Source foo-2.3.1.tar.gz"), "{why}");
+}
+
+#[test]
+fn the_version_after_a_restore_is_the_restored_spec_version() {
+    assert_eq!(
+        expected_after_restore("2.3.2", Some(&spec("2.3.1"))),
+        "2.3.1"
+    );
+    assert_eq!(expected_after_restore("2.3.2", None), "2.3.2");
+    assert_eq!(
+        expected_after_restore("2.3.2", Some("Name: foo\nRelease: 0\n")),
+        "2.3.2"
+    );
 }
 
 #[test]

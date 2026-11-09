@@ -38,11 +38,11 @@ pub fn run_package(
     // The fix-loop and risk flags are not touched here: an earlier run's stay
     // until a commit of this run settles them, so a run that ends AlreadyBuilt
     // or missing_deps still reports what OBS holds.
-    let baseline = match restore_stale_baseline(config, reporter) {
-        Ok(dir) => dir,
+    let (baseline, restored_at_start) = match restore_stale_baseline(config, reporter) {
+        Ok(restored) => restored,
         Err(failed) => return failed,
     };
-    let result = run_package_inner(config, pkg_run, reporter);
+    let result = run_package_inner(config, pkg_run, reporter, restored_at_start);
     finish_package(config, pkg_run, reporter, result, &baseline)
 }
 
@@ -107,27 +107,32 @@ fn put_back_or_confirm(
     baseline: &Path,
     config: &PipelineConfig,
     reporter: &dyn Reporter,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     match osc::restore_baseline_outcome(baseline, &expected_checkout(config), Emit::run(reporter))?
     {
-        osc::Restored::Undone => reporter.report(&Event::Warning {
-            step: None,
-            message: format!(
-                "{}: restored the OBS baseline of an earlier failed attempt: the attempt is \
-                 undone on OBS, and the run continues",
-                config.rpm_name
-            ),
-        }),
-        osc::Restored::NothingWritten => reporter.report(&Event::Warning {
-            step: None,
-            message: format!(
-                "{}: nothing was written to OBS since the failed attempt (OBS holds the \
-                 saved baseline): the baseline is dropped and the run continues",
-                config.rpm_name
-            ),
-        }),
+        osc::Restored::Undone => {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!(
+                    "{}: restored the OBS baseline of an earlier failed attempt: the attempt is \
+                     undone on OBS, and the run continues",
+                    config.rpm_name
+                ),
+            });
+            Ok(true)
+        }
+        osc::Restored::NothingWritten => {
+            reporter.report(&Event::Warning {
+                step: None,
+                message: format!(
+                    "{}: nothing was written to OBS since the failed attempt (OBS holds the \
+                     saved baseline): the baseline is dropped and the run continues",
+                    config.rpm_name
+                ),
+            });
+            Ok(false)
+        }
     }
-    Ok(())
 }
 
 /// The command that discards the pending baseline of `config`'s package, for a
@@ -142,12 +147,12 @@ fn discard_hint(config: &PipelineConfig) -> String {
 }
 
 /// Puts back a baseline that a failed attempt could not restore, before this
-/// run writes anything. Returns the baseline directory; if the restore fails
-/// the package does not start.
+/// run writes anything. Returns the baseline directory and whether the restore
+/// undid an attempt on OBS; if the restore fails the package does not start.
 fn restore_stale_baseline(
     config: &PipelineConfig,
     reporter: &dyn Reporter,
-) -> Result<PathBuf, PipelineResult> {
+) -> Result<(PathBuf, bool), PipelineResult> {
     let baseline = match obs_baseline_dir(config) {
         Ok(dir) => dir,
         Err(e) => {
@@ -158,22 +163,26 @@ fn restore_stale_baseline(
             });
         }
     };
-    if baseline.exists()
-        && let Err(why) = put_back_or_confirm(&baseline, config, reporter)
-    {
-        return Err(PipelineResult::Failed {
-            rpm_name: config.rpm_name.clone(),
-            reason: format!(
-                "not started: the OBS baseline of an earlier failed attempt was NOT \
-                 restored ({why}). To take OBS as it is, run `{}`; otherwise fix the \
-                 cause and run again (the baseline in {} is kept)",
-                discard_hint(config),
-                baseline.display(),
-            ),
-            kind: FailureKind::Other,
-        });
+    let mut undone = false;
+    if baseline.exists() {
+        match put_back_or_confirm(&baseline, config, reporter) {
+            Ok(restored) => undone = restored,
+            Err(why) => {
+                return Err(PipelineResult::Failed {
+                    rpm_name: config.rpm_name.clone(),
+                    reason: format!(
+                        "not started: the OBS baseline of an earlier failed attempt was NOT \
+                         restored ({why}). To take OBS as it is, run `{}`; otherwise fix the \
+                         cause and run again (the baseline in {} is kept)",
+                        discard_hint(config),
+                        baseline.display(),
+                    ),
+                    kind: FailureKind::Other,
+                });
+            }
+        }
     }
-    Ok(baseline)
+    Ok((baseline, undone))
 }
 
 /// Settles a finished run: marks what it built, restores the OBS baseline,
@@ -434,12 +443,15 @@ pub(super) enum RoundEnd {
     Finished(PipelineResult),
 }
 
+/// `restored_at_start` says the start of the run put an OBS baseline back (see
+/// `restore_stale_baseline`): the checkout's branch version is then re-derived.
 pub(super) fn run_package_inner(
     config: &PipelineConfig,
     pkg_run: &PkgRunDir,
     reporter: &dyn Reporter,
+    restored_at_start: bool,
 ) -> PipelineResult {
-    match run_stages(config, pkg_run, reporter) {
+    match run_stages(config, pkg_run, reporter, restored_at_start) {
         Ok(result) | Err(result) => result,
     }
 }
@@ -448,6 +460,7 @@ fn run_stages(
     config: &PipelineConfig,
     pkg_run: &PkgRunDir,
     reporter: &dyn Reporter,
+    restored_at_start: bool,
 ) -> Result<PipelineResult, PipelineResult> {
     let ctx = preflight(config, pkg_run, reporter)?;
     // Before the checkout is updated: a turn record that equals the patches is
@@ -477,7 +490,7 @@ fn run_stages(
         carried: None,
     };
 
-    let checkout = checkout_stage(&ctx, &mut st)?;
+    let checkout = checkout_stage(&ctx, &mut st, restored_at_start)?;
     // A package that builds only on other architectures ends `excluded` on OBS
     // after a whole update and review turn (lsvpd: ppc only, on x86_64).
     if let Ok(text) = std::fs::read_to_string(&ctx.spec_path)
