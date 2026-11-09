@@ -143,6 +143,22 @@ impl TuiState {
         }
     }
 
+    /// Removes the checks begun and never answered (the `checking` rows): once
+    /// the sweep is finished no answer comes for them, and each would read
+    /// `checking` for the rest of the run.
+    fn drop_unanswered_checks(&mut self) {
+        let unanswered: Vec<String> = self
+            .packages
+            .iter()
+            .filter(|(_, row)| row.status == PkgStatus::Checking)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &unanswered {
+            self.packages.remove(name);
+        }
+        self.order.retain(|name| !unanswered.contains(name));
+    }
+
     /// The row of a package the sweep checked, created when it has none.
     /// What the check found shows only on a row no build has taken over.
     fn apply_check(&mut self, swept: &SweptPackage) {
@@ -230,6 +246,9 @@ impl TuiState {
             } => {
                 if let Some(package) = package {
                     self.apply_check(package);
+                }
+                if *finished {
+                    self.drop_unanswered_checks();
                 }
                 self.sweep = Some(SweepCounts {
                     checked: *checked,

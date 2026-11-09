@@ -32,6 +32,22 @@ fn checking(name: &str) -> Msg {
     }
 }
 
+/// The sweep's last report: every check it began has its answer by now.
+fn finished() -> Msg {
+    Msg {
+        pkg: None,
+        event: Event::SweepProgress {
+            checked: 2,
+            to_update: 1,
+            up_to_date: 0,
+            skipped: 0,
+            finished: true,
+            package: None,
+            total: Some(2),
+        },
+    }
+}
+
 fn update() -> SweepVerdict {
     SweepVerdict::Update {
         from: "1.0".into(),
@@ -229,4 +245,26 @@ fn a_row_begun_under_its_obs_name_moves_to_the_name_its_build_has() {
         state.packages["python-apscheduler"].status_cell(),
         "needs-update"
     );
+}
+
+#[test]
+fn a_finished_sweep_removes_the_checks_it_never_answered() {
+    let mut state = TuiState::new(RunScope::default());
+    state.apply(checking("answered"));
+    state.apply(checking("unanswered"));
+    state.apply(checked("answered", update()));
+    assert_eq!(state.stage_counts().checking, 1);
+    // Not finished yet: a check still in flight stays.
+    state.apply(checked(
+        "answered",
+        SweepVerdict::UpToDate {
+            version: "3.1".into(),
+        },
+    ));
+    assert!(state.packages.contains_key("unanswered"));
+    state.apply(finished());
+    assert!(!state.packages.contains_key("unanswered"));
+    assert_eq!(state.order, ["answered"]);
+    assert_eq!(state.stage_counts().checking, 0);
+    assert_eq!(state.packages["answered"].status_cell(), "up-to-date");
 }
