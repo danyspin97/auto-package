@@ -22,6 +22,8 @@ mod applied;
 #[cfg(test)]
 mod applied_tests;
 mod present;
+#[cfg(test)]
+mod present_tests;
 mod quilt;
 mod rounds;
 mod run;

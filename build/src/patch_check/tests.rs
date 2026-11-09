@@ -285,7 +285,7 @@ fn truncate_cuts_on_a_char_boundary() {
 }
 
 /// A tarball `name-1.0.tar.gz` holding `files` under `name-1.0/`.
-fn tarball(dir: &Path, files: &[(&str, &str)]) -> PathBuf {
+pub(super) fn tarball(dir: &Path, files: &[(&str, &str)]) -> PathBuf {
     let path = dir.join("foo-1.0.tar.gz");
     let file = std::fs::File::create(&path).unwrap();
     let enc = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
@@ -490,12 +490,19 @@ fn hunks_end_at_their_line_counts_so_a_removed_dash_line_is_not_a_header() {
         hunks(diff, 1),
         vec![Hunk {
             file: Some("f".into()),
+            old: Some("f".into()),
+            context: vec![],
             added: vec!["z".into()],
+            removed: vec!["-- x".into(), "y".into()],
         }]
     );
-    // A created file has no name to prove against.
+    // A created file has no name to prove against, a deleted one no new name.
     let created = "--- /dev/null\n+++ b/new.h\n@@ -0,0 +1 @@\n+int x;\n";
     assert_eq!(hunks(created, 1)[0].file, Some("new.h".into()));
+    assert_eq!(hunks(created, 1)[0].old, None);
+    let deleted = "--- a/old.h\n+++ /dev/null\n@@ -1 +0,0 @@\n-int x;\n";
+    assert_eq!(hunks(deleted, 1)[0].file, None);
+    assert_eq!(hunks(deleted, 1)[0].old, Some("old.h".into()));
 }
 
 #[test]
