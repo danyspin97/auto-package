@@ -2,9 +2,28 @@
 //! `--update-deps`: the dependencies chosen for it are queued ahead of it,
 //! and it is handed over to the builds with what it waits for.
 
+use super::same_project::FoundIndex;
 use super::*;
 use ap_build::spec::Requirement;
 use std::cell::OnceCell;
+
+/// What `--update-deps` knows of the run's same-project waits.
+#[derive(Default)]
+pub(super) struct SameWait {
+    /// The updates the sweep found so far.
+    pub(super) index: FoundIndex,
+    /// The names (see `visit_key`) of every job pushed to `ready`: only these
+    /// are built, so only these may be waited for.
+    pub(super) queued: HashSet<String>,
+}
+
+impl SameWait {
+    /// Push `job` to `ready`, and note its names as queued.
+    pub(super) fn push_ready(&mut self, ready: &mut Vec<Job>, job: Job) {
+        self.queued.extend(job.keys.iter().cloned());
+        ready.push(job);
+    }
+}
 
 /// A package whose branch is made and whose BuildRequires were read: what
 /// its dependencies are chosen from, kept so nothing is read again.
@@ -30,6 +49,7 @@ pub(super) fn go_on(
     queue: &mut VecDeque<Item>,
     visited: &mut HashSet<String>,
     dependency_count: &mut usize,
+    same: &mut SameWait,
     ready: &mut Vec<Job>,
 ) {
     let mut after: Vec<String> = Vec::new();
@@ -67,5 +87,5 @@ pub(super) fn go_on(
             );
         }
     }
-    ready.push(Job::new(held.item, held.first_key, after));
+    same.push_ready(ready, Job::new(held.item, held.first_key, after));
 }

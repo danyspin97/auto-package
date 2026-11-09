@@ -1,4 +1,4 @@
-use super::same_wait::{Held, go_on};
+use super::same_wait::{Held, SameWait, go_on};
 use super::*;
 
 pub(super) fn cmd_update_project(
@@ -183,6 +183,11 @@ fn prepare(
     // The packages handled so far, which a capability may be provided by.
     let mut run_packages: Vec<String> = Vec::new();
     let mut ready: Vec<Job> = Vec::new();
+    // The same-project waits of `--update-deps`: a sweep the dependencies
+    // are judged against, and the jobs queued so far. Nothing is judged
+    // without a sweep (lint, backport) or with `--test-against-updates`.
+    let same_active = a.update_deps && !a.test_against_updates && sweep.is_some();
+    let mut same = SameWait::default();
     let mut admitted = 0;
     let mut dependency_count = 0;
     let mut branch_checked = false;
@@ -203,8 +208,14 @@ fn prepare(
                     break;
                 }
                 let Some((item, style_only)) = incoming() else {
+                    if same_active {
+                        same.index.finish();
+                    }
                     break;
                 };
+                if same_active {
+                    same.index.insert(&item);
+                }
                 if sweep_queues && let Some(row) = row_name(&item) {
                     sweep_rows.insert(row);
                 }
@@ -261,7 +272,7 @@ fn prepare(
         if a.in_place {
             // The package is already where it will be changed, and its
             // BuildRequires resolve: it builds there today.
-            ready.push(Job::new(item, first_key, Vec::new()));
+            same.push_ready(&mut ready, Job::new(item, first_key, Vec::new()));
             continue;
         }
         // An origin whose spec cannot be read cannot be updated: it is reported,
@@ -405,7 +416,7 @@ fn prepare(
                 "could not read the spec of {}, so its BuildRequires are not checked",
                 item.pkg
             ));
-            ready.push(Job::new(item, first_key, Vec::new()));
+            same.push_ready(&mut ready, Job::new(item, first_key, Vec::new()));
             continue;
         };
         if !run_packages.contains(&item.pkg) {
@@ -442,6 +453,7 @@ fn prepare(
             &mut queue,
             &mut visited,
             &mut dependency_count,
+            &mut same,
             &mut ready,
         );
     }
