@@ -5,9 +5,9 @@
 //!
 //! The decision is pure: the caller gives the package's requirements (from
 //! [`crate::spec::build_requirements`]), the names the dependency is required
-//! by, the version the dependency's origin has and the version it would be
-//! updated to. Versions are ordered with [`crate::version::cmp`], never as
-//! strings.
+//! by, the version the dependency's origin has, what its providers give for
+//! the capabilities it is required by, and the version it would be updated
+//! to. Versions are ordered with [`crate::version::cmp`], never as strings.
 
 use super::capability::{accepts, strip_release};
 use super::requirements::requirement_text;
@@ -34,7 +34,15 @@ pub enum DepNeed {
 
 /// What `reqs` need of a dependency required by any of `names` (a package
 /// name, or a capability as the spec writes it with its bound), whose origin
-/// has `origin_version` and whose update would bring `new_version`.
+/// has the source package at `origin_version` and whose update would bring
+/// `new_version`.
+///
+/// The origin side of a capability bound is the version its provider's
+/// `Provides:` gives, from `provided` (`(name, version)` as in `names`); a
+/// name without one there is compared with `origin_version`, as a package
+/// name is (its RPMs carry the package's version). The update side is always
+/// `new_version`: the provide of the new release is not known until it is
+/// built, and the package's new version is what the update brings.
 ///
 /// A bound the update meets and the origin misses decides first (`Update`),
 /// then one that cannot be compared (`Unknown`), then one neither meets
@@ -44,6 +52,7 @@ pub fn dependency_need(
     reqs: &[Requirement],
     names: &[String],
     origin_version: &str,
+    provided: &[(String, String)],
     new_version: &str,
 ) -> DepNeed {
     let mut unknown = None;
@@ -52,8 +61,11 @@ pub fn dependency_need(
         let (Some(bound), Some(text)) = (&req.bound, required_by(req, names)) else {
             continue;
         };
-        // Limit: a capability bound is compared with the package version here, not with the version its Provides: gives.
-        match (meets(origin_version, bound), meets(new_version, bound)) {
+        let origin = provided
+            .iter()
+            .find(|(name, _)| *name == text)
+            .map_or(origin_version, |(_, version)| version.as_str());
+        match (meets(origin, bound), meets(new_version, bound)) {
             (Some(false), Some(true)) => return DepNeed::Update(text),
             (None, _) | (Some(false), None) => {
                 unknown.get_or_insert(text);
@@ -84,8 +96,13 @@ fn required_by(req: &Requirement, names: &[String]) -> Option<String> {
 }
 
 /// Whether `version` meets `bound`, `None` when the two cannot be compared.
+/// Both sides are compared without a release: a provide's `1.2-3` is `1.2`.
 fn meets(version: &str, bound: &Bound) -> Option<bool> {
     let wanted = strip_release(&bound.version);
-    let ord = crate::version::cmp(version, wanted, crate::version::Scheme::Generic)?;
+    let ord = crate::version::cmp(
+        strip_release(version),
+        wanted,
+        crate::version::Scheme::Generic,
+    )?;
     Some(accepts(&bound.op, ord))
 }

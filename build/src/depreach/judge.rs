@@ -271,6 +271,11 @@ pub struct DependencyOrigin {
     pub project: String,
     pub package: String,
     pub names: Vec<String>,
+    /// For each capability in `names` the search found in this origin, the
+    /// version its `Provides:` gives it (`(name, version)`, the name as in
+    /// `names`). A package name has none: it is compared by the package's
+    /// version.
+    pub provided: Vec<(String, String)>,
 }
 
 /// The projects the dependencies will be built against that are not distro
@@ -290,7 +295,8 @@ pub fn dependency_origins(
     let usable =
         |p: &str| !is_distro_project(p) && !p.starts_with("home:") && p != own && p != exclude;
     let mut out: Vec<DependencyOrigin> = Vec::new();
-    let mut push = |h: &Hit, name: &str| {
+    // `provide` is the version a capability's provider gives it, when known.
+    let mut push = |h: &Hit, name: &str, provide: Option<&str>| {
         let (true, Some(pkg)) = (usable(&h.project), &h.package) else {
             return;
         };
@@ -304,6 +310,7 @@ pub fn dependency_origins(
                     project: h.project.clone(),
                     package: pkg.clone(),
                     names: Vec::new(),
+                    provided: Vec::new(),
                 });
                 out.last_mut().expect("just pushed")
             }
@@ -311,11 +318,20 @@ pub fn dependency_origins(
         if !origin.names.iter().any(|n| n == name) {
             origin.names.push(name.to_string());
         }
+        if let Some(version) = provide {
+            if !origin.provided.iter().any(|(n, _)| n == name) {
+                origin
+                    .provided
+                    .push((name.to_string(), version.to_string()));
+            }
+        }
     };
     for v in verdicts {
         match &v.state {
-            DepState::Reachable { provider }
-            | DepState::Capability(CapState::Provided { provider }) => push(provider, &v.name),
+            DepState::Reachable { provider } => push(provider, &v.name, None),
+            DepState::Capability(CapState::Provided { provider }) => {
+                push(provider, &v.name, provider.version.as_deref());
+            }
             DepState::Capability(CapState::NoProvider { found, .. }) if misses => {
                 for f in found {
                     let provider = Hit {
@@ -324,7 +340,7 @@ pub fn dependency_origins(
                         package: f.package.clone(),
                         version: Some(f.version.clone()),
                     };
-                    push(&provider, &v.name);
+                    push(&provider, &v.name, Some(&f.version));
                 }
             }
             DepState::Missing { options } => {
@@ -333,7 +349,7 @@ pub fn dependency_origins(
                     .flat_map(|(_, hits)| hits)
                     .find(|h| added.iter().any(|a| a.project == h.project));
                 if let Some(h) = hit {
-                    push(h, &v.name);
+                    push(h, &v.name, None);
                 }
             }
             _ => {}

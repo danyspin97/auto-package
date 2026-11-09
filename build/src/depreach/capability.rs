@@ -101,8 +101,9 @@ pub fn may_provide(capability: &str, rpm: &str) -> bool {
 /// How one RPM's `Provides:` settle a requirement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Match {
-    /// Some entry names the capability with a version the bound accepts.
-    Satisfied,
+    /// Some entry names the capability with a version the bound accepts; the
+    /// version the entry gives is named.
+    Satisfied(String),
     /// Entries name the capability, all with versions the bound rejects; the
     /// first such version is given.
     Older(String),
@@ -123,7 +124,7 @@ pub fn provided_within(req: &Requirement, capability: &str, provides: &[String])
             continue;
         }
         let Some(bound) = &req.bound else {
-            return Match::Satisfied;
+            return Match::Satisfied(version.map(|(_, v)| v).unwrap_or_default());
         };
         let Some((_, have)) = version else {
             unknown = Some(format!("{text} has no version to compare"));
@@ -137,7 +138,7 @@ pub fn provided_within(req: &Requirement, capability: &str, provides: &[String])
             strip_release(&have)
         };
         match crate::version::cmp(compared, &bound.version, crate::version::Scheme::Generic) {
-            Some(ord) if accepts(&bound.op, ord) => return Match::Satisfied,
+            Some(ord) if accepts(&bound.op, ord) => return Match::Satisfied(have),
             Some(_) => {
                 older.get_or_insert(have);
             }
@@ -194,7 +195,11 @@ fn judge_repo(
             Err(why) => Match::Unknown(format!("reading the provides of {}: {why}", c.name)),
         };
         match verdict {
-            Match::Satisfied => return RepoVerdict::Ok(c.hit.clone()),
+            Match::Satisfied(version) => {
+                let mut hit = c.hit.clone();
+                hit.version = Some(version);
+                return RepoVerdict::Ok(hit);
+            }
             Match::Older(version) => {
                 older.get_or_insert_with(|| Found {
                     repo: reach.repo.clone(),

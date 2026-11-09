@@ -277,9 +277,18 @@ fn within(bound: (&str, &str), provides: &[&str]) -> Match {
 #[test]
 fn a_bound_without_a_release_ignores_the_release_of_the_provide() {
     let have = ["pkgconfig(foo) = 1.2.3-4"];
-    assert_eq!(within(("=", "1.2.3"), &have), Match::Satisfied);
-    assert_eq!(within(("<=", "1.2.3"), &have), Match::Satisfied);
-    assert_eq!(within((">=", "1.2.3"), &have), Match::Satisfied);
+    assert_eq!(
+        within(("=", "1.2.3"), &have),
+        Match::Satisfied("1.2.3-4".into())
+    );
+    assert_eq!(
+        within(("<=", "1.2.3"), &have),
+        Match::Satisfied("1.2.3-4".into())
+    );
+    assert_eq!(
+        within((">=", "1.2.3"), &have),
+        Match::Satisfied("1.2.3-4".into())
+    );
     assert_eq!(
         within(("<", "1.2.3"), &have),
         Match::Older("1.2.3-4".into())
@@ -294,7 +303,10 @@ fn a_bound_without_a_release_ignores_the_release_of_the_provide() {
 fn a_bound_with_a_release_compares_the_release_too() {
     let same = ["pkgconfig(foo) = 1.2.3-4"];
     let newer = ["pkgconfig(foo) = 1.2.3-5"];
-    assert_eq!(within(("=", "1.2.3-4"), &same), Match::Satisfied);
+    assert_eq!(
+        within(("=", "1.2.3-4"), &same),
+        Match::Satisfied("1.2.3-4".into())
+    );
     assert_eq!(
         within(("=", "1.2.3-4"), &newer),
         Match::Older("1.2.3-5".into())
@@ -308,5 +320,8 @@ fn an_epoch_counts_before_the_version() {
         within(("=", "1.2.3"), &epoch),
         Match::Older("1:1.2.3-4".into())
     );
-    assert_eq!(within((">=", "1:1.2.3"), &epoch), Match::Satisfied);
+    assert_eq!(
+        within((">=", "1:1.2.3"), &epoch),
+        Match::Satisfied("1:1.2.3-4".into())
+    );
 }

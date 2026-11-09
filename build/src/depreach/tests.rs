@@ -446,6 +446,7 @@ fn only_non_distro_non_personal_projects_are_candidates_for_updating_a_dependenc
             project: "devel:languages:c_c++".to_string(),
             package: "libfoo".to_string(),
             names: vec!["libfoo-devel".to_string()],
+            provided: Vec::new(),
         }]
     );
     // The project being updated from is not an origin of its own dependency.

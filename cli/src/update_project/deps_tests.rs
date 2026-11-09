@@ -41,12 +41,26 @@ fn libfoo() -> Item {
 }
 
 fn choose(test_against_updates: bool, spec: &str) -> DepChoice {
-    let names = ["libbar-devel".to_string()];
+    choose_with(test_against_updates, spec, Vec::new())
+}
+
+/// `choose`, with what libbar's origin provides for the capabilities.
+fn choose_with(
+    test_against_updates: bool,
+    spec: &str,
+    provided: Vec<(String, String)>,
+) -> DepChoice {
+    let origin = depreach::DependencyOrigin {
+        project: "devel:libraries".into(),
+        package: "libbar".into(),
+        names: vec!["libbar-devel".to_string()],
+        provided,
+    };
     let reqs = build_requirements(spec);
     choose_dependency(
         test_against_updates,
         &reqs,
-        &names,
+        &origin,
         &libbar(),
         "libfoo",
         BRANCH,
@@ -87,6 +101,22 @@ fn a_dependency_the_spec_needs_newer_is_updated_first() {
         (r.origin.as_str(), r.origin_version.as_str()),
         ("devel:libraries", "1.0")
     );
+}
+
+#[test]
+fn a_bound_the_origins_provide_meets_is_used_from_the_origin() {
+    // libbar 1.0 is the package; its RPM provides 1.8, which meets >= 1.5.
+    let spec = "BuildRequires: libbar-devel >= 1.5\n";
+    let provided = vec![("libbar-devel >= 1.5".to_string(), "1.8".to_string())];
+    assert!(matches!(
+        choose_with(false, spec, provided),
+        DepChoice::Origin(_)
+    ));
+    let provided = vec![("libbar-devel >= 1.5".to_string(), "1.2".to_string())];
+    assert!(matches!(
+        choose_with(false, spec, provided),
+        DepChoice::Update(Some(_))
+    ));
 }
 
 #[test]

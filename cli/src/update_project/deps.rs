@@ -32,17 +32,24 @@ pub(super) enum DepChoice {
     Origin(String),
 }
 
-/// What becomes of `dep`, a dependency of `parent` required by `names`,
-/// given `parent`'s requirements `reqs`. `branch` is the branch project.
+/// What becomes of `dep`, a dependency of `parent` that `origin` publishes
+/// (`origin.names` are what `parent` requires it by), given `parent`'s
+/// requirements `reqs`. `branch` is the branch project.
 pub(super) fn choose_dependency(
     test_against_updates: bool,
     reqs: &[Requirement],
-    names: &[String],
+    origin: &depreach::DependencyOrigin,
     dep: &Item,
     parent: &str,
     branch: &str,
 ) -> DepChoice {
-    let need = depreach::dependency_need(reqs, names, &dep.old_version, &dep.new_version);
+    let need = depreach::dependency_need(
+        reqs,
+        &origin.names,
+        &dep.old_version,
+        &origin.provided,
+        &dep.new_version,
+    );
     let required = |requirement: String| RequiredUpdate {
         pkg: dep.pkg.clone(),
         branch_package: format!("{branch}/{}", dep.pkg),

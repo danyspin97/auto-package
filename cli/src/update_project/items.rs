@@ -367,7 +367,7 @@ pub(super) fn dependency_items(
     for origin in
         depreach::dependency_origins(verdicts, adds, branch, &a.source, !a.test_against_updates)
     {
-        let (project, pkg) = (origin.project, origin.package);
+        let (project, pkg) = (origin.project.clone(), origin.package.clone());
         let key = osc::fuzzy_key(&pkg);
         let plan = update::plan_where(
             &project,
@@ -388,7 +388,7 @@ pub(super) fn dependency_items(
                     let choice = choose_dependency(
                         a.test_against_updates,
                         reqs,
-                        &origin.names,
+                        &origin,
                         &item,
                         &parent.pkg,
                         branch,

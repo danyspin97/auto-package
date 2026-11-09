@@ -162,8 +162,10 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
 - `--test-against-updates`: with `--update-deps`, branch and update every such
   dependency that has a newer release, so the package is tested against the
   updates instead of the origin's binaries (see below). A capability bound
-  (`pkgconfig(x) >= V`) is compared with the source package's version, not with
-  the version its `Provides:` gives (a known limit).
+  (`pkgconfig(x) >= V`) is compared on the origin side with the version the
+  origin's `Provides:` gives it, when the search read one, and with the source
+  package's version otherwise. The updated side is the new source version,
+  since the new provide is only known once it is built (a known limit).
 - `--min-free-gb`: as for `build` (default: 3, 0 = off).
 - `--local`, `--local-root`, `--local-min-free-gib`: as for `build`; `--local` cannot be combined with `--submit` or `--maintenance`.
 - `--nvidia <wheel|redist>` / `--nvidia-redist`: as for `build` (default: `wheel`, or what the work directory last used).
