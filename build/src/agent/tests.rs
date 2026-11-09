@@ -11,6 +11,7 @@ mod integrity;
 mod links;
 mod prompt;
 mod pytest_line;
+mod python_expand_block;
 mod request_review;
 mod retry_prompt;
 mod review_tools;
