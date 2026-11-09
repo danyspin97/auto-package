@@ -226,9 +226,9 @@ pub(super) enum SameNeed {
 }
 
 /// Whether judging `providers` for `parent` reads the new release's predicted
-/// requirements: a requirement of `parent` on one of them has a bound, or the
-/// sweep found an update of one (what `dependency_items` reads it for). With
-/// neither, the prediction cannot change the judgment, and is not read.
+/// requirements: the sweep found an update of one (what `dependency_items`
+/// reads it for), or a requirement of `parent` bounds one whose source version
+/// is known. With neither, the prediction cannot change the judgment.
 pub(super) fn needs_prediction(
     parent: &str,
     reqs: &[Requirement],
@@ -241,7 +241,8 @@ pub(super) fn needs_prediction(
         .filter(|p| osc::fuzzy_key(&p.package) != own)
         .any(|p| {
             index.get(&p.package).is_some()
-                || depreach::bounded_requirement(reqs, &p.names).is_some()
+                || (p.origin_version.is_some()
+                    && depreach::bounded_requirement(reqs, &p.names).is_some())
         })
 }
 
@@ -277,17 +278,26 @@ pub(super) fn same_project_need(
                     }
                 }
                 None => {
-                    let old = p.origin_version.as_deref().unwrap_or("");
-                    match judge(parent, reqs, prediction, p, old, old) {
-                        DepNeed::Origin | DepNeed::Update(_) => SameNeed::NotNeeded,
-                        DepNeed::Unmet(bound) | DepNeed::Unknown(bound)
-                            if index.sweep_finished() =>
-                        {
+                    let waiting = |bound: String| {
+                        if index.sweep_finished() {
                             SameNeed::NoUpdate { bound }
-                        }
-                        DepNeed::Unmet(bound) | DepNeed::Unknown(bound) => {
+                        } else {
                             SameNeed::NotFoundYet { bound }
                         }
+                    };
+                    match p.origin_version.as_deref() {
+                        // No version to compare a bound with (the source has
+                        // no version of it): a bound the spec gives is unknown,
+                        // so the update it may need is waited for, as
+                        // `DepNeed::Unknown` is. Nothing is compared with "".
+                        None => match depreach::bounded_requirement(reqs, &p.names) {
+                            Some(bound) => waiting(bound),
+                            None => SameNeed::NotNeeded,
+                        },
+                        Some(old) => match judge(parent, reqs, prediction, p, old, old) {
+                            DepNeed::Origin | DepNeed::Update(_) => SameNeed::NotNeeded,
+                            DepNeed::Unmet(bound) | DepNeed::Unknown(bound) => waiting(bound),
+                        },
                     }
                 }
             };

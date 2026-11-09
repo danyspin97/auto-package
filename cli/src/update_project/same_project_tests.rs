@@ -485,3 +485,39 @@ fn the_prediction_is_read_only_when_it_can_change_the_judgment() {
     }];
     assert!(!needs_prediction("liba", &bounded, &own, &found));
 }
+
+#[test]
+fn a_provider_without_a_source_version_is_never_compared_with_nothing() {
+    let idx = index(&[], false);
+    let no_version = SameProjectProvider {
+        origin_version: None,
+        ..libb("")
+    };
+    // The bound is waited for as unknown, and its text is the spec's.
+    let bounded = need_with(
+        "BuildRequires: libb-devel >= 2.0\n",
+        std::slice::from_ref(&no_version),
+        &idx,
+    );
+    assert_eq!(
+        bounded,
+        vec![SameNeed::NotFoundYet {
+            bound: "libb-devel >= 2.0".into()
+        }]
+    );
+    let finished = index(&[("other", "1", "2")], true);
+    assert_eq!(
+        need_with(
+            "BuildRequires: libb-devel >= 2.0\n",
+            std::slice::from_ref(&no_version),
+            &finished
+        ),
+        vec![SameNeed::NoUpdate {
+            bound: "libb-devel >= 2.0".into()
+        }]
+    );
+    assert_eq!(
+        need_with("BuildRequires: libb-devel\n", &[no_version], &idx),
+        vec![SameNeed::NotNeeded]
+    );
+}
