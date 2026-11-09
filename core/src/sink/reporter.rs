@@ -37,6 +37,9 @@ pub fn is_lifecycle(event: &Event) -> bool {
             | Event::PackageFinished { .. }
             | Event::PackageDropped { .. }
             | Event::SweepChecking { .. }
+            // The answer that closes the row SweepChecking opened: a drop
+            // would leave that row `checking`.
+            | Event::SweepProgress { .. }
             | Event::TargetSelected { .. }
             | Event::RunFinished { .. }
     )

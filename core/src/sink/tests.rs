@@ -296,3 +296,22 @@ fn nested_contexts_restore_outer_pkg_on_drop() {
     // the ambient pkg was fully torn down after the whole call ends.
     assert_eq!(current_pkg(), None);
 }
+
+#[test]
+fn a_sweep_answer_is_a_lifecycle_event_like_the_check_that_began_it() {
+    use super::*;
+    let began = Event::SweepChecking {
+        package: "p".into(),
+    };
+    let answer = Event::SweepProgress {
+        checked: 1,
+        to_update: 0,
+        up_to_date: 1,
+        skipped: 0,
+        finished: false,
+        package: None,
+        total: None,
+    };
+    assert!(is_lifecycle(&began));
+    assert!(is_lifecycle(&answer));
+}
