@@ -8,12 +8,16 @@
 //! bound that cannot be compared with the versions also updates it, since the
 //! bound may need the update. `--test-against-updates` updates every dependency that has a newer release.
 //!
+//! The spec is read before the package is updated, so for a PyPI source the
+//! new release's `Requires-Dist` is read too ([`predict`]): a bound it puts on
+//! a dependency the spec names counts as the spec's would.
+//!
 //! A branched dependency is the branch project's own: until it has built,
 //! it hides the origin's binaries from every package of the branch, so a
 //! package that uses it waits for its build.
 
 use super::*;
-use ap_build::depreach::DepNeed;
+use ap_build::depreach::{DepNeed, Prediction};
 use ap_build::spec::Requirement;
 use ap_build::update_project::RequiredUpdate;
 
@@ -32,24 +36,85 @@ pub(super) enum DepChoice {
     Origin(String),
 }
 
+/// What the new release of `item` requires, from PyPI's metadata, when it is
+/// an update from PyPI. One request, through the per-host limit of every
+/// upstream request; a failure is said and leaves the decision to the spec.
+pub(super) fn predict(item: &Item, ctx: &Ctx<'_>) -> Prediction {
+    if item.old_version == item.new_version {
+        return Prediction::Unknown;
+    }
+    let prediction = depreach::predicted_requirements(
+        &item.ecosystem,
+        &item.new_version,
+        ap_build::pipeline::fetch_pypi_json,
+    );
+    if let Prediction::Failed(why) = &prediction {
+        ctx.say(format!(
+            "{}: not predicting the requirements of {} ({why}); its dependencies are \
+             chosen from the spec as it is before the update",
+            item.pkg, item.new_version
+        ));
+    }
+    prediction
+}
+
 /// What becomes of `dep`, a dependency of `parent` that `origin` publishes
 /// (`origin.names` are what `parent` requires it by), given `parent`'s
-/// requirements `reqs`. `branch` is the branch project.
+/// requirements `reqs` and what its new release is predicted to require.
+/// `branch` is the branch project.
 pub(super) fn choose_dependency(
     test_against_updates: bool,
     reqs: &[Requirement],
+    prediction: &Prediction,
     origin: &depreach::DependencyOrigin,
     dep: &Item,
     parent: &str,
     branch: &str,
 ) -> DepChoice {
-    let need = depreach::dependency_need(
+    let spec_need = depreach::dependency_need(
         reqs,
         &origin.names,
         &dep.old_version,
         &origin.provided,
         &dep.new_version,
     );
+    let (predicted, release) = match prediction {
+        Prediction::Requirements {
+            version,
+            requirements,
+        } => (
+            depreach::predicted_need(
+                requirements,
+                &dep.pkg,
+                &origin.names,
+                &dep.old_version,
+                &dep.new_version,
+            ),
+            version.as_str(),
+        ),
+        Prediction::Unknown | Prediction::Failed(_) => (None, ""),
+    };
+    let checked = predicted.is_some();
+    let (need, from_prediction) = depreach::combined_need(spec_need, predicted);
+    // A requirement the prediction gave is named with where it comes from.
+    let named = |text: String| {
+        if from_prediction {
+            format!("{text} (PyPI's Requires-Dist of {parent} {release})")
+        } else {
+            text
+        }
+    };
+    let need = match need {
+        DepNeed::Update(t) => DepNeed::Update(named(t)),
+        DepNeed::Unmet(t) => DepNeed::Unmet(named(t)),
+        DepNeed::Unknown(t) => DepNeed::Unknown(named(t)),
+        DepNeed::Origin => DepNeed::Origin,
+    };
+    let needs = if checked {
+        format!("neither its BuildRequires nor PyPI's Requires-Dist of {release} need")
+    } else {
+        "its BuildRequires do not need".to_string()
+    };
     let required = |requirement: String| RequiredUpdate {
         pkg: dep.pkg.clone(),
         branch_package: format!("{branch}/{}", dep.pkg),
@@ -63,8 +128,8 @@ pub(super) fn choose_dependency(
         DepNeed::Update(requirement) => DepChoice::Update(Some(required(requirement))),
         _ if test_against_updates => DepChoice::Update(None),
         DepNeed::Origin => DepChoice::Origin(format!(
-            "{parent} builds against {pkg} {old} from {origin}: its BuildRequires do not need \
-             {new} (--test-against-updates updates it first)"
+            "{parent} builds against {pkg} {old} from {origin}: {needs} {new} \
+             (--test-against-updates updates it first)"
         )),
         DepNeed::Unmet(requirement) => DepChoice::Origin(format!(
             "{parent} needs {requirement}, which neither {pkg} {old} in {origin} nor {new} \

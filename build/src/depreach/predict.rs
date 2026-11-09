@@ -15,7 +15,7 @@
 
 use super::*;
 use crate::distro_bounds::{marker_applies, parse_requirement};
-use crate::osc::rpm_name;
+use crate::osc::{fuzzy_key, rpm_name, strip_rpm_prefix};
 use crate::spec::{Bound, Requirement};
 use crate::update::Ecosystem;
 
@@ -187,5 +187,69 @@ pub fn python3_name(pypi_name: &str) -> String {
     match rpm.strip_prefix("python-") {
         Some(rest) => format!("python3-{rest}"),
         None => rpm,
+    }
+}
+
+/// What the predicted `requirements` need of the dependency `dep_pkg` (its
+/// source package), which the spec requires by `names`, whose origin has
+/// `origin_version` and whose update brings `new_version`. `None` when no
+/// requirement names it: the package is matched as `python-<name>`, and a
+/// name the spec gives with a Python prefix (`python313-<name>`) by what
+/// follows it.
+pub fn predicted_need(
+    requirements: &[PredictedRequirement],
+    dep_pkg: &str,
+    names: &[String],
+    origin_version: &str,
+    new_version: &str,
+) -> Option<DepNeed> {
+    let key = fuzzy_key(dep_pkg);
+    let python_names: Vec<String> = names
+        .iter()
+        .filter(|n| strip_rpm_prefix(n) != n.as_str())
+        .map(|n| fuzzy_key(strip_rpm_prefix(n)))
+        .collect();
+    let matched: Vec<&PredictedRequirement> = requirements
+        .iter()
+        .filter(|p| {
+            fuzzy_key(&rpm_name(&p.pypi_name)) == key
+                || python_names.contains(&fuzzy_key(&p.pypi_name))
+        })
+        .collect();
+    if matched.is_empty() {
+        return None;
+    }
+    let reqs: Vec<Requirement> = matched.iter().map(|p| p.requirement.clone()).collect();
+    let mut by: Vec<String> = Vec::new();
+    for p in &matched {
+        if let BuildRequire::Package(n) = &p.requirement.dep
+            && !by.contains(n)
+        {
+            by.push(n.clone());
+        }
+    }
+    Some(dependency_need(
+        &reqs,
+        &by,
+        origin_version,
+        &[],
+        new_version,
+    ))
+}
+
+/// The stronger of what the spec needs and what the prediction needs, in the
+/// order [`dependency_need`] decides in (`Update`, `Unknown`, `Unmet`,
+/// `Origin`), and whether the prediction decided it. On a tie the spec's is
+/// kept.
+pub fn combined_need(spec: DepNeed, predicted: Option<DepNeed>) -> (DepNeed, bool) {
+    let rank = |n: &DepNeed| match n {
+        DepNeed::Origin => 0,
+        DepNeed::Unmet(_) => 1,
+        DepNeed::Unknown(_) => 2,
+        DepNeed::Update(_) => 3,
+    };
+    match predicted {
+        Some(p) if rank(&p) > rank(&spec) => (p, true),
+        _ => (spec, false),
     }
 }

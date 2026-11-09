@@ -426,8 +426,18 @@ fn prepare(
                         visited: &mut visited,
                         count: &mut dependency_count,
                     };
-                    let found =
-                        dependency_items(a, branch, &item, &reqs, &verdicts, &adds, ctx, emit);
+                    let prediction = || predict(&item, ctx);
+                    let found = dependency_items(
+                        a,
+                        branch,
+                        &item,
+                        &reqs,
+                        &verdicts,
+                        &adds,
+                        &prediction,
+                        ctx,
+                        emit,
+                    );
                     for (dep, choice) in found {
                         deps.add(&mut item, dep, choice, &mut after, ctx.reporter.as_ref());
                     }

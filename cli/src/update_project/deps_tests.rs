@@ -1,4 +1,5 @@
 use super::*;
+use ap_build::depreach::Prediction;
 use ap_build::spec::build_requirements;
 use clap::Parser;
 use std::sync::Mutex;
@@ -60,9 +61,54 @@ fn choose_with(
     choose_dependency(
         test_against_updates,
         &reqs,
+        &Prediction::Unknown,
         &origin,
         &libbar(),
         "libfoo",
+        BRANCH,
+    )
+}
+
+/// python-bar 1.0 in devel:languages:python, with 2.0 released, which the
+/// spec of python-foo requires as `python3-bar`.
+fn python_bar() -> (Item, depreach::DependencyOrigin) {
+    let mut bar = libbar();
+    bar.pkg = "python-bar".into();
+    bar.origin = "devel:languages:python".into();
+    let origin = depreach::DependencyOrigin {
+        project: bar.origin.clone(),
+        package: bar.pkg.clone(),
+        names: vec!["python3-bar".to_string()],
+        provided: Vec::new(),
+    };
+    (bar, origin)
+}
+
+/// What becomes of python-bar for python-foo, whose spec is `spec` and whose
+/// release 3.0 has PyPI's `requires_dist` `lines` (`None`: no prediction).
+fn choose_predicted(spec: &str, lines: Option<&[&str]>) -> DepChoice {
+    let (bar, origin) = python_bar();
+    let prediction = match lines {
+        Some(lines) => {
+            let json = serde_json::json!({
+                "info": { "version": "3.0", "requires_dist": lines },
+            })
+            .to_string();
+            let pypi = ap_build::update::Ecosystem::Pypi {
+                pypi_name: "foo".into(),
+            };
+            depreach::predicted_requirements(&pypi, "3.0", |_, _| Ok(Some(json)))
+        }
+        None => Prediction::Failed("no metadata".into()),
+    };
+    let reqs = build_requirements(spec);
+    choose_dependency(
+        false,
+        &reqs,
+        &prediction,
+        &origin,
+        &bar,
+        "python-foo",
         BRANCH,
     )
 }
@@ -253,4 +299,59 @@ fn a_needed_dependency_over_the_limit_is_not_named_as_required() {
     // Nothing is queued, so there is no key to wait for either.
     assert!(after.is_empty());
     assert!(lines.0.lock().unwrap()[0].starts_with("warning: --update-deps: not updating libbar"));
+}
+
+#[test]
+fn a_bound_the_new_release_adds_branches_the_dependency_on_the_first_run() {
+    // The spec before the update has no bound; the new release needs bar >= 1.5.
+    let spec = "BuildRequires: python3-bar\n";
+    let DepChoice::Update(Some(r)) = choose_predicted(spec, Some(&["bar>=1.5"])) else {
+        panic!("python-bar should be updated first");
+    };
+    assert_eq!(
+        r.requirement,
+        "python3-bar >= 1.5 (PyPI's Requires-Dist of python-foo 3.0)"
+    );
+    // Without a prediction the spec decides, as before.
+    assert!(matches!(choose_predicted(spec, None), DepChoice::Origin(_)));
+}
+
+#[test]
+fn a_predicted_bound_the_origin_meets_leaves_the_dependency_to_its_origin() {
+    let spec = "BuildRequires: python3-bar\n";
+    let DepChoice::Origin(why) = choose_predicted(spec, Some(&["bar>=0.9", "baz>=7"])) else {
+        panic!("python-bar should come from its origin");
+    };
+    assert!(
+        why.contains("neither its BuildRequires nor PyPI's Requires-Dist of 3.0 need 2.0"),
+        "{why}"
+    );
+    // The spec's own bound still counts.
+    assert!(matches!(
+        choose_predicted("BuildRequires: python3-bar >= 1.5\n", Some(&["bar>=0.9"])),
+        DepChoice::Update(Some(_))
+    ));
+}
+
+#[test]
+fn a_predicted_bound_that_cannot_be_compared_still_branches() {
+    let choice = choose_predicted("BuildRequires: python3-bar\n", Some(&["bar>=1!1.5"]));
+    assert!(
+        matches!(choice, DepChoice::UpdateUnchecked(_)),
+        "{choice:?}"
+    );
+}
+
+#[test]
+fn metadata_that_cannot_be_read_falls_back_to_the_spec() {
+    // An unreadable line gives no prediction, so the spec's bound decides.
+    let lines: &[&str] = &["bar>=1.5", "bar ^2"];
+    assert!(matches!(
+        choose_predicted("BuildRequires: python3-bar\n", Some(lines)),
+        DepChoice::Origin(_)
+    ));
+    assert!(matches!(
+        choose_predicted("BuildRequires: python3-bar >= 1.5\n", Some(lines)),
+        DepChoice::Update(Some(_))
+    ));
 }

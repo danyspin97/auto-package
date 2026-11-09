@@ -135,3 +135,90 @@ fn a_source_other_than_pypi_is_not_predicted_or_fetched() {
     let p = predicted_requirements(&forge, "3.0", |_, _| panic!("no fetch"));
     assert_eq!(p, Prediction::Unknown);
 }
+
+/// What `lines` (pkg 3.0's Requires-Dist) need of the dependency `dep`,
+/// required by `names`, at `origin` with `new` released.
+fn need_of(lines: &[&str], dep: &str, names: &[&str], origin: &str, new: &str) -> Option<DepNeed> {
+    let Prediction::Requirements { requirements, .. } = predict(lines) else {
+        panic!("no prediction");
+    };
+    let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    predicted_need(&requirements, dep, &names, origin, new)
+}
+
+#[test]
+fn a_predicted_bound_above_the_origin_needs_the_update() {
+    assert_eq!(
+        need_of(&["foo>=2.1"], "python-foo", &[], "2.0", "2.4"),
+        Some(DepNeed::Update("python3-foo >= 2.1".into()))
+    );
+}
+
+#[test]
+fn a_predicted_bound_the_origin_meets_needs_nothing() {
+    assert_eq!(
+        need_of(&["foo>=1.5,<3"], "python-foo", &[], "2.0", "3.1"),
+        Some(DepNeed::Origin)
+    );
+    // A requirement that names another package says nothing of this one.
+    assert_eq!(need_of(&["bar>=9"], "python-foo", &[], "2.0", "3.1"), None);
+    // One that is not comparable may need it.
+    assert!(matches!(
+        need_of(&["foo>=1!2.0"], "python-foo", &[], "2.0", "3.1"),
+        Some(DepNeed::Unknown(_))
+    ));
+}
+
+#[test]
+fn a_dependency_is_matched_whatever_its_separators() {
+    let lines = ["Ruamel_Yaml.Clib>=0.3"];
+    for dep in [
+        "python-ruamel.yaml.clib",
+        "python-ruamel-yaml-clib",
+        "python-ruamel_yaml_clib",
+    ] {
+        assert!(
+            matches!(
+                need_of(&lines, dep, &[], "0.2", "0.3"),
+                Some(DepNeed::Update(_))
+            ),
+            "{dep}"
+        );
+    }
+    // A source package named otherwise is matched by the name the spec
+    // gives it with a Python prefix, but not by a bare one.
+    let flavoured = need_of(
+        &lines,
+        "ruamel-clib",
+        &["python313-ruamel.yaml.clib"],
+        "0.2",
+        "0.3",
+    );
+    assert!(matches!(flavoured, Some(DepNeed::Update(_))));
+    assert_eq!(
+        need_of(&["cmake>=4"], "cmake", &["cmake"], "3.0", "4.1"),
+        None
+    );
+}
+
+#[test]
+fn the_stronger_need_decides_and_the_spec_wins_a_tie() {
+    let update = DepNeed::Update("python3-foo >= 2".into());
+    assert_eq!(
+        combined_need(DepNeed::Origin, Some(update.clone())),
+        (update.clone(), true)
+    );
+    assert_eq!(
+        combined_need(update.clone(), Some(DepNeed::Origin)),
+        (update.clone(), false)
+    );
+    let unknown = DepNeed::Unknown("foo >= %{x}".into());
+    assert_eq!(
+        combined_need(DepNeed::Unmet("foo >= 9".into()), Some(unknown.clone())),
+        (unknown, true)
+    );
+    assert_eq!(
+        combined_need(DepNeed::Origin, None),
+        (DepNeed::Origin, false)
+    );
+}

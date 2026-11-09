@@ -350,8 +350,8 @@ fn report_no_provider(
 
 /// The dependencies of `parent` that live in another project and have a newer
 /// upstream release, as items to branch from that project, each with what
-/// becomes of it given `parent`'s requirements `reqs` (see
-/// [`choose_dependency`]).
+/// becomes of it given `parent`'s requirements `reqs` and what `predict`
+/// says its new release requires (see [`choose_dependency`]).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn dependency_items(
     a: &UpdateProjectArgs,
@@ -360,10 +360,13 @@ pub(super) fn dependency_items(
     reqs: &[ap_build::spec::Requirement],
     verdicts: &[depreach::DepVerdict],
     adds: &[PathAddition],
+    predict: &dyn Fn() -> depreach::Prediction,
     ctx: &Ctx<'_>,
     emit: Emit<'_>,
 ) -> Vec<(Item, DepChoice)> {
     let mut out = Vec::new();
+    // Asked once, and only for a package that has a dependency to choose for.
+    let prediction = std::cell::OnceCell::new();
     for origin in
         depreach::dependency_origins(verdicts, adds, branch, &a.source, !a.test_against_updates)
     {
@@ -388,6 +391,7 @@ pub(super) fn dependency_items(
                     let choice = choose_dependency(
                         a.test_against_updates,
                         reqs,
+                        prediction.get_or_init(predict),
                         &origin,
                         &item,
                         &parent.pkg,
