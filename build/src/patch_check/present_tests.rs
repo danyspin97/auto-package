@@ -133,3 +133,23 @@ fn a_removal_whose_removed_line_still_follows_its_context_is_not_proven() {
         "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1 @@\n int keep_me = 1;\n-int gone_line = 9;\n";
     assert!(!already_in_tarball(&tar, removal.as_bytes(), 1));
 }
+
+#[test]
+fn a_comment_with_a_typo_fixed_upstream_is_proven_but_a_code_change_is_not() {
+    // The added comment has a typo the archive corrected (the pyenv case): it
+    // matches the file's comment, the added code line matches exactly.
+    let (_dir, tar) = one_file(
+        "before_line = 1;\n# Look in each of the implementations for a version file.\nfind_local_version_file \"${PYENV_DIR:=$PWD}\" || {\nafter_line = 2;\n",
+    );
+    let typo = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,4 @@\n before_line = 1;\n+# Look in each of the implemntations for a version file.\n+find_local_version_file \"${PYENV_DIR:=$PWD}\" || {\n after_line = 2;\n";
+    assert!(already_in_tarball(&tar, typo.as_bytes(), 1));
+    // One code character differs: a code line matches only exactly.
+    let code = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,4 @@\n before_line = 1;\n+# Look in each of the implemntations for a version file.\n+find_local_version_file \"${PYENV_DIR:=$CWD}\" || {\n after_line = 2;\n";
+    assert!(!already_in_tarball(&tar, code.as_bytes(), 1));
+    // A comment that differs in more than a typo is not the same comment.
+    let other = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,4 @@\n before_line = 1;\n+# Search the parent directories for a version file here.\n+find_local_version_file \"${PYENV_DIR:=$PWD}\" || {\n after_line = 2;\n";
+    assert!(!already_in_tarball(&tar, other.as_bytes(), 1));
+    // A hunk of comment lines alone proves nothing: it needs an added code line.
+    let only_comment = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,3 @@\n before_line = 1;\n+# Look in each of the implemntations for a version file.\n after_line = 2;\n";
+    assert!(!already_in_tarball(&tar, only_comment.as_bytes(), 1));
+}
