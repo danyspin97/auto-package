@@ -60,7 +60,7 @@ impl SubmitBackend {
         }
         let own = self
             .untied_wait
-            .get_or_init(|| ArchDeadline::starting_at(osc::OVERALL_MAX_WAIT, Instant::now()));
+            .get_or_init(|| batch_deadline(&self.arch_deadline, Instant::now()));
         let arch_wait = if self.arch_checked_for(&item.pkg) {
             ArchWait::Awaited
         } else {
@@ -173,6 +173,12 @@ impl tui::PackageBackend for SubmitBackend {
     }
 }
 
+/// The deadline of a submit wait not tied to a build of the run: one bound,
+/// the run's `--arch-wait-minutes` (see `ArchDeadline::bound`), from `at`.
+pub(super) fn batch_deadline(run: &ArchDeadline, at: Instant) -> ArchDeadline {
+    ArchDeadline::starting_at(run.bound(), at)
+}
+
 /// Drops the fix-loop and risk flags of a package whose request was created:
 /// the request text carries them from then on. A failure keeps them, which is
 /// the safe side: they are shown again rather than lost.
@@ -198,7 +204,7 @@ pub(super) fn submit_requests(
     let emit = Emit::run(ctx.reporter.as_ref());
     // The packages not checked wait for one deadline: the run's once a build
     // of the run ended, else one bound for this batch (not one per package).
-    let batch = ArchDeadline::starting_at(osc::OVERALL_MAX_WAIT, Instant::now());
+    let batch = batch_deadline(&ctx.arch_deadline, Instant::now());
     let wait = submit_deadline(&ctx.arch_deadline, &batch);
     let mut pending: Vec<(usize, osc::SubmitRequest)> = Vec::new();
     for (idx, r) in results.iter_mut().enumerate() {

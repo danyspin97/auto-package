@@ -63,6 +63,8 @@ mod schedule;
 #[cfg(test)]
 mod schedule_tests;
 mod submit;
+#[cfg(test)]
+mod submit_wait_tests;
 mod throttle;
 mod tidy;
 mod tui_row;

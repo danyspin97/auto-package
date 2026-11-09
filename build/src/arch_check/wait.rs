@@ -79,6 +79,12 @@ impl ArchDeadline {
             .is_some()
     }
 
+    /// The bound each deadline lasts from its start: the run's
+    /// `--arch-wait-minutes`.
+    pub fn bound(&self) -> Duration {
+        self.bound
+    }
+
     /// The time the waits may still go on at `now`.
     pub fn left(&self, now: Instant) -> Duration {
         let until = *self.until.lock().unwrap_or_else(|p| p.into_inner());

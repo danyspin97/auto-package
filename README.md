@@ -388,6 +388,8 @@ check, and `--ports` adds the Factory ports. A failure there shows as
 
 The run waits for those builds for `--arch-wait-minutes` (30 by default) after
 its last build ends, shared by all its packages, so the waits do not add up.
+A submit of a package whose check did not run in the run waits under the
+same bound.
 A build still going at that point is not final: it does not hold a submit, and
 the request's description says so per architecture (for example `scheduled on
 s390x at submit time`).
