@@ -99,7 +99,7 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--allow-host <HOST>`: Allow this host for services and source fetches for this run only; repeatable. See [Allowing a website](#allowing-a-website)
 - `--tui`: Enable interactive TUI mode
 - `--log`: Log level when not using TUI: error, warn, info, debug, trace (default: `info`)
-- `--max-attempts`: Maximum AI fix attempts per package (default: 10)
+- `--max-attempts`: Maximum AI fix attempts per package (default: 10) A failure that repeats with the same reason and no build in between is not run as it was: the next attempt is told what already failed and to try a different approach. Three identical failures after that instruction end the package as needing a human, with the list of what it tried.
 - `--budget-usd`: USD budget cap for AI calls, per package (its spend counts within one run; default: 10.0). A turn is not started when the spend so far plus the last turn's cost would reach it, and the package stops with that reason. Two `no change` answers in a row of one task kind with the same reasoning stop it too.
 - `--max-total-usd <USD>`: most the AI may spend per UTC day across all runs and processes sharing the work directory, kept in `<work-dir>/ledger.json` (default: 50). A turn that would pass it is refused with a message naming the cap; an unreadable or locked ledger refuses too.
 - `--max-packages <N>`: most packages one run starts, counting the dependency closure (default: 25, 0 = unlimited). Past it nothing more is queued and the run stops and says so.
