@@ -28,6 +28,8 @@ pub(super) struct PlanReport {
     pub(super) unreadable: Vec<String>,
     /// The skipped packages counted by their reason (see [`skip_label`]).
     by_reason: std::collections::BTreeMap<String, usize>,
+    /// How many packages the sweep checks in all, once the sweep knows it.
+    pub(super) total: Option<usize>,
 }
 
 /// The label a skip counts under in the plan line: the reason's kind, and
@@ -130,7 +132,7 @@ impl PlanReport {
             skipped: self.n_skipped,
             finished,
             package,
-            total: None,
+            total: self.total,
         });
     }
 
@@ -233,11 +235,36 @@ impl Sweep {
         let thread_hand = hand.clone();
         let handle = std::thread::spawn(move || {
             let mut plan = PlanReport::default();
-            let swept = ap_build::update::plan_each(
+            // The count the sweep checks, once known: the `total` of the
+            // progress reports that follow it.
+            let total = std::cell::Cell::new(None);
+            let counted = |n: usize| {
+                total.set(Some(n));
+                reporter.report(&Event::SweepProgress {
+                    checked: 0,
+                    to_update: 0,
+                    up_to_date: 0,
+                    skipped: 0,
+                    finished: false,
+                    package: None,
+                    total: Some(n),
+                });
+            };
+            let started = |name: &str| {
+                reporter.report(&Event::SweepChecking {
+                    package: name.to_string(),
+                });
+            };
+            let swept = ap_build::update::plan_each_watched(
                 &project,
                 &|n| update_project::wanted_by(&only, &exclude, n),
                 ap_build::proc::Emit::run(reporter.as_ref()),
+                ap_build::update::Watch {
+                    total: &counted,
+                    started: &started,
+                },
                 &mut |c| {
+                    plan.total = total.get();
                     plan.add(&c, reporter.as_ref());
                     let is_update = matches!(
                         &c.decision,
@@ -255,6 +282,7 @@ impl Sweep {
             // The channel ends with the sweep, whether it finished or failed.
             thread_hand.close();
             swept?;
+            plan.total = total.get();
             plan.finish(reporter.as_ref());
             Ok(plan)
         });
@@ -369,116 +397,8 @@ pub(super) fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts
 }
 
 #[cfg(test)]
-mod tests {
-    use super::PlanReport;
-    use ap_build::update::{Candidate, Decision, SkipReason};
-    use ap_core::sink::NullReporter;
-
-    fn skipped(name: &str, reason: SkipReason) -> Candidate {
-        Candidate {
-            rpm_name: name.to_string(),
-            decision: Decision::Skipped(reason),
-            notes: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn a_failed_read_is_unreadable_and_a_404_is_not_on_obs() {
-        let mut plan = PlanReport::default();
-        plan.add(
-            &skipped("a", SkipReason::ReadFailed("listing failed".into())),
-            &NullReporter,
-        );
-        plan.add(
-            &skipped("b", SkipReason::NotOnObs("gone".into())),
-            &NullReporter,
-        );
-        plan.add(&skipped("c", SkipReason::NoSpec), &NullReporter);
-        assert_eq!(plan.unreadable, ["a: listing failed"]);
-        assert_eq!(plan.n_not_on_obs, 1);
-        assert_eq!(plan.total(), 3);
-        // NoSpec is a package found on purpose, so the run is not all-absent.
-        assert!(!plan.only_absent());
-    }
-
-    #[test]
-    fn a_sweep_that_found_only_absent_or_no_packages_is_not_a_checked_one() {
-        assert!(PlanReport::default().only_absent());
-        let absent = PlanReport {
-            n_skipped: 2,
-            n_not_on_obs: 2,
-            ..Default::default()
-        };
-        assert!(absent.only_absent());
-        let mixed = PlanReport {
-            n_skipped: 2,
-            n_not_on_obs: 1,
-            ..Default::default()
-        };
-        assert!(!mixed.only_absent());
-        let skipped_on_purpose = PlanReport {
-            n_skipped: 1,
-            ..Default::default()
-        };
-        assert!(!skipped_on_purpose.only_absent());
-        let found = PlanReport {
-            n_update: 1,
-            ..Default::default()
-        };
-        assert!(!found.only_absent());
-    }
-
-    #[test]
-    fn the_plan_line_breaks_the_skips_down_by_reason() {
-        let mut plan = PlanReport::default();
-        plan.add(&skipped("a", SkipReason::NoSpec), &NullReporter);
-        plan.add(&skipped("b", SkipReason::NoSpec), &NullReporter);
-        plan.add(
-            &skipped("c", SkipReason::ReadFailed("interrupted".into())),
-            &NullReporter,
-        );
-        assert_eq!(plan.by_reason.get("NoSpec"), Some(&2));
-        assert_eq!(plan.by_reason.get("stopped"), Some(&1));
-        assert_eq!(super::skip_label(&SkipReason::NoSpec), "NoSpec");
-        let lookup = SkipReason::LookupFailed {
-            ecosystem_tag: "PyPI".into(),
-            name: "x".into(),
-            error: "404".into(),
-        };
-        assert_eq!(super::skip_label(&lookup), "LookupFailed");
-        assert_eq!(SkipReason::NotOnObs("gone".into()).kind(), "NotOnObs");
-    }
-
-    #[test]
-    fn a_lookup_an_outage_failed_is_incomplete_not_a_skip() {
-        let mut plan = PlanReport::default();
-        plan.add(
-            &skipped(
-                "mailchariot",
-                SkipReason::LookupFailed {
-                    ecosystem_tag: "GitRepo".into(),
-                    name: "https://example.org/x".into(),
-                    error: "http status: 503".into(),
-                },
-            ),
-            &NullReporter,
-        );
-        plan.add(
-            &skipped(
-                "gone",
-                SkipReason::LookupFailed {
-                    ecosystem_tag: "PyPI".into(),
-                    name: "gone".into(),
-                    error: "http status: 404".into(),
-                },
-            ),
-            &NullReporter,
-        );
-        assert_eq!(plan.unreadable.len(), 1);
-        assert!(plan.unreadable[0].starts_with("mailchariot: "));
-        assert_eq!(plan.n_skipped, 2);
-    }
-}
+#[path = "sweep/plan_tests.rs"]
+mod tests;
 
 #[cfg(test)]
 mod swept_package_tests {
