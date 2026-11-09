@@ -61,6 +61,11 @@ mod request;
 mod requested;
 mod rpmlint_audit;
 mod run;
+// Not called yet: the wiring into the preparation loop is a task of its own.
+#[allow(dead_code)]
+mod same_project;
+#[cfg(test)]
+mod same_project_tests;
 mod schedule;
 #[cfg(test)]
 mod schedule_tests;
