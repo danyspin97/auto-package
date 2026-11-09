@@ -101,6 +101,7 @@ fn run_stage(spec: &str, src0: &[u8], update: bool) -> (tempfile::TempDir, Pipel
         post_review_revert: None,
         rpmlint_shown: Default::default(),
         update: None,
+        carried: None,
         build_rounds: Default::default(),
     };
     let result = match zig_vendor_stage(&ctx, &mut st) {

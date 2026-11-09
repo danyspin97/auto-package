@@ -152,6 +152,7 @@ fn state() -> RunState {
         post_review_revert: None,
         rpmlint_shown: Default::default(),
         update: None,
+        carried: None,
     }
 }
 

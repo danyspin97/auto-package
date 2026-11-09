@@ -271,6 +271,7 @@ use obs_names::*;
 mod checkout;
 use checkout::*;
 use update_mode::*;
+mod carried_origin;
 mod generate_stage;
 mod recap_entry;
 mod unknown_build;
@@ -303,6 +304,8 @@ mod removal_proof;
 #[cfg(test)]
 mod removal_proof_tests;
 use patch_apply::*;
+#[cfg(test)]
+mod carried_origin_tests;
 mod sdist_stage;
 #[cfg(test)]
 mod update_mode_tests;

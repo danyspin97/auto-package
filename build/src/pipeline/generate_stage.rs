@@ -62,6 +62,11 @@ pub(super) fn generate_spec_stage(
     let origin = (config.update && spec_existed_before_generation)
         .then(|| update_mode::origin_base(&config.project, obs_name, reporter))
         .flatten();
+    // A bumped dependency's recipe is checked against its origin's spec too,
+    // read once here (see `carried_origin`).
+    let carried_spec = (config.carried_recipe && !config.update && spec_existed_before_generation)
+        .then(|| carried_origin::origin_spec(&config.project, obs_name, checkout_dir, reporter))
+        .flatten();
 
     let (sdist_top_level, is_maturin, from_repo_archive, is_rust) = if need_spec {
         let step = begin_or_fail!(
@@ -313,6 +318,11 @@ pub(super) fn generate_spec_stage(
     st.sdist_top_level = sdist_top_level;
     st.from_repo_archive = from_repo_archive;
     st.update = update_mode::update_mode(config.update, origin.as_ref(), carried_from.is_some());
+    st.carried = carried_origin::carried_mode(
+        carried_spec,
+        !need_spec || carried_from.is_some(),
+        config.update,
+    );
     Ok(SpecInfo {
         need_spec,
         is_maturin,

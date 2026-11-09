@@ -143,6 +143,7 @@ fn run(
         post_review_revert: None,
         rpmlint_shown: Default::default(),
         update: None,
+        carried: None,
     };
     let step_path = root.path().join("step");
     std::fs::create_dir_all(&step_path).unwrap();

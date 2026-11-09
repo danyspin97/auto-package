@@ -393,6 +393,9 @@ pub(super) struct RunState {
     /// Set when this run updates a package that already exists (see
     /// `update_mode`): the checks against the origin apply to it.
     pub(super) update: Option<UpdateMode>,
+    /// Set when this run carries a bumped dependency's recipe forward (see
+    /// `carried_origin`): the inherited problems are checked against its origin.
+    pub(super) carried: Option<UpdateMode>,
 }
 
 /// The state an edit made after a green build is rolled back to.
@@ -471,6 +474,7 @@ fn run_stages(
         post_review_revert: None,
         rpmlint_shown: Default::default(),
         update: None,
+        carried: None,
     };
 
     let checkout = checkout_stage(&ctx, &mut st)?;

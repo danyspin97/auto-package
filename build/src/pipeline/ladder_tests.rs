@@ -405,6 +405,7 @@ fn run_case_patched(
         post_review_revert: None,
         rpmlint_shown: Default::default(),
         update: None,
+        carried: None,
     };
     let snapshot = CheckoutSnapshot::take(&checkout);
     let step = StepDir {

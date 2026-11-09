@@ -314,7 +314,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
             let mut style = style_problems(&spec_text_now(spec_path), &source);
             // On an update, a problem the origin's spec has too was inherited:
             // it is reported, not fixed here (see `update_mode::split_inherited`).
-            if let Some(update) = st.update.as_mut() {
+            if let Some(update) = carried_origin::inherit_mode(st) {
                 let origin = update
                     .origin_spec
                     .as_deref()
@@ -380,10 +380,14 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                     }
                     // On an update, a missing path the origin's %check names too is
                     // inherited: reported, not a problem of this edit.
-                    let origin = st.update.as_ref().and_then(|u| u.origin_spec.as_deref());
-                    let (introduced, inherited) =
-                        missing_check_path_split(&spec_text_now(spec_path), origin, &have);
-                    if let Some(update) = st.update.as_mut() {
+                    let origin =
+                        carried_origin::inherit_mode(st).and_then(|u| u.origin_spec.clone());
+                    let (introduced, inherited) = missing_check_path_split(
+                        &spec_text_now(spec_path),
+                        origin.as_deref(),
+                        &have,
+                    );
+                    if let Some(update) = carried_origin::inherit_mode(st) {
                         for problem in newly_reported(&mut update.reported, inherited) {
                             reporter.report(&Event::Warning {
                                 step: Some(validate_step.id),
