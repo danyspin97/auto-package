@@ -102,6 +102,17 @@ pub(super) fn fetch_sdist_stage(
         );
     }
 
+    // The link follows what was unpacked: the name the archive gives its
+    // directory is not always the tarball's stem.
+    let top = unpacked_top_level(&ws.sdist_dir(), &st.sdist_top_level);
+    if top != st.sdist_top_level {
+        reporter.report(&Event::Progress {
+            step: None,
+            message: format!("the sdist unpacks into {top}/"),
+        });
+        st.sdist_top_level = top;
+    }
+
     // ── Quilt setup: create source/ symlink ───────────────────────────────────
     // Keep this fresh every run so the symlink is correct even when the sdist
     // top-level dir changes (e.g. after --regen with a new version).
@@ -121,4 +132,25 @@ pub(super) fn fetch_sdist_stage(
         }
     }
     Ok(())
+}
+
+/// The directory an extraction into `sdist_dir` is named by: `hint` when it
+/// exists, else the one entry the extraction holds when that is a single
+/// directory. An empty `hint` (a wheel unpacks flat) and an archive with
+/// several top-level entries keep `hint`.
+pub(super) fn unpacked_top_level(sdist_dir: &Path, hint: &str) -> String {
+    if hint.is_empty() || sdist_dir.join(hint).exists() {
+        return hint.to_string();
+    }
+    let entries: Vec<std::fs::DirEntry> = std::fs::read_dir(sdist_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .collect();
+    match entries.as_slice() {
+        [only] if only.file_type().is_ok_and(|t| t.is_dir()) => {
+            only.file_name().to_string_lossy().into_owned()
+        }
+        _ => hint.to_string(),
+    }
 }

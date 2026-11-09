@@ -308,6 +308,8 @@ use patch_apply::*;
 mod carried_origin_tests;
 mod sdist_stage;
 #[cfg(test)]
+mod sdist_stage_tests;
+#[cfg(test)]
 mod update_mode_tests;
 use patch_stage::*;
 mod patch_loop;

@@ -133,6 +133,14 @@ pub(super) fn find_sdist_top_level(checkout_dir: &Path, pkg_name: &str, version:
         if fname.ends_with(".whl") {
             return String::new();
         }
+        // The directory inside the archive is not always named after the file:
+        // `AMQPStorm-3.1.4.tar.gz` holds `amqpstorm-3.1.4/`. The archive's own
+        // top-level directory is the one the sources unpack into.
+        if let Ok(info) = ap_ecosystem::sdist::inspect(&tb)
+            && let Some(top) = info.top_level_dir
+        {
+            return top;
+        }
         for ext in &[".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".zip"] {
             if let Some(stem) = fname.strip_suffix(ext) {
                 return stem.to_string();
