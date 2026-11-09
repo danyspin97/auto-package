@@ -38,7 +38,7 @@ pub(super) fn violation(bound: &VersionSpecifiers, version: &Version) -> Option<
 
 /// One `Requires-Dist` line: the name, the version bound (empty when there is
 /// none) and the environment marker.
-pub(super) fn parse_requirement(line: &str) -> Option<(String, String, Option<String>)> {
+pub(crate) fn parse_requirement(line: &str) -> Option<(String, String, Option<String>)> {
     let (head, marker) = match line.split_once(';') {
         Some((h, m)) => (h, Some(m.trim().to_string())),
         None => (line, None),
@@ -65,7 +65,7 @@ pub(super) fn parse_requirement(line: &str) -> Option<(String, String, Option<St
 /// marker this does not understand, or one on the Python version, is taken to
 /// apply, so a bound is checked rather than skipped. An `extra == ...` marker
 /// is an optional dependency and does not apply.
-pub(super) fn marker_applies(marker: &str) -> bool {
+pub(crate) fn marker_applies(marker: &str) -> bool {
     if marker.contains("extra") {
         return false;
     }

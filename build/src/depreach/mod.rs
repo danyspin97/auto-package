@@ -38,6 +38,9 @@ mod judge;
 mod obs;
 #[cfg(test)]
 mod origin_tests;
+mod predict;
+#[cfg(test)]
+mod predict_tests;
 mod requirements;
 #[cfg(test)]
 mod requirements_limit_tests;
@@ -54,5 +57,6 @@ pub use capability::*;
 pub use flags::*;
 pub use judge::*;
 pub use obs::*;
+pub use predict::*;
 pub use resolver::*;
 pub use update_first::*;
