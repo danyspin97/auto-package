@@ -171,12 +171,14 @@ pub fn instruction_text(record: &RetryRecord, offer_blocked: bool) -> String {
     text
 }
 
-/// Whether a retry instruction is ever given to `task`: only the turns that
-/// fix the spec after a failed build or validation.
+/// Whether a retry instruction is ever given to `task`: the turns that fix the
+/// spec after a failed build or validation, and the turn that rebases the
+/// patches (its menu is the patch one, see [`menu_for`]). A review judges a
+/// verdict and is not told to try another approach.
 fn is_fix_task(task: Task) -> bool {
     matches!(
         task,
-        Task::FixAfterBuild | Task::FixAfterValidation | Task::RpmlintFix
+        Task::FixAfterBuild | Task::FixAfterValidation | Task::RpmlintFix | Task::RefreshPatches
     )
 }
 
@@ -437,6 +439,7 @@ mod tests {
             Task::FixAfterBuild,
             Task::FixAfterValidation,
             Task::RpmlintFix,
+            Task::RefreshPatches,
         ] {
             assert!(
                 instruction_for_turn(&rec, "1.0", task, false).is_some(),
@@ -447,7 +450,6 @@ mod tests {
             Task::Review,
             Task::PostBuildReview,
             Task::PatchReview,
-            Task::RefreshPatches,
             Task::PatchDependency,
             Task::TranslateUnresolvableDeps,
             Task::FixBug,
@@ -460,6 +462,17 @@ mod tests {
                 "{task:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_refresh_turn_repeating_a_patch_failure_gets_the_patch_menu() {
+        let mut rec = RetryRecord::default();
+        let reason = "needs a human: 2 patch(es) do not apply to the 1.0 sources";
+        rec.note_failure("1.0", reason, false);
+        rec.note_failure("1.0", reason, true);
+        let text = instruction_for_turn(&rec, "1.0", Task::RefreshPatches, false).expect("due");
+        assert!(text.contains("The same failure happened 2 times"), "{text}");
+        assert!(text.contains("Drop or replace the patch"), "{text}");
     }
 
     #[test]
