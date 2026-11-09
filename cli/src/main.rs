@@ -529,6 +529,9 @@ mod tests;
 mod dep_drops_tests;
 
 #[cfg(test)]
+mod outdated_bound_tests;
+
+#[cfg(test)]
 mod blocked_summary_tests;
 
 #[cfg(test)]

@@ -139,6 +139,20 @@ impl OutdatedNames {
     }
 }
 
+/// The name the repository lists `dep` under (`python-kombu` for `kombu`), or
+/// the RPM name when it lists none.
+pub(crate) fn own_name(dep: &str, own_listing: &std::collections::HashSet<String>) -> String {
+    let rpm = ap_build::osc::rpm_name(dep);
+    own_listing
+        .iter()
+        .find(|p| {
+            let k = ap_build::osc::project_key(p);
+            k == ap_build::osc::project_key(&rpm) || k == ap_build::osc::project_key(dep)
+        })
+        .cloned()
+        .unwrap_or(rpm)
+}
+
 /// The config to bring `dep`, which the repository has at an older version than
 /// a dependent needs, up to the newest PyPI release: its existing recipe is
 /// carried forward (a package of this project as it is, a distro package after
@@ -152,15 +166,7 @@ pub(crate) fn update_config_for_outdated(
     reporter: &dyn Reporter,
     emit: ap_build::proc::Emit<'_>,
 ) -> Result<PipelineConfig, String> {
-    let rpm = ap_build::osc::rpm_name(dep);
-    let real = own_listing
-        .iter()
-        .find(|p| {
-            let k = ap_build::osc::project_key(p);
-            k == ap_build::osc::project_key(&rpm) || k == ap_build::osc::project_key(dep)
-        })
-        .cloned()
-        .unwrap_or(rpm);
+    let real = own_name(dep, own_listing);
     let header = ap_build::update::spec_for_package(project, &real, emit)
         .ok()
         .and_then(|text| ap_build::spec::parse_header(&text));

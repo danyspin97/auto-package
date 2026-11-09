@@ -134,7 +134,10 @@ pub(super) fn drain_dep_queue(b: Build<'_>, repeats: &mut RepeatMemory) -> color
         // A dependency the repository has at an older version than a
         // dependent needs is updated, not dropped as available.
         let (outdated_batch, batch): (Vec<String>, Vec<String>) =
-            batch.into_iter().partition(|d| outdated_names.contains(d));
+            batch.into_iter().partition(|d| {
+                outdated_names.contains(d)
+                    && outdated_still_unmet(d, outdated_names, project, &own_listing, lookup_emit)
+            });
         for rpm_dep in outdated_batch {
             let dep = ap_build::osc::strip_rpm_prefix(&rpm_dep).to_string();
             if !attempted_deps.insert(ap_build::osc::fuzzy_key(&dep)) {

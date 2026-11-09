@@ -5,12 +5,14 @@ use crate::*;
 mod dep_config;
 mod deps;
 mod flags;
+mod outdated_bound;
 mod rows;
 mod summary;
 mod workers;
 
 pub(crate) use deps::*;
 pub(crate) use flags::*;
+pub(crate) use outdated_bound::*;
 pub(crate) use rows::*;
 pub(crate) use summary::*;
 pub(crate) use workers::*;
