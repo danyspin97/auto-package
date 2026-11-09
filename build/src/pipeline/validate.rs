@@ -218,7 +218,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
 
                 // Never commit a spec whose Source/Patch files don't exist — OBS
                 // would spend a whole remote build just to report `File ...
-                // SOURCES/...: No such file or directory` (convention 13).
+                // SOURCES/...: No such file or directory` (convention 91 (section 13)).
                 let context = missing_sources_context(&missing, service_error.as_deref());
                 fix_after_validation(
                     ctx,
@@ -309,7 +309,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
 
             // What a reviewer sends back at once: an emoji, a description that
             // only repeats the Summary, a `%files` with no `%license` although
-            // the source ships a licence file (convention 66, 69).
+            // the source ships a licence file (convention 63 (section 66), 5 (section 69)).
             let source = ws.dir().join("source");
             let mut style = style_problems(&spec_text_now(spec_path), &source);
             // On an update, a problem the origin's spec has too was inherited:
@@ -408,7 +408,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                     "its %check only tests that a file exists, but the package ships Python \
                      modules: import them (and, for a wheel other packages import, the chain \
                      they import); `test -e` alone is for a package with no module \
-                     (conventions 67, 76)"
+                     (conventions 11 (section 67), 76)"
                         .to_string(),
                 );
             }
@@ -437,7 +437,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                 }
                 let context = format!(
                     "A reviewer would send this spec back before it is built:\n\n{}\n\n\
-                     Fix each point (conventions 66 and 69).",
+                     Fix each point (conventions 63 (section 66) and 5 (section 69)).",
                     style
                         .iter()
                         .map(|s| format!("- {s}"))

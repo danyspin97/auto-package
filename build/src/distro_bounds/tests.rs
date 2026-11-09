@@ -199,7 +199,10 @@ fn a_too_new_distro_dependency_is_reported_and_stays_distro() {
     let c = &plan.conflicts[0];
     assert_eq!(c.kind, Kind::DistroTooNew);
     assert_eq!(c.dependent, "tilelang");
-    assert!(c.message("openSUSE:Factory").contains("convention 59"));
+    assert!(
+        c.message("openSUSE:Factory")
+            .contains("convention 75 (section 59)")
+    );
 }
 
 #[test]

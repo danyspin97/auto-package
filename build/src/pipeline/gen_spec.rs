@@ -515,9 +515,9 @@ fn generate_from_repo(
             sdist_top_level: top_level,
             is_maturin: false,
             is_rust: false,
-            // Not the PyPI-specific repo-archive case (convention 23) — a
+            // Not the PyPI-specific repo-archive case (convention 17 (section 23)) — a
             // plain C/C++ project has no PyPI angle at all. Its own guidance
-            // is baked into the skeleton's convention 29 comment instead.
+            // is baked into the skeleton's convention 77 (section 29) comment instead.
             from_repo_archive: false,
         });
     }

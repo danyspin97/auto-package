@@ -162,7 +162,7 @@ pub struct PkgState {
     pub unresolvable_translated: Vec<String>,
     /// Dependencies a package of the distro serves at a version newer than the
     /// bound this package's spec carries, as `(name, shipped version)`: the
-    /// bound is dropped from the spec (convention 59) and the build tried, not
+    /// bound is dropped from the spec (convention 75 (section 59)) and the build tried, not
     /// the dependency queued or the package given up on. Applied on every
     /// validation, so a bound the agent writes back is dropped again.
     #[serde(default)]

@@ -166,9 +166,9 @@ pub fn missing_package_names(rpm_names: &[String]) -> Vec<String> {
 /// `libcuda.so.1()(64bit)`, a file path, an `rpmlib(...)` feature) rather than
 /// a package name. OBS reports these as `nothing provides` too, but there is
 /// no project to build for them: `libcuda.so.1` is the NVIDIA driver's own
-/// library (convention 60), supplied at runtime, so queueing it as a package
+/// library (convention 3 (section 60)), supplied at runtime, so queueing it as a package
 /// can never succeed. The fix is on the package that requires it (an
-/// `%global __requires_exclude`), which convention 60 tells the agent.
+/// `%global __requires_exclude`), which convention 3 (section 60) tells the agent.
 pub fn is_rpm_capability(name: &str) -> bool {
     let name = name.trim();
     if name.starts_with('/') || name.starts_with("rpmlib(") || name.contains("()") {

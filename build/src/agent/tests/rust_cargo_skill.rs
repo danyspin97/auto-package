@@ -46,7 +46,7 @@ fn the_skill_regenerates_the_vendor_tarball_through_the_service_and_never_blocks
     let s = section(SKILL, "R4b. `vendor.tar.zst`", "R4c.");
     for want in [
         "Do not edit `Cargo.lock` by hand",
-        "`mode=\"manual\"` (convention 92)",
+        "`mode=\"manual\"` (convention 77 (section 92))",
         "`Source1: vendor.tar.zst`",
         "`update-crate`",
         "not a reason to answer `blocked` or `no_change`",

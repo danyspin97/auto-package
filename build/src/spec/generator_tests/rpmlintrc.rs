@@ -117,7 +117,7 @@ fn the_rpmlintrc_file_follows_the_wheel_shape() {
 }
 
 /// python-triton's `proton`/`proton-viewer` and python-cuda-tile's
-/// `cutile-cache`: the skeleton carries all of convention 18's pieces for
+/// `cutile-cache`: the skeleton carries all of convention 107 (section 18)'s pieces for
 /// each wheel console script from the start, not after a failed build.
 #[test]
 fn wheel_console_scripts_get_the_alternatives_handling() {

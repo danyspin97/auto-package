@@ -13,7 +13,7 @@
 //!
 //! - The distro's version is too NEW (above an upper bound or an exact pin):
 //!   upstream's bound is usually only the version it was tested with, so the
-//!   dependent's spec relaxes it (convention 59), and only a real API break
+//!   dependent's spec relaxes it (convention 75 (section 59)), and only a real API break
 //!   makes the distro package worth branching and patching (convention 62).
 //!   The dependency stays resolved; the conflict is reported.
 //! - The distro's version is too OLD (below a lower bound or an exact pin):

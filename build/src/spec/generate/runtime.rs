@@ -18,7 +18,7 @@ pub struct RuntimeDep {
 /// Only a lower bound is kept: an exact pin (`==1.2`) and a compatible release
 /// (`~=1.2`) become `>= 1.2`, and `<`, `<=` and `!=` are dropped, because a
 /// rolling distro ships one release and an upper bound would make the package
-/// unresolvable the day it moves on (convention 59). The review agent was
+/// unresolvable the day it moves on (convention 75 (section 59)). The review agent was
 /// writing exactly this by hand on package after package.
 pub fn runtime_dependencies(requires_dist: &[String], own_name: &str) -> Vec<RuntimeDep> {
     let own = crate::osc::fuzzy_key(own_name);

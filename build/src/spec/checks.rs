@@ -218,7 +218,7 @@ fn check_section(spec: &str) -> Vec<&str> {
 /// fixture directory) instead of replaced by an import smoke test.
 pub const MAX_CHECK_IGNORES: usize = 6;
 
-/// `%check` problems a reviewer sends back (convention 67): more than
+/// `%check` problems a reviewer sends back (convention 11 (section 67)): more than
 /// [`MAX_CHECK_IGNORES`] `--ignore` options. Empty when fine.
 pub fn check_quality_problems(spec: &str) -> Vec<String> {
     let ignores: usize = check_section(spec)
@@ -241,7 +241,7 @@ pub fn check_quality_problems(spec: &str) -> Vec<String> {
             "its %check carries {ignores} `--ignore` options: a suite cut down this far has \
              one root cause (a device, a missing fixture directory, a network): find it and \
              select the runnable subset by marker or directory instead of ignoring files one \
-             by one (convention 67). An import smoke test only with the quoted log line that \
+             by one (convention 11 (section 67)). An import smoke test only with the quoted log line that \
              proves no subset can run (convention 11, rung iv)"
         )];
     }
@@ -252,7 +252,7 @@ pub fn check_quality_problems(spec: &str) -> Vec<String> {
 /// that `exists` says the source does not have. A sdist often leaves the test
 /// fixtures out (accelerate's `tests/test_configs`, brotlicffi's `testdata`):
 /// the fix is the project's GitHub tag as a second source with the directory
-/// extracted in `%prep` (convention 82 b). A path given to `--ignore` or
+/// extracted in `%prep` (convention 77 (section 82) b). A path given to `--ignore` or
 /// `--deselect` is not read, and one with a `%` or `$` is not a path.
 pub fn missing_check_paths(spec: &str, exists: &dyn Fn(&str) -> bool) -> Vec<String> {
     let mut missing: Vec<String> = Vec::new();
@@ -308,14 +308,14 @@ pub fn missing_paths_problem(missing: &[String]) -> Vec<String> {
         "its %check uses {} which the source archive does not ship: add the project's \
          GitHub tag archive as `Source1` (in a `_service` with `download_files`) and extract \
          the directory in %prep after the autosetup with `tar -xzf %{{SOURCE1}} \
-         --strip-components=1 --wildcards '*/<dir>/*'` (convention 82 b); or drop the test \
+         --strip-components=1 --wildcards '*/<dir>/*'` (convention 77 (section 82) b); or drop the test \
          that needs it",
         missing.join(", ")
     )]
 }
 
 /// Add the project's tag archive as a further source and extract `dirs` from it
-/// in `%prep` (convention 82 b): a `SourceN: <url>#/<name>` line after the last
+/// in `%prep` (convention 77 (section 82) b): a `SourceN: <url>#/<name>` line after the last
 /// `Source` line, and `tar -xzf %{SOURCEN} --strip-components=1 --wildcards
 /// '*/<dir>/*'` after the `%autosetup`/`%setup` of `%prep`. The `download_files`
 /// service that fetches it is written by the pipeline when the file is missing.
@@ -488,7 +488,7 @@ pub fn drop_unused_pytest_build_requires(spec: &str, needed: bool) -> String {
 /// Whether the spec's `%check` does nothing but test that a file exists
 /// (`test -e`, `test -x`, `ls`, also behind `%python_expand`): it has at least
 /// one such command and no other. A package that ships Python modules is
-/// imported instead (convention 67).
+/// imported instead (convention 11 (section 67)).
 pub fn check_is_file_probe_only(spec: &str) -> bool {
     let body = spec.split("\n%changelog").next().unwrap_or(spec);
     let mut in_check = false;

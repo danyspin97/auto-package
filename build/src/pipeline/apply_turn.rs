@@ -477,7 +477,7 @@ fn apply_turn_outcome_with(
                              {e}\n\
                              The automatic wheel switch cannot serve every flavor from one \
                              wheel. Do NOT return `use_upstream_wheel` again: if PyPI has a \
-                             wheel for each flavor's CPython ABI, follow convention 49 and \
+                             wheel for each flavor's CPython ABI, follow convention 32 (section 49) and \
                              write the per-flavor wheel spec yourself with action `edited`; \
                              otherwise build that flavor from source or request what it needs (`blocked` is not accepted).\n"
                         ),
@@ -486,7 +486,7 @@ fn apply_turn_outcome_with(
                         step: Some(step.id),
                         message: format!(
                             "{rpm_name}: use_upstream_wheel refused ({e}); asking the \
-                             agent to repackage per-flavor wheels by hand (convention 49)"
+                             agent to repackage per-flavor wheels by hand (convention 32 (section 49))"
                         ),
                     });
                     Ok(TurnEffect::NoChange)
@@ -500,7 +500,7 @@ fn apply_turn_outcome_with(
     // renamed Source the agent fetches via a service — one it may have just
     // written a `_service` file for in this very turn, including on a
     // checkout that had none before — is actually materialised on disk
-    // before the next validation sees it. Convention 13's "the checkout
+    // before the next validation sees it. Convention 91 (section 13)'s "the checkout
     // does not gain a file just because the spec now names it correctly"
     // trip-up costs an entire extra attempt without this. Called
     // unconditionally rather than only when `_service` already existed,

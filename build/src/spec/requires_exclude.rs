@@ -7,7 +7,7 @@
 /// digits after a `-` in a `lib*` name, so `libcuda.so.1`, `libz3.so.4.15`
 /// and `libfoo-1.2.so` are left alone, nor a date-stamped `libfoo-20240101.so`.
 /// Generated from the same rule as `ap_ecosystem::sdist::is_hashed_soname`
-/// (the one definition of "hashed"); convention 68 of the agent prompt and the
+/// (the one definition of "hashed"); convention 91 (section 68) of the agent prompt and the
 /// reason text of `depclass.rs` describe it in words.
 pub(super) fn hashed_libs_requires_exclude() -> &'static str {
     ap_ecosystem::sdist::hashed_soname_requires_exclude()

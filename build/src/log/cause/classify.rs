@@ -242,7 +242,7 @@ pub(super) fn pytest_digest(haystack: &[&str]) -> Option<ProbableCause> {
         steps.push(format!(
             "{missing_files} failures are a missing file or fixture (data the sdist does not ship, \
              or a tool run from the wrong directory): fetch the data from the upstream tag as a \
-             `SourceN` (convention 44) or ignore those files — do not patch the tests."
+             `SourceN` (convention 11 (section 44)) or ignore those files — do not patch the tests."
         ));
     }
     let network: usize = groups.values().map(|g| g.network).sum();

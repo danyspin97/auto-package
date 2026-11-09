@@ -5,7 +5,7 @@ use super::*;
 
 /// The names of the `siblings` that own (hold the `__init__.py` of) a package
 /// directory `layout` adds files to: this wheel completes their package, so it
-/// needs them installed (convention 83 a). A directory this wheel owns itself is
+/// needs them installed (convention 76 (section 83) a). A directory this wheel owns itself is
 /// not listed. Sorted, without duplicates.
 pub(super) fn shared_package_owners(
     layout: &ap_ecosystem::sdist::WheelLayout,
@@ -29,7 +29,7 @@ pub(super) fn shared_package_owners(
     owners
 }
 
-/// Another wheel of the same project (convention 83): `name` is the
+/// Another wheel of the same project (convention 76 (section 83)): `name` is the
 /// flavor-neutral RPM name, `files` what it installs relative to site-packages
 /// (its dist-info left out), `purelib` its `Root-Is-Purelib` when known.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +61,7 @@ pub(super) fn sitelib_relocation(layout: &ap_ecosystem::sdist::WheelLayout) -> S
     let mut text = String::from(
         "# the wheel says Root-Is-Purelib: false, but a sibling wheel of this project (a\n\
          # noarch package) fills the same tree in sitelib, and a package tree split\n\
-         # between lib and lib64 cannot be imported: install it beside them (convention 83)\n\
+         # between lib and lib64 cannot be imported: install it beside them (convention 76 (section 83))\n\
          %python_expand mkdir -p %{buildroot}%{$python_sitelib}\n",
     );
     let mut tops: Vec<&str> = payload_tops(layout);
@@ -79,7 +79,7 @@ pub(super) fn sitelib_relocation(layout: &ap_ecosystem::sdist::WheelLayout) -> S
 }
 
 /// `spec`, generated for a wheel before a sibling wheel that fills the same
-/// tree in `%{python_sitelib}` was known (convention 83), moved onto that one
+/// tree in `%{python_sitelib}` was known (convention 76 (section 83)), moved onto that one
 /// tree: python-tokenspeed-mla failed with `No module named 'cutlass.cute'`
 /// because `-base` and `-cu12` had been generated into sitearch while `-core`
 /// is noarch. Every `sitearch` of the spec becomes `sitelib` and the wheel's

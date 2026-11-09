@@ -262,7 +262,7 @@ pub(super) fn agent_turn(
 
     let notes = tail_for_prompt(&std::fs::read_to_string(ws.notes()).unwrap_or_default());
     let package_notes = package_notes_for_prompt(&crate::package_notes::read(&config.rpm_name));
-    // What convention 78 asks a turn to check, read here: the agent's own tools
+    // What convention 5 (section 78) asks a turn to check, read here: the agent's own tools
     // cannot fetch another project's recipe (`osc cat`, `zypper info` are refused),
     // so torchcodec's turns could only answer `blocked`.
     let licence_facts = ctx

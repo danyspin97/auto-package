@@ -18,7 +18,7 @@
 //! exactly one flavor and that flavor's own ABI tag is the one locked wheel
 //! on offer — seeing more than one configured flavor (or none at all, the
 //! default) must not relax anything, since a single wheel file fundamentally
-//! cannot satisfy two different CPython ABIs (see convention 49 for the
+//! cannot satisfy two different CPython ABIs (see convention 32 (section 49) for the
 //! manual, per-flavor alternative).
 
 use std::path::{Path, PathBuf};

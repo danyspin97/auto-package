@@ -23,7 +23,7 @@ pub fn wheel_binary_skeleton(
 }
 
 /// [`wheel_binary_skeleton`] for a wheel whose project has other wheels filling
-/// the same directories (convention 83). `siblings` are the other wheels of the
+/// the same directories (convention 76 (section 83)). `siblings` are the other wheels of the
 /// project (see [`sibling_wheels`]; build order does not matter): directories
 /// they also hold are co-owned with `%dir` and this wheel's own files listed one
 /// by one, and a sibling that owns a package (`__init__.py`) this wheel adds
@@ -92,7 +92,7 @@ pub fn wheel_binary_skeleton_shared(
         String::new()
     };
     // No `WHEEL` verdict: the platform tag decides, and any tag but `-none-any`
-    // (compiled code, convention 83 b) means `%{python_sitearch}`.
+    // (compiled code, convention 76 (section 83) b) means `%{python_sitearch}`.
     let declared_purelib = root_is_purelib.unwrap_or(is_pure);
     let purelib = declared_purelib || layout.is_some_and(|l| sibling_forces_purelib(l, siblings));
     let sitedir = if purelib {

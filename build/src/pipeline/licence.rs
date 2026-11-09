@@ -25,7 +25,7 @@ pub(super) fn recipe_licence_lines(spec: &str) -> Vec<String> {
 /// For a package whose build log shows an upstream licence guard
 /// (`...LICENSE_VIOLATION`) and whose spec builds against an `ffmpeg-<N>` recipe:
 /// that recipe's licence lines from this project, else from a project it builds
-/// against, as the evidence convention 78 asks for. `None` when there is no
+/// against, as the evidence convention 5 (section 78) asks for. `None` when there is no
 /// guard or no recipe could be read. Cached per recipe for the process.
 pub(super) fn licence_guard_facts(
     config: &PipelineConfig,
@@ -106,7 +106,7 @@ pub(super) fn licence_guard_facts(
         format!(
             "## Licence facts (read by the pipeline)\n\nThis package's build hit an upstream \
              licence guard. These are the licence lines of the FFmpeg recipe it builds \
-             against, read from OBS for you: this is the evidence convention 78 asks you to \
+             against, read from OBS for you: this is the evidence convention 5 (section 78) asks you to \
              check (no `--enable-gpl`/`--enable-nonfree`, an LGPL `License:` means the check \
              holds; a `%if` line may switch a switch off, so read it with its condition). \
              Cite it in the `# licence-guard-verified:` comment.\n\n{}",

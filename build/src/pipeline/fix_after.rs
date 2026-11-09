@@ -213,7 +213,7 @@ pub(super) fn fix_after_build(
     // ten turns on one stale log. A rebuild is asked for once; the same log
     // again ends the package with the reason.
     // Only tests failed: one more build tells a flaky test from a stable failure
-    // before the agent is asked about it (convention 87).
+    // before the agent is asked about it (convention 7 (section 87)).
     let mut flaky_context: Option<String> = None;
     if !ap_core::env::env_flag("AUTO_PACKAGE_NO_FLAKY_RETRY") {
         let log_text = std::fs::read_to_string(build_log).unwrap_or_default();

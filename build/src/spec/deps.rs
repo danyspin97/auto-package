@@ -46,7 +46,7 @@ enum Relax {
 }
 
 /// How `constraint` (`< 0.34`, `== 2.11.1`) is relaxed for the version `shipped`
-/// (conventions 59, 73 and 75): an upper bound the shipped version exceeds goes, an
+/// (convention 75, sections 59 and 73): an upper bound the shipped version exceeds goes, an
 /// exact pin below it becomes `>= <pin>`, and everything else stays, a minimum the
 /// shipped version does not reach included (relaxing it would not make the package
 /// resolvable).
@@ -68,7 +68,7 @@ fn relax_constraint(constraint: &str, shipped: &pep440_rs::Version) -> Relax {
 /// The dependency lines of `spec` for `dependency` relaxed for the version
 /// `shipped` (see [`relax_constraint`]): an upper bound it exceeds is removed and
 /// an exact pin below it becomes `>= <pin>`, the name kept, so a package the distro
-/// ships is used as it is (conventions 59 and 75). A minimum it does not reach, and
+/// ships is used as it is (convention 75, section 59). A minimum it does not reach, and
 /// every constraint it meets, stay. Each change gets an `# upstream pins` comment.
 /// Duplicate lines this leaves are merged.
 pub fn relax_dependency_bounds(spec: &str, dependency: &str, shipped: &str) -> String {

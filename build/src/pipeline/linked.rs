@@ -107,7 +107,7 @@ pub(super) fn spec_with_published_defects_fixed(
     }
     // A wheel generated before the sibling wheels that fill its tree in sitelib
     // were known sits in sitearch: the split namespace cannot be imported
-    // (convention 83).
+    // (convention 76 (section 83)).
     if fixed.contains("python_sitearch")
         && let Some(name) = fixed
             .lines()

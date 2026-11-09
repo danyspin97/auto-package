@@ -72,7 +72,7 @@ pub(super) fn update_mode(
 
 /// The style problems a reviewer sends a spec back for at once: an emoji, a
 /// description that only repeats the Summary, and a `%files` with no `%license`
-/// although the unpacked `source` ships a licence file (conventions 66, 69).
+/// although the unpacked `source` ships a licence file (conventions 63 (section 66), 5 (section 69)).
 pub(super) fn style_problems(spec: &str, source: &Path) -> Vec<String> {
     let mut problems = crate::spec::description_problems(spec);
     problems.extend(missing_license_problem(spec, source));

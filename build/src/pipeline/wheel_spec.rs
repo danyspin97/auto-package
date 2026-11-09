@@ -5,7 +5,7 @@ use super::*;
 
 /// Wheels each locked to one CPython (Triton, onnxruntime): when EVERY flavor
 /// the project builds has its own wheel for this arch, download them all and
-/// write the per-flavor spec (convention 49) instead of leaving the agent to do
+/// write the per-flavor spec (convention 32 (section 49)) instead of leaving the agent to do
 /// it by hand without being able to fetch the files. `None` when it does not
 /// apply (fewer than two flavors, or a flavor with no wheel).
 pub(super) fn generate_multi_flavor_wheel_spec(
@@ -251,7 +251,7 @@ pub(super) fn generate_wheel_binary_spec(
         .map_err(|e| GenSpecError::Other(format!("PyPI parse failed: {e}")))?;
 
     // Other wheels of the project already built into the same directories
-    // (convention 83): co-owned, not listed whole.
+    // (convention 76 (section 83)): co-owned, not listed whole.
     let siblings =
         crate::spec::sibling_wheels(&config.rpms_dir, checkout_dir.parent(), &config.pkg_name);
     let spec_text = crate::spec::wheel_binary_skeleton_shared(

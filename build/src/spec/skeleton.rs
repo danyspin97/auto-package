@@ -9,7 +9,7 @@ use crate::spec::siblings::*;
 use crate::spec::wheel::*;
 
 /// [`wheel_binary_skeleton`] for a release whose wheels are each locked to one
-/// CPython (convention 49's Triton shape): one `SourceN:` per flavor and one
+/// CPython (convention 32 (section 49)'s Triton shape): one `SourceN:` per flavor and one
 /// hardcoded `%python<NNN>_pyproject_install` per flavor, since the shared
 /// `%pyproject_install` repeats a single argument for every flavor.
 ///
@@ -94,7 +94,7 @@ fn skeleton_header_values_are_plain(pkg_name: &str, version: &str, wheel: Option
 /// multiple subprojects it would produce a spec for one subproject only,
 /// leaving all siblings out. This skeleton carries the correct header fields
 /// from the PyPI release and leaves %build/%install/%check empty so the review
-/// agent can fill in the full multi-subpackage layout per convention 24.
+/// agent can fill in the full multi-subpackage layout per convention 39 (section 24).
 pub fn monorepo_skeleton(
     pkg_name: &str,
     version: &str,
@@ -170,7 +170,7 @@ pub fn monorepo_skeleton(
          %python_subpackages\n\
          \n\
          # This is a monorepo: all subprojects below must become %%package sections.\n\
-         # Convention 24 governs the layout — do not build only one subproject.\n\
+         # Convention 39 (section 24) governs the layout — do not build only one subproject.\n\
          {sub_list}\
          %description\n\
          {summary}\n\
@@ -332,7 +332,7 @@ pub fn c_project_skeleton(
          # TODO: run the test suite if there is one\n\
          \n\
          %files\n\
-         # TODO: list the files %%install put in the buildroot - convention 15's\n\
+         # TODO: list the files %%install put in the buildroot - convention 10 (section 15)'s\n\
          # \"no globs\" rule applies here too.\n\
          %license TODO\n\
          \n\

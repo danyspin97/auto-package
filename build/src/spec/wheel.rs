@@ -18,7 +18,7 @@ pub(super) enum HeaderCleanup<'a> {
 /// library, nothing under `bin/`), the wheel is a header library (NVIDIA's
 /// `nvidia-cuda-crt` is only `include/crt/*.h`, `nvidia-cuda-cccl` is CCCL's
 /// header tree), and stripping the headers leaves an empty package. Those are
-/// split into a `-devel` package by the review (convention 24).
+/// split into a `-devel` package by the review (convention 39 (section 24)).
 pub(super) fn wheel_header_cleanups(
     layout: &ap_ecosystem::sdist::WheelLayout,
 ) -> Vec<HeaderCleanup<'_>> {
@@ -100,7 +100,7 @@ pub(super) fn wheel_payload_probe(layout: &ap_ecosystem::sdist::WheelLayout) -> 
 /// The `%files` entries for a prebuilt wheel, from its own file list, or `None`
 /// when the layout is not one this can list without guessing (a `.data`
 /// directory, a top-level module, an odd file name): the review then fills the
-/// section in. Convention 15 forbids globs, so every entry is an exact path or
+/// section in. Convention 10 (section 15) forbids globs, so every entry is an exact path or
 /// a package directory.
 ///
 ///  * a directory with an `__init__.py` is a package: the directory is listed;

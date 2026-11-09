@@ -50,7 +50,7 @@ pub(super) fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
                       confirms the FFmpeg that is linked is licence-compatible. That is a fact \
                       to check, not a reason to give up."
                 .to_string(),
-            action: "Follow convention 78: read the licence lines of the `ffmpeg-<N>` recipe \
+            action: "Follow convention 5 (section 78): read the licence lines of the `ffmpeg-<N>` recipe \
                      (the prompt's \"Licence facts\" section has them), and when it is \
                      LGPL-only `export I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1` in `%build` \
                      with the `# licence-guard-verified:` comment; when it is GPL, report \
@@ -75,7 +75,7 @@ pub(super) fn known_recipe(haystack: &[&str]) -> Option<ProbableCause> {
                 .to_string(),
             action: "The defect is in the sibling packages, not in this spec and not a \
                      `PYTHONPATH` workaround in `%check`: every `python-nvidia-cutlass-dsl-libs-*` \
-                     spec must install into `%{python_sitelib}` (convention 83; the pipeline moves \
+                     spec must install into `%{python_sitelib}` (convention 76 (section 83); the pipeline moves \
                      a sibling generated alone onto that tree). Report the sibling in \
                      `patch_dependencies` if its spec still uses `%{python_sitearch}`; otherwise \
                      wait for the rebuilt siblings."
@@ -181,7 +181,7 @@ pub fn detect(log: &ExtractedLog, own_module: &str, spec: &str) -> Option<Probab
                 action: "Run the tests from a fresh directory with \
                          `PYTHONPATH=%{buildroot}%{$python_sitelib}` (sitearch for arch \
                          packages) inside `%python_expand`, and check %install actually put the \
-                         module there (convention 48)."
+                         module there (convention 10 (section 48))."
                     .to_string(),
                 kind: CauseKind::OwnModuleNotImportable { module: top },
                 evidence,

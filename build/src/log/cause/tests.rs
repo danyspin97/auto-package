@@ -35,7 +35,11 @@ fn a_cmake_licence_guard_points_to_convention_78() {
             id: "cmake-licence-guard"
         }
     );
-    assert!(c.action.contains("convention 78"), "{}", c.action);
+    assert!(
+        c.action.contains("convention 5 (section 78)"),
+        "{}",
+        c.action
+    );
 }
 
 #[test]

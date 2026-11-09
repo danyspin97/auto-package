@@ -177,7 +177,7 @@ Recipes (`R=$P/runs/<run>/run.jsonl`, `K=<pkg>`):
     # warnings, minus status polling
     jq -r 'select(.pkg==env.K and .event=="warning")|.message' $R | grep -v '^OBS build status'
     # which tests were flaky: the pipeline writes the verdict into the prompt
-    # of the next turn and into the package notes (convention 87)
+    # of the next turn and into the package notes (convention 7 (section 87))
     grep -h -A4 'Flaky tests (read by the pipeline)' $P/runs/<run>/$K/*/prompt.md
     grep -h 'flaky tests' ../auto-package-notes/$K.md $P/state/$K/notes.md
 

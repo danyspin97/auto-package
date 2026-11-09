@@ -276,7 +276,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
         String::new()
     };
 
-    // Convention 26 is merged into 22: its repository-source section is there.
+    // Section 26 of convention 22 is its repository-source section.
     let source_note = if !req.from_repo_archive {
         ""
     } else if req.is_python {

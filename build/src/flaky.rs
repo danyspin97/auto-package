@@ -28,7 +28,7 @@ impl Verdict {
         );
         if !self.flaky.is_empty() {
             text.push_str(&format!(
-                "- Failed in ONE build only (flaky; convention 87): {}\n",
+                "- Failed in ONE build only (flaky; convention 7 (section 87)): {}\n",
                 list(&self.flaky)
             ));
         }
@@ -39,7 +39,7 @@ impl Verdict {
             ));
         }
         text.push_str(
-            "Do not \"fix\" or delete a flaky test; run it in a best-effort pass (convention 87).\n",
+            "Do not \"fix\" or delete a flaky test; run it in a best-effort pass (convention 7 (section 87)).\n",
         );
         text
     }
@@ -233,7 +233,7 @@ mod tests {
         let v = compare(&set(&["a", "b"]), &set(&["b"])).unwrap();
         let text = v.context();
         assert!(
-            text.contains("ONE build only") && text.contains("convention 87"),
+            text.contains("ONE build only") && text.contains("convention 7 (section 87)"),
             "{text}"
         );
         assert!(text.contains("BOTH builds"));

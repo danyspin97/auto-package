@@ -328,7 +328,7 @@ pub fn select_target(
                 });
             }
             // The distro's release is used and the dependent's bound dropped
-            // from its spec (convention 59); an ABI break shows in its build
+            // from its spec (convention 75 (section 59)); an ABI break shows in its build
             // and goes to a patch (convention 62), not to a dependency that is
             // given up on.
             if conflict.kind == distro_bounds::Kind::DistroTooNew

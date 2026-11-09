@@ -192,7 +192,7 @@ pub(in crate::spec) fn apply_install_entries(spec: &str, entries: &[String]) -> 
 }
 
 /// Give the commands a source build installs (`[project.scripts]`) the
-/// `update-alternatives` handling convention 18 asks for, when py2pack did not
+/// `update-alternatives` handling convention 107 (section 18) asks for, when py2pack did not
 /// (it only reads `setup.py` metadata): `%python_clone` after
 /// `%pyproject_install`, `%post`/`%postun` registration and a
 /// `%python_alternative` in `%files`. A script the spec already handles is

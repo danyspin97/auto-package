@@ -296,7 +296,7 @@ pub(super) fn missing_deps_from_turn(
                         message: format!(
                             "{} {} ({}) is newer than the bound `{}` that {} declares and \
                              the build shows no ABI break: using it and dropping the bound \
-                             from the spec (convention 59)",
+                             from the spec (convention 75 (section 59))",
                             c.dep, c.shipped, c.linked_project, c.specifier, ctx.config.pkg_name
                         ),
                     });

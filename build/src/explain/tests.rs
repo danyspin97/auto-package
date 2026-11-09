@@ -217,7 +217,7 @@ fn flaky_verdicts_and_rejections_are_reported() {
         &d.join("runs")
             .join(RUN)
             .join("foo/002-agent-review/prompt.md"),
-        "x\n## Flaky tests (read by the pipeline)\n\nintro\n- Failed in ONE build only (flaky; convention 87): t1\n- Failed in BOTH builds (a real failure): t2\nDo not fix\n",
+        "x\n## Flaky tests (read by the pipeline)\n\nintro\n- Failed in ONE build only (flaky; convention 7 (section 87)): t1\n- Failed in BOTH builds (a real failure): t2\nDo not fix\n",
     );
     let ex = explain(&Query {
         package_notes: "- flaky tests (failed in one of two builds): t1; stable failures: t2\n"

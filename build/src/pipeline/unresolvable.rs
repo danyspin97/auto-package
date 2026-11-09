@@ -45,7 +45,7 @@ pub(super) fn unresolvable_deps_round(
     });
     // A rich dependency (`(x >= 1 with x < 2)`) carries no `(got version ...)`:
     // read the distro's version into it, so a bound it misses is relaxed like
-    // any other (convention 59) instead of the package being queued as missing.
+    // any other (convention 75 (section 59)) instead of the package being queued as missing.
     let detail = osc::annotate_rich_misses(detail, &|dep| {
         linked_shipped_version(ctx, build_step.id, dep)
     });
@@ -332,7 +332,7 @@ pub(super) fn unresolvable_deps_round(
             step: Some(build_step.id),
             message: format!(
                 "{} {} newer than the bound the spec asks for: keeping the package and \
-                 dropping the bound (convention 59)",
+                 dropping the bound (convention 75 (section 59))",
                 overshoot
                     .iter()
                     .map(|m| format!("{} ({})", m.name, m.got))

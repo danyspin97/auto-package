@@ -135,3 +135,82 @@ fn capped_line_reader_bounds_a_huge_line_and_keeps_normal_lines() {
     let (n, _) = read_capped_line(&mut reader, &mut line, 1000).unwrap();
     assert_eq!(n, 0, "end of input");
 }
+
+/// The convention numbers merged into another file, with the file each one joined.
+fn merged_targets() -> std::collections::BTreeMap<u32, u32> {
+    crate::conventions_table::CONVENTIONS
+        .iter()
+        .filter_map(|(n, t)| {
+            let (_, target) = t.trim_end().split_once(". Merged into ")?;
+            Some((*n, target.trim_end_matches('.').parse().ok()?))
+        })
+        .collect()
+}
+
+/// The numbers a `convention`/`conventions` word cites at `words[at]`: the next
+/// token, and the rest of a list (`66, 69` or `59 and 75`).
+fn cited_numbers(words: &[&str], at: usize) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut j = at + 1;
+    while let Some(tok) = words.get(j) {
+        let digits: String = tok.chars().take_while(char::is_ascii_digit).collect();
+        let Ok(n) = digits.parse::<u32>() else {
+            break;
+        };
+        out.push(n);
+        let rest = &tok[digits.len()..];
+        if rest == "," {
+            j += 1;
+        } else if rest.is_empty() && matches!(words.get(j + 1), Some(&("and" | "or"))) {
+            j += 2;
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// Every `.rs` file under `build/src` and every convention, as (path, text).
+fn cross_reference_sources() -> Vec<(std::path::PathBuf, String)> {
+    fn walk(dir: &std::path::Path, ext: &str, out: &mut Vec<(std::path::PathBuf, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, ext, out);
+            } else if path.extension().is_some_and(|e| e == ext) {
+                let text = std::fs::read_to_string(&path).unwrap();
+                out.push((path, text));
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut out = Vec::new();
+    walk(&root.join("src"), "rs", &mut out);
+    walk(&root.join("conventions"), "md", &mut out);
+    out
+}
+
+/// Code and conventions name a convention merged into another file as its topic
+/// and section (`convention 63 (section 66)`), never by the stub's number: the
+/// stub costs the agent an extra read.
+#[test]
+fn no_source_or_convention_names_a_merged_convention() {
+    let merged = merged_targets();
+    for (path, text) in cross_reference_sources() {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for (i, w) in words.iter().enumerate() {
+            let w = w.trim_matches(|c: char| !c.is_alphabetic());
+            if !w.eq_ignore_ascii_case("convention") && !w.eq_ignore_ascii_case("conventions") {
+                continue;
+            }
+            for n in cited_numbers(&words, i) {
+                if let Some(target) = merged.get(&n) {
+                    panic!(
+                        "{} names convention {n}, merged into {target}: write `convention {target} (section {n})`",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}

@@ -158,7 +158,7 @@ impl BoundConflict {
         );
         match self.kind {
             Kind::DistroTooNew => format!(
-                "{head}: relax the bound in {}'s spec (convention 59); only a real API break \
+                "{head}: relax the bound in {}'s spec (convention 75 (section 59)); only a real API break \
                  makes patching the distro package worth it (convention 62)",
                 self.dependent
             ),

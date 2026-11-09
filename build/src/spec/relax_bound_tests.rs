@@ -138,7 +138,7 @@ fn a_dropped_bound_is_noted_once_without_a_macro_and_a_second_pass_changes_nothi
 
 #[test]
 fn a_minimum_or_a_pin_the_shipped_version_does_not_reach_is_not_relaxed() {
-    // Too old: relaxing would not make the package resolvable (convention 73).
+    // Too old: relaxing would not make the package resolvable (convention 75 (section 73)).
     for spec in [
         "Requires: python-x >= 3\n",
         "BuildRequires: %{python_module x > 3}\n",

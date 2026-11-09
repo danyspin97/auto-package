@@ -65,7 +65,7 @@ R4b. `vendor.tar.zst` is made by the `cargo_vendor` service in `_service`. The
    - `_service` gets a `cargo_vendor` service with `src` set to the directory the
      source service unpacks (the repository name), `compression` `zst`, and
      `update` (`true`, or `false` only when the upstream lock is the one that
-     works: convention 113), with `mode="manual"` (convention 92). The spec then
+     works: convention 113), with `mode="manual"` (convention 77 (section 92)). The spec then
      has `Source1: vendor.tar.zst` and `%autosetup -p1 -a1`. When the service is
      already there, change only what the new version forces.
    - Next to an `obs_scm` source the `cargo_vendor` service is `mode="buildtime"`:
