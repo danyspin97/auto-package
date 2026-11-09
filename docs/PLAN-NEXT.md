@@ -1,5 +1,8 @@
 # Where things stand (2026-10-27) and what comes next
 
+> Superseded in part by `docs/HANDOFF.md` (2026-11-09): read that first. The
+> uncommitted work and the split described below were finished long ago.
+
 Written when work was stopped on request. Nothing here is a promise: it is the state
 and the order of the remaining work, so it can be picked up cold.
 
