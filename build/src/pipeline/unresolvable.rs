@@ -6,6 +6,11 @@ use crate::pipeline::archive::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::rpm_deps::*;
 
+mod extra_drop;
+#[cfg(test)]
+mod extra_drop_tests;
+use extra_drop::*;
+
 /// OBS reported unresolvable dependencies for the build.
 pub(super) fn unresolvable_deps_round(
     ctx: &RunCtx,
@@ -126,6 +131,35 @@ pub(super) fn unresolvable_deps_round(
             }
             !satisfied
         })
+        .collect();
+
+    // A requirement missing only through its extra (`python313-x[toml]` while
+    // `python313-x` is published) is not a package to build: the spec drops the
+    // extra, and the agent is told so.
+    let extra_drops = {
+        let emit = Emit::new(reporter, build_step.id);
+        find_extra_drops(&detail, &|bare| {
+            osc::project_ships_binary(&config.project, &config.distro, &config.arch, bare, emit)
+                == Some(true)
+        })
+    };
+    if !extra_drops.is_empty() {
+        reporter.report(&Event::Warning {
+            step: Some(build_step.id),
+            message: format!(
+                "not queuing {} as missing: the spec asks for an extra that no distro \
+                 package provides; dropping the extra",
+                extra_drops
+                    .iter()
+                    .map(|(bare, extras)| format!("{bare}[{extras}]"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    let unresolvable_deps: Vec<String> = unresolvable_deps
+        .into_iter()
+        .filter(|dep| !extra_drops.iter().any(|(bare, _)| bare == dep))
         .collect();
 
     // A name the distro publishes under another spelling (`huggingface_hub`
@@ -262,10 +296,13 @@ pub(super) fn unresolvable_deps_round(
             crate::agent::fenced_data(&lines.join("\n"))
         )
     });
-    if unresolvable_deps.is_empty()
-        && let Some(context) = &alternatives_context
-    {
-        return fix_after_build(ctx, st, build_step, build_log, Some(context));
+    let extra_note = extra_drop_note(&extra_drops);
+    if unresolvable_deps.is_empty() && (alternatives_context.is_some() || extra_note.is_some()) {
+        let context: Vec<String> = [alternatives_context, extra_note]
+            .into_iter()
+            .flatten()
+            .collect();
+        return fix_after_build(ctx, st, build_step, build_log, Some(&context.join("\n\n")));
     }
 
     // A package OBS has at a version NEWER than a bound the spec wrote is not

@@ -462,7 +462,7 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
              upper bound entirely (`%{{python_module setuptools}}`) and let `%check`/the actual \
              build prove whether the newer version really breaks anything; only reach for a \
              version-specific workaround if it demonstrably does.\n\n\
-             Exception: if a package name in the spec is clearly wrong (e.g. wrong \
+             {EXTRA_ITEM}Exception: if a package name in the spec is clearly wrong (e.g. wrong \
              capitalisation or an extra prefix), fix the name in the spec instead of \
              reporting it as unresolvable.\n\n",
             bullets(req.unresolvable_deps),
