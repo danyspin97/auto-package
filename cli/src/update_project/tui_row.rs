@@ -105,6 +105,9 @@ pub(super) fn package_outcome(outcome: &ItemOutcome) -> PackageOutcome {
         ItemOutcome::Skipped(reason) => PackageOutcome::Skipped {
             reason: reason.clone(),
         },
+        ItemOutcome::NotStarted => PackageOutcome::Skipped {
+            reason: "not started: the run was interrupted".to_string(),
+        },
         ItemOutcome::Failed(reason) => PackageOutcome::Failed {
             reason: reason.clone(),
             disk_full: false,
@@ -266,5 +269,20 @@ mod tests {
             package_outcome(&ItemOutcome::Skipped("x".into())),
             PackageOutcome::Skipped { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod not_started_tests {
+    use super::*;
+
+    #[test]
+    fn a_not_started_package_is_a_skipped_row_not_a_failed_one() {
+        match package_outcome(&ItemOutcome::NotStarted) {
+            PackageOutcome::Skipped { reason } => {
+                assert_eq!(reason, "not started: the run was interrupted");
+            }
+            other => panic!("not a skipped row: {other:?}"),
+        }
     }
 }

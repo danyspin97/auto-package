@@ -10,6 +10,9 @@ pub enum ItemOutcome {
     Failed(String),
     /// Not attempted, with the reason.
     Skipped(String),
+    /// Found, but the run was interrupted before it was branched. Not a
+    /// failure of the package: it was never attempted.
+    NotStarted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,10 +51,19 @@ pub fn failure_lines(results: &[ItemResult]) -> Vec<String> {
         .iter()
         .filter(|r| matches!(r.outcome, ItemOutcome::Failed(_)))
         .count();
+    let not_started = results
+        .iter()
+        .filter(|r| r.outcome == ItemOutcome::NotStarted)
+        .count();
     let submits = failed_submits(results);
     let mut lines = Vec::new();
     if items > 0 {
         lines.push(format!("{items} package(s) failed to update"));
+    }
+    if not_started > 0 {
+        lines.push(format!(
+            "{not_started} package(s) not started: the run was interrupted"
+        ));
     }
     if submits > 0 {
         lines.push(format!("{submits} submit request(s) failed"));
@@ -92,6 +104,7 @@ pub fn sr_eligibility(
         ItemOutcome::Updated | ItemOutcome::AlreadyUpdated => {}
         ItemOutcome::Failed(_) => return Err("its update failed".to_string()),
         ItemOutcome::Skipped(_) => return Err("it was skipped".to_string()),
+        ItemOutcome::NotStarted => return Err("it was not started".to_string()),
     }
     match build {
         Some(osc::BuildStatus::Succeeded) => {}
@@ -354,6 +367,18 @@ pub fn summary_text(
             })
             .collect(),
     );
+    let not_started: Vec<String> = results
+        .iter()
+        .filter(|r| r.outcome == ItemOutcome::NotStarted)
+        .map(|r| r.item.pkg.clone())
+        .collect();
+    if !not_started.is_empty() {
+        section(
+            &mut out,
+            "not started (the run was interrupted)",
+            not_started,
+        );
+    }
     section(&mut out, "needs the maintainer", maintainer.to_vec());
     section(
         &mut out,

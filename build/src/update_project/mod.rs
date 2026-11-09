@@ -10,6 +10,8 @@ use crate::risk_flags::RiskFlag;
 use crate::update::{Candidate, Decision, Ecosystem};
 
 mod branch_state;
+#[cfg(test)]
+mod not_started_tests;
 mod plan;
 mod report;
 mod requirements;

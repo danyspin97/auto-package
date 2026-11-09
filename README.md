@@ -720,7 +720,8 @@ request.
   started, in-flight packages are recorded as interrupted) instead of retrying
   every package. Run `claude` and `/login`, then re-run. `build` and
   `update` check `claude auth status` (free) before starting.
-- `130`: interrupted (Ctrl-C or SIGTERM).
+- `130`: interrupted (Ctrl-C or SIGTERM). Packages found but not branched when
+  it stops are listed once as not started; they are not counted as failed.
 
 `fix` also exits `3` (the bug needs no fix here, or none was found) and `4`
 (a maintainer must decide); see "Fixing a bug". No other command uses them.

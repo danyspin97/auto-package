@@ -196,6 +196,10 @@ fn prepare(
                 if !a.dry_run {
                     hand_over(&mut ready, &mechanical, builds, report);
                 }
+                // Stopping: no more of the sweep is taken, so nothing more is found.
+                if ap_build::proc::shutting_down() {
+                    break;
+                }
                 let Some((item, style_only)) = incoming() else {
                     break;
                 };
@@ -303,14 +307,18 @@ fn prepare(
             // Branching queues a build in the branch project: it waits until
             // fewer than `2 x jobs` items are handed over and not built.
             if !builds.work().throttle.admit() {
-                let why = "interrupted before it was branched".to_string();
-                ctx.warn(format!("{}: {why}", item.pkg));
-                report.results.push(ItemResult {
-                    item,
-                    outcome: ItemOutcome::Failed(why),
-                    sr: SrOutcome::NotRequested,
-                });
-                continue;
+                // The run is stopping. This package and the dependencies queued
+                // for it were found but not branched: each is listed once as not
+                // started, and nothing more is taken from the sweep.
+                let left = std::iter::once(item).chain(queue.drain(..));
+                for item in left {
+                    report.results.push(ItemResult {
+                        item,
+                        outcome: ItemOutcome::NotStarted,
+                        sr: SrOutcome::NotRequested,
+                    });
+                }
+                break;
             }
             match branch_item(
                 branch,
