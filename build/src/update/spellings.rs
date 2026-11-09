@@ -1,18 +1,19 @@
 //! One package per name: a project that lists two spellings of one name
 //! (`python-authlib` and `python-Authlib`) is one package to update, not two.
 
-use crate::osc;
 use std::collections::BTreeMap;
 
 /// `names` with one spelling of each name kept, in the order given, and the
-/// spellings dropped as `(dropped, kept)`. Names are the same when their
-/// [`osc::fuzzy_key`] is. The spelling kept is the all-lowercase one, which is
-/// how the pipeline names a package, else the smallest (the rule of
-/// `preferred_own_spelling`, so the plan and the build agree).
+/// spellings dropped as `(dropped, kept)`. Names are the same when they are
+/// equal ignoring case. A `-`, `_` or `.` is part of the name: `pythonwhois`
+/// and `python-whois` are two PyPI projects, so both are kept. The spelling
+/// kept is the all-lowercase one, which is how the pipeline names a package,
+/// else the smallest (the rule of `preferred_own_spelling`, so the plan and
+/// the build agree).
 pub(super) fn one_spelling_each(names: Vec<String>) -> (Vec<String>, Vec<(String, String)>) {
     let mut by_key: BTreeMap<String, Vec<&String>> = BTreeMap::new();
     for n in &names {
-        by_key.entry(osc::fuzzy_key(n)).or_default().push(n);
+        by_key.entry(n.to_lowercase()).or_default().push(n);
     }
     let mut dropped = Vec::new();
     let mut keep: Vec<&String> = Vec::new();
@@ -55,8 +56,40 @@ mod tests {
 
     #[test]
     fn without_a_lowercase_spelling_the_smallest_is_kept() {
-        let (kept, _) = one_spelling_each(names(&["Foo_Bar", "Foo-Bar"]));
-        assert_eq!(kept, names(&["Foo-Bar"]));
+        let (kept, dropped) = one_spelling_each(names(&["Foo-Bar", "FOO-BAR"]));
+        assert_eq!(kept, names(&["FOO-BAR"]));
+        assert_eq!(
+            dropped,
+            vec![("Foo-Bar".to_string(), "FOO-BAR".to_string())]
+        );
+    }
+
+    #[test]
+    fn separators_make_distinct_names() {
+        let (kept, dropped) = one_spelling_each(names(&[
+            "python-pythonwhois",
+            "python-python-whois",
+            "python-junitxml",
+            "python-junit-xml",
+            "python-retryrequests",
+            "python-retry-requests",
+            "python-uritemplate",
+            "python-uri-template",
+        ]));
+        assert_eq!(
+            kept,
+            names(&[
+                "python-pythonwhois",
+                "python-python-whois",
+                "python-junitxml",
+                "python-junit-xml",
+                "python-retryrequests",
+                "python-retry-requests",
+                "python-uritemplate",
+                "python-uri-template",
+            ])
+        );
+        assert!(dropped.is_empty());
     }
 
     #[test]
