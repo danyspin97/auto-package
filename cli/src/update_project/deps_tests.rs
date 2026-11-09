@@ -250,5 +250,7 @@ fn a_needed_dependency_over_the_limit_is_not_named_as_required() {
     let choice = choose(false, "BuildRequires: libbar-devel >= 2\n");
     q.add(&mut item, libbar(), choice, &mut after, &lines);
     assert!(queue.is_empty() && item.requires.is_empty());
+    // Nothing is queued, so there is no key to wait for either.
+    assert!(after.is_empty());
     assert!(lines.0.lock().unwrap()[0].starts_with("warning: --update-deps: not updating libbar"));
 }

@@ -126,9 +126,11 @@ impl DepQueue<'_> {
             DepChoice::Update(required) => (required, None),
             DepChoice::UpdateUnchecked(why) => (None, Some(why)),
         };
-        // Built before this item, also when an earlier item queued it.
-        after.push(key.clone());
+        // Built before this item, also when an earlier item queued it. Only a
+        // dependency that is queued (or was, already) is waited for: a key
+        // that is never queued would never be handed over.
         if self.visited.contains(&key) {
+            after.push(key);
             item.requires.extend(required);
             return;
         }
@@ -139,6 +141,7 @@ impl DepQueue<'_> {
             ));
             return;
         }
+        after.push(key.clone());
         self.visited.insert(key);
         *self.count += 1;
         match (&required, unchecked) {
