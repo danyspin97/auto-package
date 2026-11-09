@@ -121,6 +121,7 @@ fn sweep_progress_names_its_package_and_old_logs_still_parse() {
         finished: false,
         package: Some(SweptPackage {
             name: "python-foo".into(),
+            obs_name: String::new(),
             verdict: SweepVerdict::Update {
                 from: "1.0".into(),
                 to: "2.0".into(),
@@ -186,4 +187,44 @@ fn sweep_progress_carries_its_total_when_known() {
     )
     .unwrap();
     assert!(matches!(old, Event::SweepProgress { total: None, .. }));
+}
+
+#[test]
+fn sweep_checking_names_its_package_and_the_check_its_name() {
+    use crate::sweep_event::{SweepVerdict, SweptPackage};
+    let e = Event::SweepChecking {
+        package: "python-APScheduler".into(),
+    };
+    let json = serde_json::to_string(&e).unwrap();
+    assert_eq!(
+        json,
+        r#"{"event":"sweep_checking","package":"python-APScheduler"}"#
+    );
+    let back: Event = serde_json::from_str(&json).unwrap();
+    assert!(matches!(back, Event::SweepChecking { package } if package == "python-APScheduler"));
+    // A result for a build's row names the OBS name it was checked under.
+    let result = SweptPackage {
+        name: "python-apscheduler".into(),
+        obs_name: "python-APScheduler".into(),
+        verdict: SweepVerdict::UpToDate {
+            version: "3.10".into(),
+        },
+    };
+    let json = serde_json::to_string(&result).unwrap();
+    assert!(
+        json.contains(r#""obs_name":"python-APScheduler""#),
+        "{json}"
+    );
+    // Older logs have no OBS name.
+    let old: SweptPackage = serde_json::from_str(
+        r#"{"name":"python-foo","verdict":{"kind":"up_to_date","version":"1"}}"#,
+    )
+    .unwrap();
+    assert_eq!(old.obs_name, "");
+    let no_name = SweptPackage {
+        obs_name: String::new(),
+        ..result
+    };
+    let json = serde_json::to_string(&no_name).unwrap();
+    assert!(!json.contains("obs_name"), "{json}");
 }

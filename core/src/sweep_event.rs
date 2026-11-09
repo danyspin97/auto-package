@@ -8,6 +8,11 @@ pub struct SweptPackage {
     /// The name the package is reported under from here on: for an update the
     /// pipeline can build, the name its build reports; else its OBS name.
     pub name: String,
+    /// The OBS name the check was begun under (see `Event::SweepChecking`).
+    /// It differs from `name` for an update the pipeline builds. Empty in
+    /// logs from before it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub obs_name: String,
     pub verdict: SweepVerdict,
 }
 

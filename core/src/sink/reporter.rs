@@ -36,6 +36,7 @@ pub fn is_lifecycle(event: &Event) -> bool {
             | Event::StepFinished { .. }
             | Event::PackageFinished { .. }
             | Event::PackageDropped { .. }
+            | Event::SweepChecking { .. }
             | Event::TargetSelected { .. }
             | Event::RunFinished { .. }
     )

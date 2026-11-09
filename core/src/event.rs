@@ -507,6 +507,12 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total: Option<usize>,
     },
+    /// The sweep has begun the check of `package`, by its OBS name. Its row
+    /// reads `checking` until the `SweepProgress` that answers it. Only the
+    /// TUI reads it.
+    SweepChecking {
+        package: String,
+    },
     /// The other-architecture check of an updated package: one entry per
     /// checked `(repo, arch)`, the failing ones with their detail.
     ArchCheck {

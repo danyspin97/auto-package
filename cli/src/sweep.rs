@@ -201,7 +201,11 @@ fn swept_package(c: &ap_build::update::Candidate) -> ap_core::sweep_event::Swept
         .first()
         .and_then(update_project::row_name)
         .unwrap_or_else(|| c.rpm_name.clone());
-    SweptPackage { name, verdict }
+    SweptPackage {
+        name,
+        obs_name: c.rpm_name.clone(),
+        verdict,
+    }
 }
 
 /// The sweep of a project for newer releases, running on its own thread so

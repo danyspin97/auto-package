@@ -15,6 +15,7 @@ fn checked(name: &str, verdict: SweepVerdict) -> Msg {
             finished: false,
             package: Some(SweptPackage {
                 name: name.to_string(),
+                obs_name: String::new(),
                 verdict,
             }),
             total: None,
