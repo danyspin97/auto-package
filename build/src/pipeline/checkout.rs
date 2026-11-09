@@ -9,6 +9,7 @@ use crate::pipeline::gen_spec::*;
 use crate::pipeline::linked::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::rpm_deps::*;
+use crate::pipeline::source_case::align_source_case;
 
 /// Whether the spec at `path` still carries a TODO placeholder (convention 63).
 /// An unreadable spec has none.
@@ -90,9 +91,13 @@ pub(super) fn source_is_available(file: &str, head: &[String], checkout_dir: &Pa
     if head.iter().any(|h| listed_name(h) == file) || checkout_dir.join(file).exists() {
         return true;
     }
+    // A file the checkout holds in another case is the same file: the caller
+    // renames it to the spec's spelling once the branch is settled.
     let in_checkout = std::fs::read_dir(checkout_dir).is_ok_and(|rd| {
-        rd.filter_map(|e| e.ok())
-            .any(|e| listed_name(&e.file_name().to_string_lossy()) == file)
+        rd.filter_map(|e| e.ok()).any(|e| {
+            let name = listed_name(&e.file_name().to_string_lossy()).to_string();
+            name == file || name.eq_ignore_ascii_case(file)
+        })
     });
     in_checkout
         || std::fs::read_to_string(checkout_dir.join("_service"))
@@ -344,6 +349,31 @@ pub(super) fn checkout_stage(
                     message: reason.clone(),
                 });
                 return Err(ctx.failed(reason));
+            }
+            // The checkout's copy of a source may differ from the spec's name only
+            // in case (PyPI's spelling). OBS builds the spec's name, so rename it.
+            let spec_text = std::fs::read_to_string(spec_path).unwrap_or_default();
+            match align_source_case(&spec_text, checkout_dir) {
+                Ok(renamed) => {
+                    for (from, to) in renamed {
+                        reporter.report(&Event::Progress {
+                            step: Some(step.id),
+                            message: format!(
+                                "renamed the checkout's {from} to {to}, the name the spec's \
+                                 Source gives it"
+                            ),
+                        });
+                    }
+                }
+                Err(reason) => {
+                    let id = step.id;
+                    step.finish(StepOutcome::Failed);
+                    reporter.report(&Event::Warning {
+                        step: Some(id),
+                        message: reason.clone(),
+                    });
+                    return Err(ctx.failed(reason));
+                }
             }
         }
         step.finish(StepOutcome::Ok);

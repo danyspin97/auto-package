@@ -183,3 +183,17 @@ fn a_source_a_service_makes_is_a_file_of_the_package() {
         checkout
     ));
 }
+
+/// PyPI's spelling of a sdist is a case match for the spec's `Source`: the
+/// checkout is accepted and `align_source_case` renames the file afterwards.
+#[test]
+fn a_source_the_checkout_holds_in_another_case_is_available() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("amqpstorm-3.1.4.tar.gz"), "x").unwrap();
+    assert!(source_is_available(
+        "AMQPStorm-3.1.4.tar.gz",
+        &[],
+        dir.path()
+    ));
+    assert!(!source_is_available("other-3.1.4.tar.gz", &[], dir.path()));
+}

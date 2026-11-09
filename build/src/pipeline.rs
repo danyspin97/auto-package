@@ -390,6 +390,7 @@ mod sibling;
 mod sibling_specs;
 #[cfg(test)]
 mod sibling_specs_tests;
+mod source_case;
 mod spec_edits;
 use spec_edits::*;
 mod snapshot;
