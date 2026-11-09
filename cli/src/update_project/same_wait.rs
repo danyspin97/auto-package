@@ -11,7 +11,8 @@
 
 use super::parked::{Parked, release_first};
 use super::same_project::{
-    FoundIndex, NeedSameProject, same_project_after, same_project_need, same_project_providers,
+    FoundIndex, NeedSameProject, needs_prediction, same_project_after, same_project_need,
+    same_project_providers,
 };
 use super::same_project_defer::{Deferral, MAX_DEFERRED, WaitGraph, defer_decision};
 use super::throttle::Throttle;
@@ -134,8 +135,8 @@ pub(super) struct Decided {
 }
 
 /// Judge `held` against the sweep's updates so far and the parked packages.
-/// The prediction is read here, once, when the package has a same-project
-/// provider, as `dependency_items` reads it for other projects.
+/// The prediction is read here, once, when it can change the judgment (see
+/// [`needs_prediction`]).
 pub(super) fn judge(
     index: &FoundIndex,
     graph: &WaitGraph,
@@ -148,9 +149,13 @@ pub(super) fn judge(
     let needs = if providers.is_empty() {
         Vec::new()
     } else {
-        let prediction = held
-            .prediction
-            .get_or_insert_with(|| predict(&held.item, ctx));
+        let unread = depreach::Prediction::Unknown;
+        let prediction = if needs_prediction(&held.item.pkg, &held.reqs, &providers, index) {
+            held.prediction
+                .get_or_insert_with(|| predict(&held.item, ctx))
+        } else {
+            &unread
+        };
         same_project_need(&held.item.pkg, &held.reqs, prediction, &providers, index)
     };
     let deferral = defer_decision(

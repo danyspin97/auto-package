@@ -225,6 +225,26 @@ pub(super) enum SameNeed {
     Unknown { new_version: String, bound: String },
 }
 
+/// Whether judging `providers` for `parent` reads the new release's predicted
+/// requirements: a requirement of `parent` on one of them has a bound, or the
+/// sweep found an update of one (what `dependency_items` reads it for). With
+/// neither, the prediction cannot change the judgment, and is not read.
+pub(super) fn needs_prediction(
+    parent: &str,
+    reqs: &[Requirement],
+    providers: &[SameProjectProvider],
+    index: &FoundIndex,
+) -> bool {
+    let own = osc::fuzzy_key(parent);
+    providers
+        .iter()
+        .filter(|p| osc::fuzzy_key(&p.package) != own)
+        .any(|p| {
+            index.get(&p.package).is_some()
+                || depreach::bounded_requirement(reqs, &p.names).is_some()
+        })
+}
+
 /// What `parent` needs of each of `providers` (other than itself), given its
 /// requirements `reqs`, what its new release is predicted to require, and
 /// the updates found so far. Judged by [`depreach::dependency_need`] and

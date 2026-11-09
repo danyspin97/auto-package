@@ -95,6 +95,15 @@ fn required_by(req: &Requirement, names: &[String]) -> Option<String> {
         .then_some(text)
 }
 
+/// The text of the first bounded requirement in `reqs` that names one of
+/// `names` (matched as [`dependency_need`] matches them), `None` when no
+/// requirement on them has a bound.
+pub fn bounded_requirement(reqs: &[Requirement], names: &[String]) -> Option<String> {
+    reqs.iter()
+        .filter(|req| req.bound.is_some())
+        .find_map(|req| required_by(req, names))
+}
+
 /// Whether `version` meets `bound`, `None` when the two cannot be compared.
 ///
 /// Compared as RPM compares a dependency with a candidate: the epochs first,

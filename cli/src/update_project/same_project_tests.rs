@@ -464,3 +464,24 @@ fn a_package_not_found_yet_adds_no_wait() {
     );
     assert_eq!(order, SameOrder::default());
 }
+
+#[test]
+fn the_prediction_is_read_only_when_it_can_change_the_judgment() {
+    let unbounded = build_requirements("BuildRequires: libb-devel\n");
+    let bounded = build_requirements("BuildRequires: libb-devel >= 2.0\n");
+    let not_found = index(&[], false);
+    let found = index(&[("libb", "1.0", "2.0")], false);
+    let providers = [libb("1.0-3.1")];
+    // A bound, or an update the sweep found, can change it; neither does not.
+    assert!(!needs_prediction(
+        "liba", &unbounded, &providers, &not_found
+    ));
+    assert!(needs_prediction("liba", &bounded, &providers, &not_found));
+    assert!(needs_prediction("liba", &unbounded, &providers, &found));
+    // The package is never its own dependency.
+    let own = [SameProjectProvider {
+        package: "liba".into(),
+        ..libb("1.0")
+    }];
+    assert!(!needs_prediction("liba", &bounded, &own, &found));
+}
