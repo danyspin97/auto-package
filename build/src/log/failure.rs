@@ -55,6 +55,9 @@ pub enum Genre {
     /// A post-build check: filelist, install test, unowned directories,
     /// scriptlet failures. Happens *after* a successful `rpmbuild`.
     PostBuildCheck,
+    /// A source service of the package failed before the build started (the
+    /// sources were never made, so no rpm section ran).
+    SourceService,
     /// Nothing recognised. The excerpt is a plain window and the model is on
     /// its own; a rising rate here means this module needs another genre.
     Unknown,
@@ -67,6 +70,7 @@ impl Genre {
             Genre::ShellError => "shell-error",
             Genre::CCppCompile => "c-cpp-compile",
             Genre::PostBuildCheck => "post-build-check",
+            Genre::SourceService => "source-service",
             Genre::Unknown => "unknown",
         }
     }
@@ -183,6 +187,18 @@ pub fn is_worker_noise(line: &str) -> bool {
     WORKER_NOISE.is_match(line)
 }
 
+/// What the source services print when one fails: `Error while moving from
+/// 'x' to 'x-3.1'` and the `service run failed for service` line after it.
+static SOURCE_SERVICE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?x)
+        ^Error\x20while\x20moving\x20from\x20'
+      | service\x20run\x20failed\x20for\x20service\x20'
+      ",
+    )
+    .expect("static")
+});
+
 /// Locate and quote the failure.
 ///
 /// `lines` must already be timestamp-stripped; `spans` must come from
@@ -190,12 +206,14 @@ pub fn is_worker_noise(line: &str) -> bool {
 pub fn locate(lines: &[&str], spans: &[Span], mapper: &PathMapper) -> Option<Failure> {
     rpm_reported_failure(lines, spans, mapper)
         .or_else(|| post_build_failure(lines, spans))
+        .or_else(|| source_service_failure(lines))
         .or_else(|| bare_error_line(lines, spans, mapper))
 }
 
 /// Names of the strategies in [`locate`], in the order they are tried.
 const BY_RPM_REPORT: &str = "rpm-reported-failure";
 const BY_POST_BUILD: &str = "post-build-check";
+const BY_SOURCE_SERVICE: &str = "source-service";
 const BY_BARE_ERROR: &str = "bare-error-line";
 
 /// The common case: rpm names the script that failed, which names the section.
@@ -257,6 +275,28 @@ fn post_build_failure(lines: &[&str], spans: &[Span]) -> Option<Failure> {
         Genre::PostBuildCheck,
         Phase::PostBuild,
         BY_POST_BUILD,
+    ))
+}
+
+/// A source service that failed: the lines from its first message to the
+/// last, with some context before. Nothing else in the log names the cause.
+fn source_service_failure(lines: &[&str]) -> Option<Failure> {
+    let first = lines.iter().position(|l| SOURCE_SERVICE.is_match(l))?;
+    let last = lines.iter().rposition(|l| SOURCE_SERVICE.is_match(l))?;
+    let start = first.saturating_sub(DIAGNOSTIC_CONTEXT);
+    let end = (last + 2).min(lines.len());
+    let kept: Vec<&str> = lines[start..end]
+        .iter()
+        .copied()
+        .filter(|l| !is_worker_noise(l) && !is_noise(l))
+        .collect();
+    let elided = (end - start).saturating_sub(kept.len());
+    Some(finish(
+        kept,
+        elided,
+        Genre::SourceService,
+        Phase::Setup,
+        BY_SOURCE_SERVICE,
     ))
 }
 
@@ -436,6 +476,5 @@ fn finish(kept: Vec<&str>, elided: usize, genre: Genre, phase: Phase, located_by
 
 #[cfg(test)]
 mod tests;
-
 #[cfg(test)]
 mod worker_tests;

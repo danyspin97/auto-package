@@ -32,6 +32,11 @@ pub(super) fn classify_failure(
         Phase::Section(s) if s == "%build" => ap_core::event::BuildFailure::BuildFailed,
         Phase::Section(s) if s == "%install" => ap_core::event::BuildFailure::InstallFailed,
         Phase::Section(s) if s == "%check" => ap_core::event::BuildFailure::CheckFailed,
+        // A source service failed before any rpm section ran: the sources were
+        // never made. Not an install failure, whatever else the log says.
+        _ if failure.genre == Genre::SourceService => ap_core::event::BuildFailure::Unclassified {
+            raw: unclassified_raw(extracted),
+        },
         _ if failure.genre == Genre::PostBuildCheck || failure.phase == Phase::PostBuild => {
             ap_core::event::BuildFailure::InstallFailed
         }
@@ -55,3 +60,6 @@ pub(super) fn classify_failure(
         },
     }
 }
+
+#[cfg(test)]
+mod classify_tests;
