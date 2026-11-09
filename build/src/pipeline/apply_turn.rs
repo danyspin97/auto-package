@@ -8,6 +8,7 @@ use crate::pipeline::npm_vendor::*;
 use crate::pipeline::python_spec::*;
 use crate::pipeline::removal_proof::*;
 use crate::pipeline::render::*;
+use crate::pipeline::sdist_wheel::*;
 use crate::pipeline::wheel_switch::*;
 
 /// Everything [`apply_turn_outcome`] needs besides the outcome itself and the
@@ -239,6 +240,20 @@ fn apply_turn_outcome_with(
                 &keep,
                 &bullet_source,
                 &format!("Attempt {attempt} — {label}"),
+            ) {
+                if let Some(slot) = rejected_out.as_mut() {
+                    **slot = Some(why);
+                }
+                false
+            } else if let Some(why) = reject_sdist_to_wheel(
+                config.update && !config.prefers_wheel(),
+                spec_path,
+                before,
+                snapshot,
+                step,
+                reporter,
+                notes_path.clone(),
+                &keep,
             ) {
                 if let Some(slot) = rejected_out.as_mut() {
                     **slot = Some(why);

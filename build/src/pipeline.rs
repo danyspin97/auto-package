@@ -452,6 +452,7 @@ mod changelog_required_tests;
 pub mod rpmlintrc_guard;
 #[cfg(test)]
 mod rpmlintrc_guard_tests;
+mod sdist_wheel;
 mod service_edit;
 #[cfg(test)]
 mod service_edit_tests;

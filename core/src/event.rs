@@ -159,6 +159,12 @@ pub enum SpecRejection {
     BadRpmlintrc {
         problems: Vec<String>,
     },
+    /// An update's `Source0` went from the release's sdist to its wheel
+    /// (convention 32); `from` and `to` are the two values.
+    SdistToWheel {
+        from: String,
+        to: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

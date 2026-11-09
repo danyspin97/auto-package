@@ -11,6 +11,7 @@ use crate::pipeline::prompt_notes::*;
 use crate::pipeline::recap_entry::*;
 use crate::pipeline::render::*;
 use crate::pipeline::rpm_deps::*;
+use crate::pipeline::sdist_wheel::*;
 use crate::pipeline::sibling_specs;
 use crate::pipeline::tarball::*;
 use crate::pipeline::unknown_build::*;
@@ -52,6 +53,11 @@ pub(super) fn generate_spec_stage(
         .flatten()
         .and_then(|t| crate::spec::parse_header(&t))
         .map(|h| h.version);
+    // What the spec said before generation: an update's `Source0` may not move
+    // from the sdist to the wheel (see `sdist_wheel`).
+    let previous_spec = spec_existed_before_generation
+        .then(|| std::fs::read_to_string(spec_path).ok())
+        .flatten();
     let carry_forward = version_bump
         && !config.regen
         && !config.prefers_wheel()
@@ -148,6 +154,18 @@ pub(super) fn generate_spec_stage(
                 Ok(()) => generate_spec(config, checkout_dir, spec_path, &step),
             }
         };
+        // A generated spec that switches an update from its sdist to the wheel is
+        // refused, whichever branch made it: the automatic wheel fallback is not an
+        // agent's `use_upstream_wheel`, so nothing vouches for it.
+        if generated.is_ok()
+            && let Some(why) = previous_spec.as_deref().and_then(|old| {
+                let new = std::fs::read_to_string(spec_path).unwrap_or_default();
+                switch_refusal(!config.prefers_wheel(), old, &new)
+            })
+        {
+            step.finish(StepOutcome::Failed);
+            return Err(ctx.failed_as(FailureKind::NeedsMaintainer, why));
+        }
         match generated {
             Ok(res) => {
                 if let Some(bump) = sibling_bump.take() {
