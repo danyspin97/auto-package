@@ -83,6 +83,7 @@ pub(super) fn prefix_stage(
                 checkout_dir: Some(checkout_dir),
                 from_repo_archive: st.from_repo_archive,
                 resume: false,
+                resolver: false,
                 context: if !build_log_nonempty {
                     // Same situation the Review turn's context covers above:
                     // an empty build log here is not "nothing to fix", it's

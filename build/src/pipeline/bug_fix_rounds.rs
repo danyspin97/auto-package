@@ -45,6 +45,7 @@ pub(super) fn agent_fix_turn(
             checkout_dir: Some(&ctx.checkout_dir),
             from_repo_archive: st.from_repo_archive,
             resume: round > 1,
+            resolver: false,
             context: Some(context),
         },
         ctx.turn_env(),

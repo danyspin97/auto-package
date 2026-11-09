@@ -367,6 +367,7 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
             checkout_dir: Some(checkout_dir),
             from_repo_archive: st.from_repo_archive,
             resume: false,
+            resolver: false,
             context: Some(&context),
         },
         ctx.turn_env(),

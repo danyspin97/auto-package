@@ -4,7 +4,7 @@
 use super::prompt::request;
 use super::*;
 use crate::agent::build_prompt::*;
-use crate::pipeline::RetryRecord;
+use crate::pipeline::{RetryRecord, instruction_for_turn};
 
 /// A record of one failure repeated `repeats` times, instructed.
 fn repeated(repeats: usize) -> RetryRecord {
@@ -20,7 +20,7 @@ fn repeated(repeats: usize) -> RetryRecord {
 fn the_next_fix_turn_prompt_carries_the_retry_instruction() {
     let rec = repeated(1);
     let instruction = rec
-        .instruction_for("13.0.2")
+        .instruction_for("13.0.2", true)
         .expect("an instruction is due");
     let ws = std::path::Path::new("/nonexistent-workspace");
     let mut req = request(ws, &[]);
@@ -40,9 +40,44 @@ fn the_next_fix_turn_prompt_carries_the_retry_instruction() {
 }
 
 #[test]
+fn a_resolver_round_prompt_is_not_offered_blocked() {
+    let rec = repeated(1);
+    let instruction = instruction_for_turn(&rec, "13.0.2", Task::FixAfterBuild, true)
+        .expect("an instruction is due");
+    let ws = std::path::Path::new("/nonexistent-workspace");
+    let mut req = request(ws, &[]);
+    req.task = Task::FixAfterBuild;
+    req.context = Some(&instruction);
+    let prompt = build_turn_prompt(&req);
+    assert!(
+        prompt.contains("## Retry: try a different approach"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("answer `blocked`"), "{prompt}");
+}
+
+#[test]
+fn a_review_turn_is_given_no_retry_instruction() {
+    let rec = repeated(1);
+    assert_eq!(
+        instruction_for_turn(&rec, "13.0.2", Task::Review, false),
+        None
+    );
+    let ws = std::path::Path::new("/nonexistent-workspace");
+    let mut req = request(ws, &[]);
+    req.task = Task::Review;
+    let prompt = build_turn_prompt(&req);
+    assert!(
+        !prompt.contains("## Retry: try a different approach"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("answer `blocked`"), "{prompt}");
+}
+
+#[test]
 fn no_instruction_is_in_the_prompt_of_another_version() {
     let rec = repeated(1);
-    assert_eq!(rec.instruction_for("13.0.3"), None);
+    assert_eq!(rec.instruction_for("13.0.3", true), None);
     let ws = std::path::Path::new("/nonexistent-workspace");
     let prompt = build_turn_prompt(&request(ws, &[]));
     assert!(!prompt.contains("## Retry: try a different approach"));

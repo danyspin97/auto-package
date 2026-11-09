@@ -69,6 +69,7 @@ pub(super) fn patch_stage(
                     checkout_dir: Some(&ctx.checkout_dir),
                     from_repo_archive: st.from_repo_archive,
                     resume: false,
+                    resolver: false,
                     context: Some(context),
                 },
                 ctx.turn_env(),

@@ -57,6 +57,7 @@ pub(super) fn fix_after_validation(
             checkout_dir: Some(checkout_dir),
             from_repo_archive: st.from_repo_archive,
             resume: true,
+            resolver: false,
             context,
         },
         ctx.turn_env(),

@@ -165,6 +165,7 @@ pub(super) fn resolve_blocked(
                     checkout_dir: Some(&ctx.checkout_dir),
                     from_repo_archive: st.from_repo_archive,
                     resume: false,
+                    resolver: true,
                     context: Some(context),
                 },
                 ctx.turn_env(),

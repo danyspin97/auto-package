@@ -92,6 +92,7 @@ pub(super) fn agent_review_turn(
             checkout_dir: Some(&ctx.checkout_dir),
             from_repo_archive: st.from_repo_archive,
             resume: false,
+            resolver: false,
             context: Some(context),
         },
         crate::pipeline::agent::TurnEnv {

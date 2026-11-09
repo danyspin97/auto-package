@@ -467,6 +467,7 @@ pub(super) fn unresolvable_deps_round(
                 checkout_dir: None,
                 from_repo_archive: st.from_repo_archive,
                 resume: false,
+                resolver: false,
                 context: alternatives_context.as_deref(),
             },
             ctx.turn_env(),

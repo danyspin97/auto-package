@@ -11,9 +11,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::Task;
 use crate::workspace::Workspace;
 
 use super::PkgState;
+use super::agent::TurnCtx;
 
 /// Identical failures after the instruction before the package is given up.
 pub const INSTRUCTED_REPEATS: usize = 3;
@@ -92,9 +94,11 @@ impl RetryRecord {
     }
 
     /// The instruction for the next attempt of `version`, if one is due.
-    pub fn instruction_for(&self, version: &str) -> Option<String> {
+    /// `offer_blocked` is false for a resolver round, where `blocked` is not
+    /// an accepted answer (see `ladder_context`).
+    pub fn instruction_for(&self, version: &str, offer_blocked: bool) -> Option<String> {
         (self.instructed && self.version == version && !self.reasons.is_empty())
-            .then(|| instruction_text(self))
+            .then(|| instruction_text(self, offer_blocked))
     }
 
     /// The give-up text: how often the failure repeated, that the instruction
@@ -120,7 +124,7 @@ impl RetryRecord {
 
 /// The instruction block a retry is given. The reasons come from build logs
 /// and agent answers, so they are fenced as data, never as instructions.
-pub fn instruction_text(record: &RetryRecord) -> String {
+pub fn instruction_text(record: &RetryRecord, offer_blocked: bool) -> String {
     let current = record
         .reasons
         .last()
@@ -155,12 +159,39 @@ pub fn instruction_text(record: &RetryRecord) -> String {
     }
     text.push_str("Try a different approach. ");
     text.push_str(menu_for(current));
-    text.push_str(
-        "\n\nIf after reading everything you conclude that only a human can fix it, answer \
-         `blocked` with the evidence: what you read, what you ruled out and why the \
-         pipeline cannot do it.\n",
-    );
+    if offer_blocked {
+        text.push_str(
+            "\n\nIf after reading everything you conclude that only a human can fix it, answer \
+             `blocked` with the evidence: what you read, what you ruled out and why the \
+             pipeline cannot do it.\n",
+        );
+    } else {
+        text.push('\n');
+    }
     text
+}
+
+/// Whether a retry instruction is ever given to `task`: only the turns that
+/// fix the spec after a failed build or validation.
+fn is_fix_task(task: Task) -> bool {
+    matches!(
+        task,
+        Task::FixAfterBuild | Task::FixAfterValidation | Task::RpmlintFix
+    )
+}
+
+/// The retry instruction a turn of `task` on `version` is given, if one is
+/// due. `resolver` is true for a resolver round of the ladder.
+pub fn instruction_for_turn(
+    record: &RetryRecord,
+    version: &str,
+    task: Task,
+    resolver: bool,
+) -> Option<String> {
+    if !is_fix_task(task) {
+        return None;
+    }
+    record.instruction_for(version, !resolver)
 }
 
 /// The part of the instruction that names the approaches for this failure.
@@ -238,15 +269,23 @@ pub fn join_context(instruction: Option<String>, context: Option<String>) -> Opt
     }
 }
 
-/// The context of a turn of `version` of the package in `ws`, with the
-/// instruction of its last failure ahead of `context` when one is due.
-pub fn with_pending_instruction(
+/// The context of a turn of `version` of the package in `ws`: the given
+/// `context` and the `facts` about its siblings and licence, with the
+/// instruction of its last failure ahead of them when one is due.
+pub(super) fn turn_context(
     ws: &Workspace,
     version: &str,
-    context: Option<String>,
+    ctx: &TurnCtx<'_>,
+    facts: Option<String>,
 ) -> Option<String> {
-    let instruction = PkgState::load(ws).retry.instruction_for(version);
-    join_context(instruction, context)
+    let base = match (ctx.context, facts) {
+        (Some(c), Some(f)) => Some(format!("{c}\n\n{f}")),
+        (Some(c), None) => Some(c.to_string()),
+        (None, f) => f,
+    };
+    let st = PkgState::load(ws);
+    let instruction = instruction_for_turn(&st.retry, version, ctx.task, ctx.resolver);
+    join_context(instruction, base)
 }
 
 #[cfg(test)]
@@ -261,7 +300,7 @@ mod tests {
         assert_eq!(rec.note_failure("1.0", REASON, false), RepeatStep::Retry);
         assert!(!rec.instructed);
         assert_eq!(rec.reasons, vec![REASON.to_string()]);
-        assert_eq!(rec.instruction_for("1.0"), None);
+        assert_eq!(rec.instruction_for("1.0", true), None);
     }
 
     #[test]
@@ -320,7 +359,7 @@ mod tests {
         assert!(!rec.instructed);
         assert_eq!(rec.repeats, 0);
         assert_eq!(rec.reasons, vec![REASON.to_string()]);
-        assert_eq!(rec.instruction_for("1.0"), None);
+        assert_eq!(rec.instruction_for("1.0", true), None);
     }
 
     #[test]
@@ -343,7 +382,7 @@ mod tests {
         rec.note_failure("1.0", "first reason", false);
         rec.note_failure("1.0", REASON, false);
         rec.note_failure("1.0", REASON, true);
-        let text = rec.instruction_for("1.0").expect("due");
+        let text = rec.instruction_for("1.0", true).expect("due");
         assert!(text.contains("The same failure happened 2 times"), "{text}");
         assert!(text.contains(REASON), "{text}");
         assert!(text.contains("first reason"), "{text}");
@@ -356,7 +395,7 @@ mod tests {
     fn the_count_reads_once_for_a_single_failure() {
         let mut rec = RetryRecord::default();
         rec.note_failure("1.0", "needs a human: x", false);
-        let text = rec.instruction_for("1.0").expect("due");
+        let text = rec.instruction_for("1.0", true).expect("due");
         assert!(text.contains("happened 1 time: "), "{text}");
     }
 
@@ -366,11 +405,61 @@ mod tests {
         let mut rec = RetryRecord::default();
         rec.note_failure("1.0", &long, false);
         rec.note_failure("1.0", &long, true);
-        let text = rec.instruction_for("1.0").expect("due");
+        let text = rec.instruction_for("1.0", true).expect("due");
         assert!(text.contains("(cut)"));
         assert!(text.len() < MAX_REASON_CHARS * 4 + 2_000, "{}", text.len());
         assert_eq!(clip("ab", 2), "ab");
         assert_eq!(clip("abc", 2), "ab… (cut)");
+    }
+
+    #[test]
+    fn a_resolver_turn_is_not_offered_blocked() {
+        let mut rec = RetryRecord::default();
+        rec.note_failure("1.0", REASON, false);
+        rec.note_failure("1.0", REASON, true);
+        let fix = instruction_for_turn(&rec, "1.0", Task::FixAfterBuild, false).expect("due");
+        assert!(fix.contains("answer `blocked`"), "{fix}");
+        let resolver = instruction_for_turn(&rec, "1.0", Task::FixAfterBuild, true).expect("due");
+        assert!(!resolver.contains("answer `blocked`"), "{resolver}");
+        assert!(
+            !resolver.contains("`blocked` with the evidence"),
+            "{resolver}"
+        );
+        assert!(resolver.contains("Try a different approach"), "{resolver}");
+    }
+
+    #[test]
+    fn only_the_fix_turns_are_given_the_instruction() {
+        let mut rec = RetryRecord::default();
+        rec.note_failure("1.0", REASON, false);
+        rec.note_failure("1.0", REASON, true);
+        for task in [
+            Task::FixAfterBuild,
+            Task::FixAfterValidation,
+            Task::RpmlintFix,
+        ] {
+            assert!(
+                instruction_for_turn(&rec, "1.0", task, false).is_some(),
+                "{task:?}"
+            );
+        }
+        for task in [
+            Task::Review,
+            Task::PostBuildReview,
+            Task::PatchReview,
+            Task::RefreshPatches,
+            Task::PatchDependency,
+            Task::TranslateUnresolvableDeps,
+            Task::FixBug,
+            Task::FixFindings,
+            Task::RequestReview,
+        ] {
+            assert_eq!(
+                instruction_for_turn(&rec, "1.0", task, false),
+                None,
+                "{task:?}"
+            );
+        }
     }
 
     #[test]

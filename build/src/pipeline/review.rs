@@ -197,6 +197,7 @@ pub(super) fn review_stage(
                 checkout_dir: Some(checkout_dir),
                 from_repo_archive: st.from_repo_archive,
                 resume: false,
+                resolver: false,
                 context: review_turn_context(
                     patch_context.as_deref(),
                     submodule_context.as_deref(),

@@ -61,6 +61,9 @@ pub(super) struct TurnCtx<'a> {
     pub(super) from_repo_archive: bool,
     /// Resume the previous `claude` session rather than starting a fresh one.
     pub(super) resume: bool,
+    /// A resolver round of the ladder (see `ladder_context`): `blocked` is not
+    /// offered to it, so the retry instruction leaves that answer out.
+    pub(super) resolver: bool,
     /// Optional short note injected into the prompt before the hint section.
     pub(super) context: Option<&'a str>,
     /// The spec is a carried-forward recipe (see `TurnRequest::carried`).
@@ -278,12 +281,7 @@ pub(super) fn agent_turn(
         (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
         (a, b) => a.or(b),
     };
-    let base_context: Option<String> = match (ctx.context, facts) {
-        (Some(c), Some(f)) => Some(format!("{c}\n\n{f}")),
-        (Some(c), None) => Some(c.to_string()),
-        (None, f) => f,
-    };
-    let base_context = with_pending_instruction(ws, &config.version, base_context);
+    let base_context = turn_context(ws, &config.version, &ctx, facts);
     let on_tool_use = |tool: &str, input: &str| {
         reporter.report(&Event::AgentToolUse {
             step: step.id,
