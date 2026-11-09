@@ -37,6 +37,52 @@ fn a_failed_row_is_over_but_not_settled() {
     assert!(run_is_over(&state, 0));
 }
 
+fn excluded() -> PackageOutcome {
+    PackageOutcome::Skipped {
+        reason: "excluded on x86_64".to_string(),
+    }
+}
+
+#[test]
+fn an_excluded_row_is_settled_with_the_rest_built() {
+    let mut state = TuiState::new(RunScope::default());
+    finish(&mut state, "built", PackageOutcome::Built);
+    finish(&mut state, "excluded", excluded());
+    assert!(run_is_done(&state, 0));
+    assert!(run_is_over(&state, 0));
+}
+
+#[test]
+fn a_run_of_only_excluded_rows_is_settled() {
+    let mut state = TuiState::new(RunScope::default());
+    finish(&mut state, "excluded", excluded());
+    assert!(run_is_done(&state, 0));
+}
+
+#[test]
+fn an_excluded_row_does_not_settle_a_run_with_a_failed_row() {
+    let mut state = TuiState::new(RunScope::default());
+    finish(&mut state, "excluded", excluded());
+    finish(&mut state, "failed", failed());
+    assert!(!run_is_done(&state, 0));
+    assert!(run_is_over(&state, 0));
+}
+
+#[test]
+fn an_excluded_row_with_a_retry_asked_for_keeps_the_run_open() {
+    let mut state = TuiState::new(RunScope::default());
+    finish(&mut state, "excluded", excluded());
+    state.pkg_mut("excluded").retry_requested = true;
+    assert!(!run_is_done(&state, 0));
+}
+
+#[test]
+fn an_excluded_row_with_work_outstanding_keeps_the_run_open() {
+    let mut state = TuiState::new(RunScope::default());
+    finish(&mut state, "excluded", excluded());
+    assert!(!run_is_done(&state, 1));
+}
+
 #[test]
 fn a_row_still_running_keeps_the_run_open() {
     let mut state = TuiState::new(RunScope::default());

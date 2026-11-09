@@ -42,9 +42,11 @@ pub(super) fn run(
 /// close by itself and the run exits 0.
 ///
 /// A package is settled once its own build has finished with a built outcome
-/// (`Built` or `AlreadyBuilt`) and no retry is asked for. Nothing else settles
-/// a row: one parked on missing deps is not settled, even once its dependencies
-/// are built, and neither is a failed row.
+/// (`Built` or `AlreadyBuilt`) and no retry is asked for, or once OBS excludes
+/// it for this repository and arch (`Skipped`): nothing can be built for it,
+/// and it is not a failure. Nothing else settles a row: one parked on missing
+/// deps is not settled, even once its dependencies are built, and neither is a
+/// failed row.
 ///
 /// `work_left` counts the builds still running (see
 /// [`TuiController::work_finished`]), so a run with work outstanding is never
@@ -68,7 +70,9 @@ pub(super) fn run_is_done(state: &TuiState, work_left: usize) -> bool {
     if rows.peek().is_none() {
         return matches!(state.run_outcome, Some(RunOutcome::Success));
     }
-    rows.all(|p| p.finished && !p.retry_requested && p.status.is_built())
+    rows.all(|p| {
+        p.finished && !p.retry_requested && (p.status.is_built() || p.status.is_excluded())
+    })
 }
 
 /// Whether the run has nothing left to do, built or not: `work_left` is zero

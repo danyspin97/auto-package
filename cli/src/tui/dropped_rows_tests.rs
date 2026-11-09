@@ -95,13 +95,13 @@ fn a_failed_build_beside_built_rows_keeps_the_run_open() {
 }
 
 #[test]
-fn a_build_skipped_by_obs_keeps_the_run_open_as_before() {
+fn a_build_skipped_by_obs_settles_the_run() {
     let mut state = TuiState::new(RunScope::default());
     state.apply(selected("built"));
     state.apply(finished("built", PackageOutcome::Built));
     state.apply(selected("excluded"));
     state.apply(finished("excluded", skipped()));
-    assert!(!run_is_done(&state, 0));
+    assert!(run_is_done(&state, 0));
 }
 
 #[test]

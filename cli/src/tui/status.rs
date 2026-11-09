@@ -187,6 +187,12 @@ impl PkgStatus {
         self.stage() == Stage::Done
     }
 
+    /// Whether OBS excludes the package for this repository and arch: nothing
+    /// can be built for it, and it is not a failure, so it settles the run.
+    pub(super) fn is_excluded(&self) -> bool {
+        *self == PkgStatus::Skipped
+    }
+
     /// Whether the package's time runs: only while it is worked on.
     pub(super) fn timer_runs(&self) -> bool {
         self.stage() == Stage::Running || *self == PkgStatus::Checking

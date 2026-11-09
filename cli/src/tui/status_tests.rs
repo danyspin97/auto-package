@@ -254,6 +254,18 @@ fn a_check_result_moves_only_a_row_no_build_has_taken() {
 }
 
 #[test]
+fn only_a_row_obs_excludes_is_excluded() {
+    for from in ALL {
+        assert_eq!(
+            from.is_excluded(),
+            from == PkgStatus::Skipped,
+            "{}",
+            from.label()
+        );
+    }
+}
+
+#[test]
 fn only_the_check_statuses_are_check_only() {
     for from in ALL {
         let check = matches!(
