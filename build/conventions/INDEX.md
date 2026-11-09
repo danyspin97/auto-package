@@ -43,3 +43,4 @@
 114. C/C++ system-library shims: check every consumer in the same turn — read when a C/C++ build fails in a header, namespace or include path that a system-library shim or patch provides
 115. Build system switch (autotools to meson or CMake): explicit options and BuildRequires — read when %configure or %make_build becomes %meson or %cmake, or the reverse
 116. Removed/renamed Python stdlib APIs (pkg_resources, distutils, imp, ...): the replacement table — read when a test or import fails with AttributeError/ModuleNotFoundError on a stdlib name | also: (38) tests or code fail with AttributeError/ImportError on a stdlib name
+117. Stale _service source: move its revision to the new tag, never no_change — read when the build log says service run failed for service 'tar' or Error while moving from

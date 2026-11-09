@@ -12,6 +12,7 @@ mod request_review;
 mod retry_prompt;
 mod review_tools;
 mod scrub;
+mod service_revision;
 mod stub;
 mod text;
 mod tools;
