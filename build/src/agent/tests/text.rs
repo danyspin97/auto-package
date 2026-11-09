@@ -249,3 +249,9 @@ fn an_rm_of_installed_files_is_checked_against_the_installed_tree() {
     assert!(convention(39).contains("INSTALLED tree"));
     assert!(index_line(39).contains("an rm or %exclude of build output"));
 }
+
+/// A skip comment never blames a dependency of this run, which is built or reported.
+#[test]
+fn a_skip_comment_never_blames_a_dependency_that_failed_here() {
+    assert!(convention(11).contains("never that a dependency failed to build in this"));
+}
