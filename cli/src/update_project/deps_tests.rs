@@ -355,3 +355,56 @@ fn metadata_that_cannot_be_read_falls_back_to_the_spec() {
         DepChoice::Update(Some(_))
     ));
 }
+
+/// What becomes of python-bar for python-foo when its spec requires it as
+/// `%{python_module bar ...}`, read for python313: the search names its
+/// origin by `python313-bar`.
+fn choose_module(spec: &str, lines: Option<&[&str]>) -> DepChoice {
+    let (bar, mut origin) = python_bar();
+    origin.names = vec!["python313-bar".to_string()];
+    let prediction = match lines {
+        Some(lines) => {
+            let json = serde_json::json!({
+                "info": { "version": "3.0", "requires_dist": lines },
+            })
+            .to_string();
+            let pypi = ap_build::update::Ecosystem::Pypi {
+                pypi_name: "foo".into(),
+            };
+            depreach::predicted_requirements(&pypi, "3.0", |_, _| Ok(Some(json)))
+        }
+        None => Prediction::Unknown,
+    };
+    let reqs = spec_requirements(spec, &["python313".to_string()]).requirements;
+    choose_dependency(
+        false,
+        &reqs,
+        &prediction,
+        &origin,
+        &bar,
+        "python-foo",
+        BRANCH,
+    )
+}
+
+#[test]
+fn a_python_module_bound_is_judged_as_a_package_bound() {
+    let DepChoice::Update(Some(r)) =
+        choose_module("BuildRequires: %{python_module bar >= 1.5}\n", None)
+    else {
+        panic!("python-bar should be updated first");
+    };
+    assert_eq!(r.requirement, "python313-bar >= 1.5");
+    for spec in [
+        "BuildRequires: %{python_module bar >= 0.9}\n",
+        "BuildRequires: %{python_module bar}\n",
+    ] {
+        let choice = choose_module(spec, None);
+        assert!(matches!(choice, DepChoice::Origin(_)), "{spec}: {choice:?}");
+    }
+    // PyPI's bound reaches a module the spec names without one.
+    assert!(matches!(
+        choose_module("BuildRequires: %{python_module bar}\n", Some(&["bar>=1.5"])),
+        DepChoice::Update(Some(_))
+    ));
+}

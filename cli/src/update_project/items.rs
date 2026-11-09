@@ -215,32 +215,61 @@ pub(super) fn rebase_unless_continuing(
     }
 }
 
-/// Check `item`'s BuildRequires against the branch project's paths and add
-/// the paths that are missing. Returns the paths chosen and the verdicts.
+/// The Python flavors a spec's `%{python_module}` BuildRequires are looked
+/// up for (`python313-<name>`): those of the work directory, else the host's
+/// `%{pythons}`. Only `--update-deps` reads them, to choose dependencies, and
+/// not with `--test-against-updates`, which keeps the dependencies it had.
+/// None when no flavor is known: the macros are then not looked up.
+pub(super) fn python_module_flavors(a: &UpdateProjectArgs, ctx: &Ctx<'_>) -> Vec<String> {
+    if !a.update_deps || a.test_against_updates {
+        return Vec::new();
+    }
+    let why = match ctx.python_flavors.try_effective() {
+        Ok(flavors) if !flavors.is_empty() => return flavors,
+        Ok(_) => "no Python flavor is known".to_string(),
+        Err(e) => e,
+    };
+    ctx.say(format!(
+        "--update-deps: {why}, so %{{python_module}} BuildRequires are not looked up"
+    ));
+    Vec::new()
+}
+
+/// `spec`'s BuildRequires, each `%{python_module}` read for `flavors` (see
+/// [`depreach::expand_python_modules`]).
+pub(super) fn spec_requirements(spec: &str, flavors: &[String]) -> depreach::PythonModules {
+    depreach::expand_python_modules(&ap_build::spec::build_requirements(spec), flavors)
+}
+
+/// Check `item`'s BuildRequires `reqs` against the branch project's paths
+/// and add the paths that are missing, though none for a name only a
+/// `%{python_module}` gave. Returns the paths chosen and the verdicts.
 pub(super) fn reach_dependencies(
     a: &UpdateProjectArgs,
     item: &Item,
-    spec: &str,
+    modules: &depreach::PythonModules,
     resolver: &DepResolver,
     run_packages: &[String],
     ctx: &Ctx<'_>,
     report: &mut Report,
 ) -> color_eyre::Result<(Vec<PathAddition>, Vec<depreach::DepVerdict>)> {
-    let reqs = ap_build::spec::build_requirements(spec);
+    let reqs = &modules.requirements;
     let deps: Vec<ap_build::spec::BuildRequire> = reqs.iter().map(|r| r.dep.clone()).collect();
     let mut verdicts = resolver
         .check(&deps)
         .map_err(|e| eyre!("checking the BuildRequires of {}: {e}", item.pkg))?;
     verdicts.extend(
         resolver
-            .check_requirements(&reqs, &item.pkg, &item.origin, run_packages)
+            .check_requirements(reqs, &item.pkg, &item.origin, run_packages)
             .map_err(|e| eyre!("checking the capabilities of {}: {e}", item.pkg))?,
     );
 
     let mut unchecked: Vec<String> = Vec::new();
     let mut not_published: Vec<&str> = Vec::new();
+    let mut outside: Vec<&str> = Vec::new();
     for v in &verdicts {
         match &v.state {
+            DepState::Missing { .. } if modules.flavored.contains(&v.name) => outside.push(&v.name),
             DepState::OnlyUnusable { .. } => {
                 // Published only where no path can point, which is not evidence
                 // that it is missing: warn when the build path's repositories do
@@ -289,7 +318,20 @@ pub(super) fn reach_dependencies(
         ));
     }
 
-    let adds = depreach::choose_paths(&verdicts);
+    if !outside.is_empty() {
+        ctx.say(format!(
+            "{}: {} published only outside the build path; no path is added for a \
+             %{{python_module}} BuildRequires",
+            item.pkg,
+            outside.join(", ")
+        ));
+    }
+    let pathed: Vec<depreach::DepVerdict> = verdicts
+        .iter()
+        .filter(|v| !modules.flavored.contains(&v.name))
+        .cloned()
+        .collect();
+    let adds = depreach::choose_paths(&pathed);
     // A maintenance run adds no build path: a package that needs one fails
     // its code stream instead (the incident could not build it).
     if a.maintenance_source {

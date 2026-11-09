@@ -186,6 +186,7 @@ fn prepare(
     let mut dependency_count = 0;
     let mut branch_checked = false;
     let mut open_requests = requested::OpenRequests::default();
+    let module_flavors = std::cell::OnceCell::new();
     loop {
         tui_row::close_dropped(ctx, &report.results, &mut closed_upto, &mut sweep_rows);
         let mut item = match queue.pop_front() {
@@ -404,8 +405,10 @@ fn prepare(
                 if !run_packages.contains(&item.pkg) {
                     run_packages.push(item.pkg.clone());
                 }
+                let flavors = module_flavors.get_or_init(|| python_module_flavors(a, ctx));
+                let reqs = spec_requirements(&spec, flavors);
                 let (adds, verdicts) =
-                    match reach_dependencies(a, &item, &spec, resolver, &run_packages, ctx, report)
+                    match reach_dependencies(a, &item, &reqs, resolver, &run_packages, ctx, report)
                     {
                         Ok(found) => found,
                         Err(e) => {
@@ -420,7 +423,6 @@ fn prepare(
                         }
                     };
                 if a.update_deps {
-                    let reqs = ap_build::spec::build_requirements(&spec);
                     let mut deps = DepQueue {
                         queue: &mut queue,
                         visited: &mut visited,
@@ -431,7 +433,7 @@ fn prepare(
                         a,
                         branch,
                         &item,
-                        &reqs,
+                        &reqs.requirements,
                         &verdicts,
                         &adds,
                         &prediction,
