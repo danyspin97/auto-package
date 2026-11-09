@@ -11,7 +11,7 @@ fn an_extra_in_a_build_requirement_is_not_written() {
     let build_system = BuildSystem {
         requires: vec![
             "setuptools-scm[toml]".to_string(),
-            "setuptools_scm[toml]>=3.4.1".to_string(),
+            "pydantic-core[x]>=6.2".to_string(),
             "setuptools>=42".to_string(),
         ],
         backend: Some("setuptools.build_meta".to_string()),
@@ -19,11 +19,11 @@ fn an_extra_in_a_build_requirement_is_not_written() {
     let spec = "Name: pkg\nBuildRequires:  %{python_module pip}\n%changelog\n";
     let out = post_process_with_sdist(spec, &release, &build_system, SdistFacts::default());
     assert!(
-        out.contains("BuildRequires:  %{python_module setuptools-scm}\n"),
+        out.contains("BuildRequires:  %{python_module setuptools_scm}\n"),
         "{out}"
     );
     assert!(
-        out.contains("BuildRequires:  %{python_module setuptools_scm >= 3.4.1}\n"),
+        out.contains("BuildRequires:  %{python_module pydantic-core >= 6.2}\n"),
         "{out}"
     );
     assert!(
