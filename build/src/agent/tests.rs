@@ -1,5 +1,6 @@
 use super::*;
 mod bounds_on_provides;
+mod check_dependencies_once;
 mod denies;
 mod edit_bytes;
 mod errors;
