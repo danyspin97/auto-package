@@ -15,6 +15,7 @@ mod python_expand_block;
 mod request_review;
 mod retry_prompt;
 mod review_tools;
+mod rust_cargo_skill;
 mod scrub;
 mod service_revision;
 mod stub;
