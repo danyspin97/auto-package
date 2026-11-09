@@ -228,6 +228,27 @@ pub fn clear_record(state_root: &Path, rpm_name: &str) {
     }
 }
 
+/// `instruction` ahead of `context`, as one context text: the instruction is
+/// the first thing a turn reads after its task.
+pub fn join_context(instruction: Option<String>, context: Option<String>) -> Option<String> {
+    match (instruction, context) {
+        (Some(i), Some(c)) => Some(format!("{i}\n\n{c}")),
+        (Some(i), None) => Some(i),
+        (None, c) => c,
+    }
+}
+
+/// The context of a turn of `version` of the package in `ws`, with the
+/// instruction of its last failure ahead of `context` when one is due.
+pub fn with_pending_instruction(
+    ws: &Workspace,
+    version: &str,
+    context: Option<String>,
+) -> Option<String> {
+    let instruction = PkgState::load(ws).retry.instruction_for(version);
+    join_context(instruction, context)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +393,17 @@ mod tests {
         assert!(text.contains("after 4 identical repeat(s)"), "{text}");
         assert!(text.contains("3 attempt(s) told to try"), "{text}");
         assert!(text.contains("1. first"), "{text}");
+    }
+
+    #[test]
+    fn the_instruction_leads_the_context_and_is_alone_when_there_is_none() {
+        assert_eq!(
+            join_context(Some("I".into()), Some("C".into())),
+            Some("I\n\nC".to_string())
+        );
+        assert_eq!(join_context(Some("I".into()), None), Some("I".to_string()));
+        assert_eq!(join_context(None, Some("C".into())), Some("C".to_string()));
+        assert_eq!(join_context(None, None), None);
     }
 
     #[test]

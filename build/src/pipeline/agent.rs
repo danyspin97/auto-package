@@ -283,6 +283,7 @@ pub(super) fn agent_turn(
         (Some(c), None) => Some(c.to_string()),
         (None, f) => f,
     };
+    let base_context = with_pending_instruction(ws, &config.version, base_context);
     let on_tool_use = |tool: &str, input: &str| {
         reporter.report(&Event::AgentToolUse {
             step: step.id,

@@ -8,6 +8,7 @@ mod integrity;
 mod links;
 mod prompt;
 mod request_review;
+mod retry_prompt;
 mod review_tools;
 mod scrub;
 mod stub;
