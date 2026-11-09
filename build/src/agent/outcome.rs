@@ -306,9 +306,13 @@ pub(super) fn refresh_patches_task() -> &'static str {
      sources: quilt's own message `Patch <name> can be reverse-applied` when you `quilt \
      push` the unchanged patch, or, when quilt says the patch fails, every hunk's added \
      lines form one contiguous run, in order, in one file of the new archive and \
-     each hunk has a substantive line (the pipeline checks this form itself). Only then remove it: its `PatchN:` line, \
-     its `%patchN` line if any, and its file (`cd source && quilt delete -r <name>`). \
-     The pipeline checks that proof and rolls back a removal without it.\n\
+     each hunk has a substantive line (the pipeline checks this form itself). Or, when every \
+     file the patch changes is absent from the new archive (quilt says `can't find file to \
+     patch` for every hunk): remove the patch; the pipeline checks it itself and never accepts \
+     it for a security patch. A change already upstream with different surrounding text is \
+     removed too: the pipeline proves it by the patched lines. Only then remove it: its \
+     `PatchN:` line, its `%patchN` line if any, and its file (`cd source && quilt delete -r \
+     <name>`). The pipeline checks that proof and rolls back a removal without it.\n\
      \n\
      A rebased patch keeps its header as it is (`Subject:`, `Description:`, and \
      `Upstream:` with a URL or `not yet reported`) and the `# PATCH-...` comment above \

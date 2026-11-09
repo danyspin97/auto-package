@@ -10,6 +10,7 @@ mod fix_tools;
 mod integrity;
 mod links;
 mod packaged_twice;
+mod patch_removal_text;
 mod post_build_lead;
 mod prompt;
 mod pytest_line;
