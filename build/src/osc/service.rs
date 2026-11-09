@@ -171,7 +171,7 @@ const TAR_SCM_PARAMS: &[&str] = &[
 ];
 
 /// cargo_vendor's options.
-const CARGO_VENDOR_PARAMS: &[&str] = &[
+pub(super) const CARGO_VENDOR_PARAMS: &[&str] = &[
     "url",
     "src",
     // aliases of --src in clap

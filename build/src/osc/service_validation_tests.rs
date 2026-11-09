@@ -373,3 +373,24 @@ fn a_utf8_bom_before_the_root_is_accepted_as_osc_accepts_it() {
     assert!(service_xml_problem(xml).is_none());
     validate_service_xml(xml.as_bytes()).unwrap();
 }
+
+/// Convention 113 recommends no `_service` parameter the allowlist refuses:
+/// the agent would write it, and the service edit is rolled back.
+#[test]
+fn the_cargo_convention_names_no_refused_service_parameter() {
+    use super::service::CARGO_VENDOR_PARAMS;
+    let text = include_str!("../../conventions/113.md");
+    for refused in ["update-crate", "custom-root", "lockfile", "strategy"] {
+        assert!(
+            !CARGO_VENDOR_PARAMS.contains(&refused),
+            "{refused} is in the cargo_vendor allowlist"
+        );
+        // A line that names the refused parameter must say not to use it.
+        for line in text.lines().filter(|l| l.contains(refused)) {
+            assert!(
+                line.contains("Do not use"),
+                "convention 113 recommends {refused}: {line}"
+            );
+        }
+    }
+}
