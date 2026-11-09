@@ -237,3 +237,15 @@ fn index_triggers_in_brackets_are_merged_into_their_line() {
         }
     }
 }
+
+/// The text of convention `n` (1-based), as the agent Reads it.
+fn convention(n: usize) -> &'static str {
+    crate::conventions_table::CONVENTIONS[n - 1].1
+}
+
+/// Dropping an `rm` of installed files is judged on the installed tree, not the source.
+#[test]
+fn an_rm_of_installed_files_is_checked_against_the_installed_tree() {
+    assert!(convention(39).contains("INSTALLED tree"));
+    assert!(index_line(39).contains("an rm or %exclude of build output"));
+}
