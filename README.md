@@ -158,7 +158,11 @@ Options (besides the build-related `--work-dir`, `--notes`, `--distro`,
   project and that the package's BuildRequires need newer than that project
   has (see below). Dependencies are chosen when the package is prepared, from
   the spec as the branch has it before the update, so a bound that the new
-  upstream release adds is only seen on the next run (a known limit).
+  upstream release adds is only seen on the next run (a known limit). A package
+  waits for a dependency that is queued before it (or that an earlier package
+  queued); a dependency that another package queues later in the run is not
+  waited for, so the package may build against that dependency's origin
+  binaries (a known limit).
 - `--test-against-updates`: with `--update-deps`, branch and update every such
   dependency that has a newer release, so the package is tested against the
   updates instead of the origin's binaries (see below). A capability bound
