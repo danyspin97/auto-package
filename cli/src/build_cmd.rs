@@ -2,6 +2,7 @@
 
 use crate::*;
 
+mod dep_config;
 mod deps;
 mod flags;
 mod rows;

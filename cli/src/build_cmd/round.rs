@@ -1,3 +1,4 @@
+use super::dep_config::as_dependency;
 use super::*;
 
 /// The state of one round of the frontier: what the round needs from the
@@ -324,6 +325,13 @@ pub(super) fn package_config(
     rpm_name: &str,
 ) -> PipelineConfig {
     let is_root = rpm_name == config.rpm_name;
+    // The root keeps its run as it is; a dependency of it starts from the
+    // dependency's config, without the root's update, branch or fix.
+    let base = if is_root {
+        config.clone()
+    } else {
+        as_dependency(config)
+    };
     PipelineConfig {
         patch_provenance: false,
         pkg_name: pkg_name.to_string(),
@@ -332,12 +340,7 @@ pub(super) fn package_config(
         // The root package's findings are not a dependency's.
         patch_request: None,
         patch_condition: None,
-        // The fix is the root package's: a dependency is an ordinary build.
-        bug_fix: config.bug_fix.clone().filter(|_| is_root),
-        update: config.update && is_root,
-        branch_version: config.branch_version.clone().filter(|_| is_root),
-        unknown_build_system: config.unknown_build_system && is_root,
-        ..config.clone()
+        ..base
     }
 }
 
@@ -392,6 +395,7 @@ mod tests {
         let pkg = package_config(&root(), "libfoo", "1.0", "libfoo");
         assert!(!pkg.update);
         assert!(!pkg.unknown_build_system);
+        assert!(pkg.branch_version.is_none());
     }
 
     #[test]

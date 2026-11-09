@@ -1,5 +1,6 @@
 //! Dependency bookkeeping of a build: the per-run queue records and patch/update branches.
 
+use super::dep_config::{outdated_config, patch_config};
 use crate::*;
 
 /// Branch the distro package `request` names from the linked project that ships
@@ -36,23 +37,7 @@ pub(crate) fn branch_for_patch(
             .map(|h| h.version)
             .ok_or_else(|| format!("cannot read the Version of {project}/{real}"))?;
         ap_core::diag!("  fixing {real} {version} in {project} for another package");
-        return Ok(PipelineConfig {
-            patch_provenance: false,
-            pkg_name: dep.to_string(),
-            rpm_name: real.to_lowercase(),
-            version,
-            source_repo: None,
-            upstream_tag: None,
-            subprojects: Vec::new(),
-            force: true,
-            regen: false,
-            patch_request: Some(request.problem.clone()),
-            patch_condition: request.condition.clone(),
-            bug_fix: None,
-            update: false,
-            unknown_build_system: false,
-            ..config.clone()
-        });
+        return Ok(patch_config(config, dep, &real, version, request));
     }
     let (origin, shipped) = linked_listings
         .iter()
@@ -96,24 +81,7 @@ pub(crate) fn branch_for_patch(
         .map(|h| h.version)
         .ok_or_else(|| format!("cannot read the Version of {project}/{real} after branching it"))?;
     ap_core::diag!("  patching {real} {version} (branched from {origin}) for another package");
-    Ok(PipelineConfig {
-        patch_provenance: false,
-        pkg_name: dep.to_string(),
-        rpm_name: real.to_lowercase(),
-        version,
-        source_repo: None,
-        upstream_tag: None,
-        subprojects: Vec::new(),
-        // The branch builds green unchanged; the patch must still be made.
-        force: true,
-        regen: false,
-        patch_request: Some(request.problem.clone()),
-        patch_condition: request.condition.clone(),
-        bug_fix: None,
-        update: false,
-        unknown_build_system: false,
-        ..config.clone()
-    })
+    Ok(patch_config(config, dep, &real, version, request))
 }
 
 /// Dependencies known to be native (C/C++) libraries, by `fuzzy_key`, as the
@@ -265,23 +233,7 @@ pub(crate) fn update_config_for_outdated(
         "  updating {real} from {} to {newest} for a dependent that needs a newer one",
         current.as_deref().unwrap_or("the distro's version")
     );
-    Ok(PipelineConfig {
-        patch_provenance: false,
-        pkg_name: dep.to_string(),
-        rpm_name: real.to_lowercase(),
-        version: newest,
-        source_repo,
-        upstream_tag: None,
-        subprojects: Vec::new(),
-        force: true,
-        regen: false,
-        patch_request: None,
-        patch_condition: None,
-        bug_fix: None,
-        update: false,
-        unknown_build_system: false,
-        ..config.clone()
-    })
+    Ok(outdated_config(config, dep, &real, newest, source_repo))
 }
 
 /// The dependencies a package asked to have patched instead of built
