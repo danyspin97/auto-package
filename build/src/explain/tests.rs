@@ -444,3 +444,65 @@ fn the_zig_vendor_archive_a_run_refreshed_lists_its_dependencies() {
     let ex = explain(&query(old.path())).unwrap();
     assert!(ex.run_info.zig_vendor.is_empty());
 }
+
+/// `text` without its SGR escapes (`ESC [ ... m`).
+fn strip_escapes(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for e in chars.by_ref() {
+                if e == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn each_kind_is_painted_in_its_role_and_plain_is_never_styled() {
+    use ap_core::sink::{Role, paint};
+    let cases = [
+        (Kind::Heading, Some(Role::Heading)),
+        (Kind::Label, Some(Role::Info)),
+        (Kind::Good, Some(Role::Success)),
+        (Kind::Bad, Some(Role::Failure)),
+        (Kind::Warn, Some(Role::Warning)),
+        (Kind::Dim, Some(Role::Dim)),
+        (Kind::Plain, None),
+    ];
+    for (kind, role) in cases {
+        let line = vec![span("text", kind)];
+        assert_eq!(ansi(std::slice::from_ref(&line), false), "text\n");
+        let on = ansi(std::slice::from_ref(&line), true);
+        match role {
+            Some(r) => assert_eq!(on, format!("{}\n", paint("text", r, true)), "{kind:?}"),
+            None => assert_eq!(on, "text\n", "{kind:?}"),
+        }
+    }
+}
+
+#[test]
+fn stripping_the_escapes_gives_the_plain_report() {
+    let t = fixture(&[]);
+    let ex = explain(&query(t.path())).unwrap();
+    let lines = render(&ex, 80);
+    let plain_text = ansi(&lines, false);
+    let coloured = ansi(&lines, true);
+    assert!(coloured.contains('\u{1b}'));
+    assert_eq!(strip_escapes(&coloured), plain_text);
+    assert_eq!(plain(&lines) + "\n", plain_text);
+}
+
+#[test]
+fn json_stays_free_of_escapes_even_when_colour_is_on() {
+    let t = fixture(&[]);
+    let ex = explain(&query(t.path())).unwrap();
+    assert!(ansi(&render(&ex, 80), true).contains('\u{1b}'));
+    let json = serde_json::to_string_pretty(&ex).unwrap();
+    assert!(!json.contains('\u{1b}'));
+}

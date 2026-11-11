@@ -1,5 +1,7 @@
 use super::*;
 
+use ap_core::sink::{Role, paint};
+
 // ---------------------------------------------------------------- rendering
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -547,24 +549,29 @@ pub fn plain(lines: &[Line]) -> String {
         .join("\n")
 }
 
-/// ANSI-coloured text when `color`, plain otherwise.
+/// The shared palette role a kind is painted in. Plain text has none and is
+/// never styled.
+fn role(kind: Kind) -> Option<Role> {
+    match kind {
+        Kind::Plain => None,
+        Kind::Heading => Some(Role::Heading),
+        Kind::Label => Some(Role::Info),
+        Kind::Good => Some(Role::Success),
+        Kind::Bad => Some(Role::Failure),
+        Kind::Warn => Some(Role::Warning),
+        Kind::Dim => Some(Role::Dim),
+    }
+}
+
+/// Styled text when `color`, plain otherwise. Without colour the output is the
+/// plain text byte for byte; with it, stripping the escapes gives that text.
 pub fn ansi(lines: &[Line], color: bool) -> String {
     let mut out = String::new();
     for l in lines {
         for s in l {
-            let code = match s.kind {
-                Kind::Plain => "",
-                Kind::Heading => "1",
-                Kind::Label => "36",
-                Kind::Good => "32",
-                Kind::Bad => "31",
-                Kind::Warn => "33",
-                Kind::Dim => "2",
-            };
-            if color && !code.is_empty() {
-                let _ = write!(out, "\u{1b}[{code}m{}\u{1b}[0m", s.text);
-            } else {
-                out.push_str(&s.text);
+            match role(s.kind) {
+                Some(r) => out.push_str(&paint(&s.text, r, color)),
+                None => out.push_str(&s.text),
             }
         }
         out.push('\n');
