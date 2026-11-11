@@ -90,7 +90,7 @@ pub fn install_hint(cause: &Cause, host: &HostDistro) -> Option<String> {
 fn missing_tool_hint(tool: &str, path: Option<&Path>, host: &HostDistro) -> String {
     let tool = printable(tool);
     match host {
-        HostDistro::Suse => match (package_for(&tool), path.and_then(plain_path)) {
+        HostDistro::Suse => match (suse_table(&tool), path.and_then(plain_path)) {
             (Some(package), _) => format!("sudo zypper install {package}"),
             (None, Some(path)) => format!("zypper se -f {path}"),
             (None, None) => format!("install the package that provides {tool}"),
@@ -114,7 +114,7 @@ fn plain_path(path: &Path) -> Option<&str> {
 
 /// `text` with every control character (newlines included) replaced by `?`,
 /// so a hint is always one line of printable text.
-fn printable(text: &str) -> String {
+pub fn printable(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { '?' } else { c })
         .collect()
@@ -127,13 +127,24 @@ fn toolchain_hint(tool: &str) -> String {
     }
 }
 
-/// The openSUSE package that ships `tool`. A service name stands for the
-/// `obs-service-*` package that ships it; `tar_scm` is shipped by
-/// `obs-service-obs_scm-common` (its binary, `/usr/lib/obs/service/tar_scm`),
-/// not by `obs-service-tar_scm` (which ships only the unit file).
-fn package_for(tool: &str) -> Option<&'static str> {
+/// The openSUSE package that ships the tool `cause` names, or `None` when the
+/// host is not openSUSE, the cause is not a missing tool, or the table has no
+/// row for the tool. A service name stands for the `obs-service-*` package
+/// that ships it; `tar_scm` is shipped by `obs-service-obs_scm-common` (its
+/// binary, `/usr/lib/obs/service/tar_scm`), not by `obs-service-tar_scm`
+/// (which ships only the unit file).
+pub fn suse_package(cause: &Cause, host: &HostDistro) -> Option<&'static str> {
+    match (host, cause) {
+        (HostDistro::Suse, Cause::MissingTool { tool, .. }) => suse_table(tool),
+        _ => None,
+    }
+}
+
+fn suse_table(tool: &str) -> Option<&'static str> {
     Some(match tool {
         "osc" => "osc",
+        "build" => "build",
+        "gpg" => "gpg2",
         "rpmspec" => "rpm-build",
         "quilt" => "quilt",
         "bwrap" => "bubblewrap",
@@ -194,6 +205,8 @@ mod tests {
         let rows = [
             ("osc", "osc"),
             ("rpmspec", "rpm-build"),
+            ("build", "build"),
+            ("gpg", "gpg2"),
             ("quilt", "quilt"),
             ("bwrap", "bubblewrap"),
             ("setpriv", "util-linux"),
@@ -222,6 +235,8 @@ mod tests {
     fn every_table_row_on_other_names_the_tool_without_a_command() {
         for tool in [
             "osc",
+            "build",
+            "gpg",
             "rpmspec",
             "quilt",
             "bwrap",
@@ -243,6 +258,42 @@ mod tests {
                 Some(format!("install the package that provides {tool}").as_str()),
                 "{tool}"
             );
+        }
+    }
+
+    #[test]
+    fn suse_package_names_the_package_for_a_missing_tool_on_suse_only() {
+        let osc = missing("osc");
+        assert_eq!(suse_package(&osc, &HostDistro::Suse), Some("osc"));
+        assert_eq!(suse_package(&osc, &HostDistro::Other), None);
+        assert_eq!(
+            suse_package(&missing("build"), &HostDistro::Suse),
+            Some("build")
+        );
+        assert_eq!(
+            suse_package(&missing("gpg"), &HostDistro::Suse),
+            Some("gpg2")
+        );
+        assert_eq!(
+            suse_package(&missing("cargo_vendor"), &HostDistro::Suse),
+            Some("obs-service-cargo")
+        );
+        assert_eq!(
+            suse_package(&missing("new_service"), &HostDistro::Suse),
+            None
+        );
+    }
+
+    #[test]
+    fn suse_package_is_none_for_causes_that_are_not_a_missing_tool() {
+        let unset = Cause::ToolchainUnset {
+            tool: "cargo".to_string(),
+        };
+        let sandbox = Cause::SandboxUnavailable {
+            why: "user namespaces are disabled".to_string(),
+        };
+        for cause in [&unset, &sandbox] {
+            assert_eq!(suse_package(cause, &HostDistro::Suse), None);
         }
     }
 
