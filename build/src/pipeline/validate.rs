@@ -510,6 +510,13 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
             let validate_step = validate_step.finish(StepOutcome::Failed);
             write_or_warn(validate_step.file("rpmspec.stderr"), e.to_string());
             write_or_warn(ws.rpmspec_log(), e.to_string());
+            // Only a verdict on the spec is for the agent. A check that could
+            // not run ends the package here, so no turn is started for it.
+            match env::check_failure(&e, env::rpmspec_on_path()) {
+                env::CheckFailure::Spec => {}
+                env::CheckFailure::Environment(reason) => return Err(ctx.failed(reason)),
+                env::CheckFailure::Transient => return Err(ctx.failed_text(true, e.to_string())),
+            }
             reporter.report(&Event::SpecRejected {
                 step: validate_step.id,
                 reason: ap_core::event::SpecRejection::RpmspecParseFailed {
