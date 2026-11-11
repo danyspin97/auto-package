@@ -2,6 +2,7 @@ use super::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::logs::*;
 
+mod memo;
 mod recap;
 
 #[test]
@@ -85,9 +86,16 @@ fn the_memo_refuses_a_repeat_unless_forced_patching_or_the_spec_changed() {
     });
     let refused = spent_ladder_refusal(&ctx_for(&config, &pkg_run, &state_root), false, spec);
     match refused {
-        Some(PipelineResult::Failed { reason, kind, .. }) => {
+        Some(PipelineResult::Failed {
+            reason, kind, note, ..
+        }) => {
             assert_eq!(kind, FailureKind::Exhausted);
-            assert!(reason.contains("not trying again without --force") && reason.contains("nope"));
+            assert!(reason.contains("nope"), "{reason}");
+            let detail = note.and_then(|n| n.detail).unwrap();
+            assert!(
+                detail.contains("not trying again without --force"),
+                "{detail}"
+            );
         }
         other => panic!("{other:?}"),
     }

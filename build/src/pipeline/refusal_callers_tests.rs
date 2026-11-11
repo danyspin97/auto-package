@@ -240,14 +240,13 @@ fn a_rerun_of_a_ladder_refused_its_wheel_ends_as_the_first_run_did() {
         // The same spec again, without --force: the memo ends it the same way.
         let rerun = spent_ladder_refusal(ctx, false, &before).expect("the ladder was spent");
         let PipelineResult::Failed {
-            kind: again,
-            reason: again_reason,
-            ..
+            kind: again, note, ..
         } = rerun
         else {
             panic!("not a failure");
         };
         assert_eq!(again, FailureKind::NeedsMaintainer);
+        let again_reason = note.and_then(|n| n.detail).unwrap();
         assert!(again_reason.contains(PATCH), "{again_reason}");
         assert!(again_reason.contains("not trying again"), "{again_reason}");
     });
