@@ -31,6 +31,7 @@ fn failed(disk_full: bool) -> PackageOutcome {
     PackageOutcome::Failed {
         reason: "boom".into(),
         disk_full,
+        remedy: None,
     }
 }
 

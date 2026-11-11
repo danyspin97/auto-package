@@ -111,6 +111,7 @@ pub(super) fn package_outcome(outcome: &ItemOutcome) -> PackageOutcome {
         ItemOutcome::Failed(reason) => PackageOutcome::Failed {
             reason: reason.clone(),
             disk_full: false,
+            remedy: None,
         },
     }
 }

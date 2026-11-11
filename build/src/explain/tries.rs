@@ -175,7 +175,9 @@ fn finish(pkg: String, mut acc: Acc) -> Option<PkgTries> {
             (TriesOutcome::Built, last_failed, acc.shape())
         }
         Some(PackageOutcome::AlreadyBuilt) => (TriesOutcome::AlreadyBuilt, None, None),
-        Some(PackageOutcome::Failed { reason, disk_full }) => {
+        Some(PackageOutcome::Failed {
+            reason, disk_full, ..
+        }) => {
             if *disk_full {
                 let why = format!("disk full: {reason}");
                 (TriesOutcome::NotBuilt, Some(why), Some("DiskFull".into()))

@@ -49,6 +49,7 @@ fn failed() -> PackageOutcome {
     PackageOutcome::Failed {
         reason: "the branch failed".to_string(),
         disk_full: false,
+        remedy: None,
     }
 }
 

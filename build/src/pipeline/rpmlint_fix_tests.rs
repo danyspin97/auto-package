@@ -297,6 +297,7 @@ fn a_wheel_switch_refused_for_a_security_patch_keeps_the_built_spec() {
         rpm_name: "python-pywayland".into(),
         reason: "needs a maintainer: a wheel switch would drop the security patch x.patch".into(),
         kind: FailureKind::NeedsMaintainer,
+        remedy: None,
     };
     let RpmlintTurn::Keep(text) =
         rpmlint_after_turn(Err(turn_failure(&refused)), "python-pywayland", &errors)

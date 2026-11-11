@@ -452,6 +452,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                                                 outcome: PackageOutcome::Failed {
                                                     reason,
                                                     disk_full: false,
+                                                    remedy: None,
                                                 },
                                             });
                                         }

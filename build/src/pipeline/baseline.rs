@@ -86,10 +86,12 @@ pub(super) fn restore_obs_baseline(
                     rpm_name,
                     reason,
                     kind,
+                    remedy,
                 } => PipelineResult::Failed {
                     rpm_name,
                     reason: format!("{reason}; {message}"),
                     kind,
+                    remedy,
                 },
                 other => other,
             }

@@ -81,5 +81,6 @@ pub(crate) fn join_package(
         rpm_name: rpm_name.to_string(),
         reason: format!("build thread panicked: {}", panic_message(p.as_ref())),
         kind: FailureKind::Other,
+        remedy: None,
     })
 }

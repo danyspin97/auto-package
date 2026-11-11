@@ -52,6 +52,7 @@ fn a_spent_ladder_is_an_ordinary_failure() {
         rpm_name: "python-torch".into(),
         reason: format!("{}x", ap_build::pipeline::LADDER_FAILED_PREFIX),
         kind: FailureKind::Exhausted,
+        remedy: None,
     };
     assert!(matches!(
         package_outcome(&spent),
@@ -61,6 +62,7 @@ fn a_spent_ladder_is_an_ordinary_failure() {
         rpm_name: "python-x".into(),
         reason: "no".into(),
         kind: FailureKind::Other,
+        remedy: None,
     };
     assert!(matches!(
         package_outcome(&failed),
@@ -74,9 +76,12 @@ fn a_url_gone_upstream_is_a_failure_that_says_so() {
         rpm_name: "python-x".into(),
         reason: "the zig vendor archive cannot be refreshed: fetching x: HTTP 404".into(),
         kind: FailureKind::BrokenOutside,
+        remedy: None,
     };
     match package_outcome(&gone) {
-        PackageOutcome::Failed { reason, disk_full } => {
+        PackageOutcome::Failed {
+            reason, disk_full, ..
+        } => {
             assert!(reason.starts_with("broken outside the tool: "), "{reason}");
             assert!(!disk_full);
         }

@@ -190,6 +190,9 @@ pub enum PackageOutcome {
         /// The failure was a full disk, so the user can free space and retry.
         #[serde(default)]
         disk_full: bool,
+        /// What must be done before a rerun can succeed, when there is one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remedy: Option<crate::remedy::Remedy>,
     },
     /// Stopped for a maintainer's decision (see `FailureKind::NeedsMaintainer`):
     /// nothing was sent to OBS, and it is not a build failure.

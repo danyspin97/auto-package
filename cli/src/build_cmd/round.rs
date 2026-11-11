@@ -169,6 +169,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                         outcome: PackageOutcome::Failed {
                             reason: reason.clone(),
                             disk_full: false,
+                            remedy: None,
                         },
                     });
                 }
@@ -194,6 +195,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                     outcome: PackageOutcome::Failed {
                         reason: reason.clone(),
                         disk_full: false,
+                        remedy: None,
                     },
                 });
                 for (rest, rest_rpm) in unspawned {
@@ -205,6 +207,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                                 "not started because {rpm_name} has no run directory: {e}"
                             ),
                             disk_full: false,
+                            remedy: None,
                         },
                     });
                 }
@@ -227,6 +230,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                     rpm_name: rpm_name.clone(),
                     reason: format!("build thread panicked: {}", panic_message(p.as_ref())),
                     kind: FailureKind::Other,
+                    remedy: None,
                 });
                 // Reported as soon as this package is done, not when the
                 // scheduler gets to its result, so a slower sibling never
@@ -261,6 +265,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                     rpm_name: rpm_name.clone(),
                     reason: "build thread ended without reporting a result".to_string(),
                     kind: FailureKind::Other,
+                    remedy: None,
                 };
                 (rpm_name, String::new(), result)
             }

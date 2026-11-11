@@ -109,6 +109,7 @@ fn run_stage(spec: &str, src0: &[u8], update: bool) -> (tempfile::TempDir, Pipel
             rpm_name: "not refused".into(),
             reason: String::new(),
             kind: FailureKind::Other,
+            remedy: None,
         },
         Err(result) => result,
     };

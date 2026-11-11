@@ -20,6 +20,7 @@ fn mixed() -> TuiState {
         PackageOutcome::Failed {
             reason: "x".into(),
             disk_full: false,
+            remedy: None,
         },
     );
     state

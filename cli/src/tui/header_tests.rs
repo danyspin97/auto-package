@@ -155,6 +155,7 @@ fn state_in_every_stage(jobs: usize) -> TuiState {
     let failed = PackageOutcome::Failed {
         reason: "x".into(),
         disk_full: false,
+        remedy: None,
     };
     let missing = PackageOutcome::MissingDeps { deps: vec![] };
     for (name, outcome) in [("built", &built), ("failed", &failed), ("parked", &missing)] {

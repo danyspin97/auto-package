@@ -17,6 +17,7 @@ fn failed(reason: &str) -> PipelineResult {
         rpm_name: "foo".into(),
         reason: reason.into(),
         kind: FailureKind::Other,
+        remedy: None,
     }
 }
 
@@ -73,6 +74,40 @@ fn the_baseline_is_read_from_the_files_save_baseline_keeps() {
         Some("Name: foo\n")
     );
     assert_eq!(baseline_text(&dir, "bar.spec"), None);
+}
+
+#[test]
+fn a_failed_restore_keeps_the_remedy_of_the_failure() {
+    let (_tmp, dir) = with_attempt();
+    let remedy = ap_core::remedy::Remedy {
+        cause: ap_core::remedy::Cause::MissingTool {
+            tool: "osc".into(),
+            path: None,
+        },
+        retry: ap_core::remedy::Retry::SameCommand,
+    };
+    let result = PipelineResult::Failed {
+        rpm_name: "foo".into(),
+        reason: "build failed".into(),
+        kind: FailureKind::Environment,
+        remedy: Some(remedy.clone()),
+    };
+    let out = restore_obs_baseline(&dir, &NullReporter, result, DISCARD, |_| {
+        Err("no saved copy of the baseline".into())
+    });
+    match out {
+        PipelineResult::Failed {
+            reason,
+            kind,
+            remedy: kept,
+            ..
+        } => {
+            assert!(reason.starts_with("build failed; "), "{reason}");
+            assert_eq!(kind, FailureKind::Environment);
+            assert_eq!(kept, Some(remedy));
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

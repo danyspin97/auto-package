@@ -228,3 +228,70 @@ fn sweep_checking_names_its_package_and_the_check_its_name() {
     let json = serde_json::to_string(&no_name).unwrap();
     assert!(!json.contains("obs_name"), "{json}");
 }
+
+#[test]
+fn a_package_finished_line_without_a_remedy_still_parses() {
+    let old = r#"{"event":"package_finished","pkg":"python-foo","version":"1.0","outcome":{"Failed":{"reason":"boom","disk_full":false}}}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        e,
+        Event::PackageFinished {
+            outcome: PackageOutcome::Failed {
+                remedy: None,
+                disk_full: false,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_failure_remedy_round_trips_and_an_absent_one_is_not_written() {
+    use crate::remedy::{Cause, Remedy, Retry};
+    let with = Event::PackageFinished {
+        pkg: "python-foo".into(),
+        version: "1.0".into(),
+        outcome: PackageOutcome::Failed {
+            reason: "osc is missing".into(),
+            disk_full: false,
+            remedy: Some(Remedy {
+                cause: Cause::MissingTool {
+                    tool: "osc".into(),
+                    path: None,
+                },
+                retry: Retry::SameCommand,
+            }),
+        },
+    };
+    let text = serde_json::to_string(&with).unwrap();
+    assert!(text.contains(
+        r#""remedy":{"cause":{"kind":"missing_tool","tool":"osc","path":null},"retry":"same_command"}"#
+    ));
+    let back: Event = serde_json::from_str(&text).unwrap();
+    assert!(matches!(
+        back,
+        Event::PackageFinished {
+            outcome: PackageOutcome::Failed {
+                remedy: Some(Remedy {
+                    retry: Retry::SameCommand,
+                    ..
+                }),
+                ..
+            },
+            ..
+        }
+    ));
+
+    let without = Event::PackageFinished {
+        pkg: "python-foo".into(),
+        version: "1.0".into(),
+        outcome: PackageOutcome::Failed {
+            reason: "boom".into(),
+            disk_full: false,
+            remedy: None,
+        },
+    };
+    let text = serde_json::to_string(&without).unwrap();
+    assert!(!text.contains("remedy"), "{text}");
+}

@@ -69,6 +69,7 @@ fn take_build_lock(config: &PipelineConfig) -> Result<Option<std::fs::File>, Pip
                     lock_error_text(&e)
                 ),
                 kind,
+                remedy: None,
             })
         }
     }
@@ -160,6 +161,7 @@ fn restore_stale_baseline(
                 rpm_name: config.rpm_name.clone(),
                 reason: format!("cannot open the package workspace: {e}"),
                 kind: FailureKind::Other,
+                remedy: None,
             });
         }
     };
@@ -178,6 +180,7 @@ fn restore_stale_baseline(
                         baseline.display(),
                     ),
                     kind: FailureKind::Other,
+                    remedy: None,
                 });
             }
         }
@@ -212,6 +215,7 @@ fn finish_package(
                 rpm_name,
                 reason,
                 kind: FailureKind::AgentUnavailable,
+                remedy: None,
             }
         }
         (result, _) => result,
@@ -335,6 +339,7 @@ impl RunCtx<'_> {
             rpm_name: self.rpm_name.clone(),
             reason,
             kind,
+            remedy: None,
         }
     }
 

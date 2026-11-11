@@ -191,6 +191,8 @@ pub enum PipelineResult {
         rpm_name: String,
         reason: String,
         kind: FailureKind,
+        /// What must be done before a rerun can succeed, when there is one.
+        remedy: Option<ap_core::remedy::Remedy>,
     },
 }
 mod target;
@@ -303,6 +305,7 @@ macro_rules! begin_or_fail {
                     rpm_name: $rpm_name,
                     reason: e.to_string(),
                     kind: FailureKind::Other,
+                    remedy: None,
                 });
             }
         }

@@ -8,6 +8,7 @@ fn failed(kind: FailureKind) -> PipelineResult {
         rpm_name: "pkg".into(),
         reason: "why".into(),
         kind,
+        remedy: None,
     }
 }
 

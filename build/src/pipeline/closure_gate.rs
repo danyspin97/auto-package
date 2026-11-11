@@ -336,6 +336,7 @@ mod tests {
                 rpm_name: "python-pywayland".to_string(),
                 reason: "boom".to_string(),
                 kind: FailureKind::Other,
+                remedy: None,
             },
         );
         assert!(!finished.contains("python-pywayland"));

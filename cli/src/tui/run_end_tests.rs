@@ -16,6 +16,7 @@ fn failed() -> PackageOutcome {
     PackageOutcome::Failed {
         reason: "x".to_string(),
         disk_full: false,
+        remedy: None,
     }
 }
 

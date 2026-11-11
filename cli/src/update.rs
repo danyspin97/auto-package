@@ -282,10 +282,12 @@ pub(super) fn package_outcome(result: &PipelineResult) -> PackageOutcome {
         PipelineResult::Failed {
             reason,
             kind: FailureKind::BrokenOutside,
+            remedy,
             ..
         } => PackageOutcome::Failed {
             reason: format!("broken outside the tool: {reason}"),
             disk_full: false,
+            remedy: remedy.clone(),
         },
         PipelineResult::Failed {
             reason,
@@ -294,9 +296,15 @@ pub(super) fn package_outcome(result: &PipelineResult) -> PackageOutcome {
         } => PackageOutcome::Skipped {
             reason: reason.clone(),
         },
-        PipelineResult::Failed { reason, kind, .. } => PackageOutcome::Failed {
+        PipelineResult::Failed {
+            reason,
+            kind,
+            remedy,
+            ..
+        } => PackageOutcome::Failed {
             reason: reason.clone(),
             disk_full: *kind == FailureKind::DiskFull,
+            remedy: remedy.clone(),
         },
     }
 }
@@ -481,6 +489,7 @@ mod tests {
             rpm_name: "lsvpd".into(),
             reason: "excluded".into(),
             kind: FailureKind::Excluded,
+            remedy: None,
         };
         assert!(matches!(
             package_outcome(&result),
@@ -490,6 +499,7 @@ mod tests {
             rpm_name: "lsvpd".into(),
             reason: "boom".into(),
             kind: FailureKind::Other,
+            remedy: None,
         };
         assert!(matches!(
             package_outcome(&failed),
@@ -503,10 +513,11 @@ mod tests {
             rpm_name: "lsvpd".into(),
             reason: "osc is missing".into(),
             kind: FailureKind::Environment,
+            remedy: None,
         };
         assert!(matches!(
             package_outcome(&result),
-            PackageOutcome::Failed { reason, disk_full: false } if reason == "osc is missing"
+            PackageOutcome::Failed { reason, disk_full: false, .. } if reason == "osc is missing"
         ));
     }
 }

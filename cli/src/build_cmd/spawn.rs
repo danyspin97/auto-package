@@ -66,6 +66,7 @@ impl DepSpawner<'_> {
                 rpm_name: finished_name.clone(),
                 reason: format!("build thread panicked: {}", panic_message(p.as_ref())),
                 kind: FailureKind::Other,
+                remedy: None,
             });
             r.report(&Event::PackageFinished {
                 pkg: finished_name,
