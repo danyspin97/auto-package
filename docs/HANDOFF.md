@@ -17,15 +17,17 @@ the order of the remaining work.
   worth landing; most subjects exist in `main` under new change ids. Abandon
   only on the owner's say (`qwxzmpqt` "match only the HTTP 404 text" was not
   diffed).
-- About 190 `~/ap-*` workspace directories and logs, and `~/Music/ap-work`
+- About 190 `<workspace-root>/ap-*` workspace directories and logs, and the work directory `<work-dir>`
   (65 GB of run data: open-webui 24G, open-webui_nvidia 17G, vllm 13G are old),
   are the owner's to remove. Workers cannot `rm -rf`.
+  (`<workspace-root>`: the directory that holds the jj workspaces;
+  `<work-dir>`: the `--work-dir` the runs used.)
 
 ## 2. Goal and numbers
 
 Goal: 95% of packages build in a couple of tries (cap 10 per package).
 Tries = OBS builds (`Build` step_started) a package needed. Measure with
-`auto-package explain --run <id> --work-dir ~/Music/ap-work --project <branch project>`
+`auto-package explain --run <id> --work-dir <work-dir> --project <branch project>`
 (read-only, no network); the run summary prints the same block.
 
 - Baseline over 232 package-runs of 32 runs (history): 1 try 55.6%, 2 tries 12.9%,
@@ -41,8 +43,9 @@ Tries = OBS builds (`Build` step_started) a package needed. Measure with
 
 1. `cargo build` (see section 6 for the disk rules), then restart the whole
    project update in a BRANCH project, never `--in-place`:
-   `auto-package update --project devel:languages:python --branch-project home:dspinella:auto-package:branches:devel:languages:python --work-dir ~/Music/ap-work --max-packages 0`
-   (`--max-packages 0` matters: the default cap is 25). Add `--tui` in a real
+   `auto-package update --project devel:languages:python --branch-project home:<user>:auto-package:branches:devel:languages:python --work-dir <work-dir> --max-packages 0`
+   (`--max-packages 0` matters: the default cap is 25). `<user>` is the
+   OBS login of the person running the tool. Add `--tui` in a real
    terminal. The last attempt was stopped at planning on 2026-11-09 22:40 only
    because the owner had to leave; package state persists in `ap-work`.
 2. Read `explain --run` after the first hour and compare with section 2.
@@ -133,7 +136,8 @@ repositories from an old `--ports` run is still waited for (now: no, unless
   `--config profile.dev.package.ap-core.codegen-units=255` workaround, never
   delete `target/debug/incremental` while an agent builds (it breaks their
   build); `cargo clean` between agents is allowed by AGENTS.md. Never use `/tmp`
-  (shared tmpfs, fills up); use `TMPDIR=~/Music/ap-tmp-<task>`, one per worker,
+  (shared tmpfs, fills up); use `TMPDIR=<tmp-dir>-<task>` (`<tmp-dir>`: a path on a disk with
+  room, not tmpfs), one per worker,
   deleted by its owner only. Run at most 2-3 building agents at once.
 - Workflow: `ORCHESTRATOR.md`: haiku medium implements, sonnet reviews, opus only
   for design; every worker in its own jj workspace and bookmark, lands with

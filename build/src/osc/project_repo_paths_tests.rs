@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn extracts_project_and_repository_from_each_path() {
     let xml = "\
-<project name=\"home:dspinella:python\">
+<project name=\"home:jdoe:python\">
   <repository name=\"openSUSE_Tumbleweed\">
     <path project=\"openSUSE:Factory\" repository=\"snapshot\"/>
     <arch>x86_64</arch>
@@ -20,7 +20,7 @@ fn extracts_project_and_repository_from_each_path() {
 #[test]
 fn deduplicates_the_same_pair_across_repositories() {
     let xml = "\
-<project name=\"home:dspinella:python\">
+<project name=\"home:jdoe:python\">
   <repository name=\"openSUSE_Tumbleweed\">
     <path project=\"openSUSE:Factory\" repository=\"snapshot\"/>
   </repository>
@@ -39,7 +39,7 @@ fn deduplicates_the_same_pair_across_repositories() {
 #[test]
 fn has_repository_true_when_one_is_present() {
     let xml = "\
-<project name=\"home:dspinella:python\">
+<project name=\"home:jdoe:python\">
   <repository name=\"openSUSE_Tumbleweed\">
     <path project=\"openSUSE:Factory\" repository=\"snapshot\"/>
   </repository>
@@ -51,7 +51,7 @@ fn has_repository_true_when_one_is_present() {
 #[test]
 fn has_repository_false_on_empty_project() {
     let xml = "\
-<project name=\"home:dspinella:python\">
+<project name=\"home:jdoe:python\">
   <title>empty</title>
   <description/>
 </project>
@@ -64,7 +64,7 @@ fn has_repository_false_when_only_devel_project_present() {
     // A `<devel project="..."/>` element is not a build repository and
     // must not be mistaken for one.
     let xml = "\
-<project name=\"home:dspinella:python\">
+<project name=\"home:jdoe:python\">
   <devel project=\"devel:languages:python\"/>
 </project>
 ";

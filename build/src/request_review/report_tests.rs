@@ -27,7 +27,7 @@ fn report(findings: Vec<Finding>, agent: Option<AgentSection>) -> Report {
         request: RequestSummary {
             id: "1394662".into(),
             state: "new".into(),
-            creator: "dspinella".into(),
+            creator: "jdoe".into(),
             created: "2026-11-03T11:14:44".into(),
             description: "d".into(),
             findings: Vec::new(),
@@ -111,9 +111,7 @@ fn the_text_has_its_sections_in_order() {
     );
     let text = render_text(&r);
     let at = |s: &str| text.find(s).unwrap_or_else(|| panic!("{s} in\n{text}"));
-    assert!(
-        at("Request 1394662 (new, by dspinella, created 2026-11-03 11:14)") < at("Blockers (0)")
-    );
+    assert!(at("Request 1394662 (new, by jdoe, created 2026-11-03 11:14)") < at("Blockers (0)"));
     assert!(at("Blockers (0)") < at("Warnings (1)"));
     assert!(at("Warnings (1)") < at("Notes (1)"));
     assert!(at("Notes (1)") < at("Not checked"));

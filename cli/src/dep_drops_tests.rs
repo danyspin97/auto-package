@@ -76,15 +76,15 @@ fn the_give_up_message_states_each_packages_blocking_reason() {
     drops.dropped(
         &reporter,
         "fastapi-cloud-cli",
-        "it is already in home:dspinella:open-webui as python-fastapi-cloud-cli with \
+        "it is already in home:jdoe:open-webui as python-fastapi-cloud-cli with \
              status \"succeeded\", which counts as resolvable",
     );
     drops.dropped(
         &reporter,
         "cuda-bindings",
-        "it is already in home:dspinella:open-webui as python-cuda-bindings with status \
+        "it is already in home:jdoe:open-webui as python-cuda-bindings with status \
              \"succeeded\", which counts as resolvable, but python-cuda-bindings is built \
-             in home:dspinella:open-webui, but its spec there is an unfinished skeleton",
+             in home:jdoe:open-webui, but its spec there is an unfinished skeleton",
     );
     drops.dropped(
         &reporter,

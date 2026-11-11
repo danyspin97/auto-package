@@ -2,10 +2,10 @@ use super::*;
 
 /// The `_history` of duckdb's branch on OBS: the newest entry is last.
 const HISTORY: &str = r#"<revisionlist>
-  <revision rev="1" vrev="1"><srcmd5>9fdc</srcmd5><version>unknown</version><time>1793635403</time><user>dspinella</user></revision>
-  <revision rev="2" vrev="2"><srcmd5>7617</srcmd5><version>unknown</version><time>1793635918</time><user>dspinella</user>
+  <revision rev="1" vrev="1"><srcmd5>9fdc</srcmd5><version>unknown</version><time>1793635403</time><user>jdoe</user></revision>
+  <revision rev="2" vrev="2"><srcmd5>7617</srcmd5><version>unknown</version><time>1793635918</time><user>jdoe</user>
     <comment>auto-package: Update to 2.0.0 * Too many changes to list, see</comment></revision>
-  <revision rev="7" vrev="7"><srcmd5>64fe</srcmd5><version>unknown</version><time>1793642305</time><user>dspinella</user>
+  <revision rev="7" vrev="7"><srcmd5>64fe</srcmd5><version>unknown</version><time>1793642305</time><user>jdoe</user>
     <comment>auto-package: Update to 2.0.0 * Too many changes to list,
       see</comment></revision>
 </revisionlist>"#;
@@ -14,7 +14,7 @@ const HISTORY: &str = r#"<revisionlist>
 fn the_newest_revision_of_a_history_is_the_last_entry() {
     let latest = latest_revision(HISTORY).unwrap();
     assert_eq!(latest.rev, "7");
-    assert_eq!(latest.user, "dspinella");
+    assert_eq!(latest.user, "jdoe");
     assert_eq!(latest.time, 1793642305);
     assert_eq!(
         latest.comment,
@@ -54,7 +54,7 @@ fn a_foreign_head_is_named_with_its_author_time_and_the_baseline() {
         "{why}"
     );
     assert!(
-        why.contains("newest OBS revision 7 by dspinella at 2026-11-02 "),
+        why.contains("newest OBS revision 7 by jdoe at 2026-11-02 "),
         "{why}"
     );
     assert!(
@@ -133,9 +133,9 @@ fn revision_with(user: &str, comment: &str) -> LatestRevision {
 
 #[test]
 fn a_head_is_a_restore_of_this_user_by_its_message_and_user() {
-    let restore = revision_with("dspinella", RESTORE_MESSAGE);
-    assert!(restore_head_by(&restore, "dspinella"));
+    let restore = revision_with("jdoe", RESTORE_MESSAGE);
+    assert!(restore_head_by(&restore, "jdoe"));
     assert!(!restore_head_by(&restore, "someone-else"));
-    let other = revision_with("dspinella", "auto-package: Update to 2.0.0");
-    assert!(!restore_head_by(&other, "dspinella"));
+    let other = revision_with("jdoe", "auto-package: Update to 2.0.0");
+    assert!(!restore_head_by(&other, "jdoe"));
 }

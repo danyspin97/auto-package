@@ -12,11 +12,10 @@ const ORIGIN: &str = "<package name=\"noctalia\" project=\"X11:Wayland\">
 ";
 
 /// A branch made by OBS: the same package, no flags, with a devel project.
-const BRANCH: &str =
-    "<package name=\"noctalia\" project=\"home:dspinella:auto-package:X11:Wayland\">
+const BRANCH: &str = "<package name=\"noctalia\" project=\"home:jdoe:auto-package:X11:Wayland\">
   <title>Noctalia</title>
   <description>Shell &amp; bar</description>
-  <person userid=\"dspinella\" role=\"maintainer\"/>
+  <person userid=\"jdoe\" role=\"maintainer\"/>
   <devel project=\"X11:Wayland\"/>
 </package>
 ";
@@ -43,10 +42,10 @@ fn flags_the_origin_defines_are_copied_into_the_branch() {
 #[test]
 fn other_meta_elements_stay_byte_for_byte() {
     let (xml, _) = copied(ORIGIN, BRANCH);
-    let expected = "<package name=\"noctalia\" project=\"home:dspinella:auto-package:X11:Wayland\">
+    let expected = "<package name=\"noctalia\" project=\"home:jdoe:auto-package:X11:Wayland\">
   <title>Noctalia</title>
   <description>Shell &amp; bar</description>
-  <person userid=\"dspinella\" role=\"maintainer\"/>
+  <person userid=\"jdoe\" role=\"maintainer\"/>
   <devel project=\"X11:Wayland\"/>
   <build>
     <disable repository=\"16.0\"/>

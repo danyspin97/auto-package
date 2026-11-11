@@ -1,12 +1,12 @@
-<request id="1394662" creator="dspinella">
+<request id="1394662" creator="jdoe">
   <action type="submit">
-    <source project="home:dspinella:auto-package:branches:Base:System" package="cracklib" rev="3"/>
+    <source project="home:jdoe:auto-package:branches:Base:System" package="cracklib" rev="3"/>
     <target project="Base:System" package="cracklib"/>
     <options>
       <sourceupdate>cleanup</sourceupdate>
     </options>
   </action>
-  <state name="new" who="dspinella" when="2026-11-03T11:14:47" created="2026-11-03T11:14:44">
+  <state name="new" who="jdoe" when="2026-11-03T11:14:47" created="2026-11-03T11:14:44">
     <comment/>
   </state>
   <description>- Update to 2.10.4&#xD;

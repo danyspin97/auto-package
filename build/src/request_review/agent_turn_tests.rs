@@ -241,7 +241,7 @@ fn the_turn_is_a_request_review_with_the_context_and_the_hosts_it_was_given() {
     assert_eq!(task, crate::agent::Task::RequestReview);
     assert_eq!((attempt, no_checkout), (1, true));
     assert_eq!(got, hosts);
-    assert!(context.contains("Request 1394662 (new, by dspinella)"));
+    assert!(context.contains("Request 1394662 (new, by jdoe)"));
     assert!(context.contains("You may fetch pages of these hosts only (WebFetch): github.com."));
     assert!(context.contains("<untrusted-data source=\"source diff\">"));
     assert!(context.contains("<untrusted-data source=\"request description\">"));

@@ -28,7 +28,7 @@ fn ids_of(f: &[Finding]) -> Vec<&'static str> {
 /// An entry on top of the old text, dated before the request.
 fn with_entry(bullets: &str) -> String {
     format!(
-        "{SEP}\nMon Nov  2 16:03:24 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>\n\n{bullets}\n\n{OLD}"
+        "{SEP}\nMon Nov  2 16:03:24 UTC 2026 - Jane Doe <jane.doe@example.com>\n\n{bullets}\n\n{OLD}"
     )
 }
 

@@ -13,8 +13,8 @@ For the main session that delegates. Read `AGENTS.md` first; its section
 ## Splitting the work
 
 - Independent tasks run in parallel, each in its own jj workspace on its own
-  bookmark (`/home/danyspin97/ap-<task>`, bookmark `<task>`), all launched in
-  one message.
+  bookmark (`<workspace-root>/ap-<task>`, bookmark `<task>`), all launched in
+  one message. `<workspace-root>`: the directory that holds the jj workspaces.
 - Tasks that edit the same files run one after the other, the next based on
   the previous one's bookmark. Do not run them in parallel and merge later.
 - One concern per task. If a task grows a second concern, give it a second
@@ -80,7 +80,7 @@ task is not understood yet: think, or ask the user, before spawning.
 - `jj workspace forget <name>` for each finished workspace (an agent may do
   it).
 - Agents cannot `rm -rf`; ask the user to remove the workspace directories
-  (`rm -rf /home/danyspin97/ap-<task>`) and list them in one message.
+  (`rm -rf <workspace-root>/ap-<task>`) and list them in one message.
 - Check `df -h /home` after a batch; ask the user before cleaning `target/`
   if a build is running.
 

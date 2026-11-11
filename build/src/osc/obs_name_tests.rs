@@ -2,12 +2,7 @@ use super::*;
 
 #[test]
 fn obs_names_reject_options_paths_and_junk() {
-    for ok in [
-        "python-Events",
-        "libsigc++",
-        "home:dspinella:python3",
-        "a_b.c-1",
-    ] {
+    for ok in ["python-Events", "libsigc++", "home:jdoe:python3", "a_b.c-1"] {
         assert!(is_valid_obs_name(ok), "{ok}");
     }
     for bad in ["", "-rf", "../x", "a/b", "a b", "a\nb", "x..y", "/abs"] {

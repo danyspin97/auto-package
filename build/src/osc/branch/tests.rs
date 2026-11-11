@@ -61,11 +61,11 @@ fn a_broken_link_shows_in_the_linkinfo_error() {
 
 #[test]
 fn whoami_reads_a_bare_name_or_a_labelled_one() {
-    assert_eq!(parse_whoami("danyspin97\n").as_deref(), Some("danyspin97"));
-    assert_eq!(parse_whoami("Username: dany\n").as_deref(), Some("dany"));
+    assert_eq!(parse_whoami("jdoe\n").as_deref(), Some("jdoe"));
+    assert_eq!(parse_whoami("Username: alex\n").as_deref(), Some("alex"));
     assert_eq!(
-        parse_whoami("dspinella: \"Danilo Spinella\" <d@example.org>\n").as_deref(),
-        Some("dspinella"),
+        parse_whoami("jroe: \"Jane Roe\" <j@example.org>\n").as_deref(),
+        Some("jroe"),
         "the osc whois form"
     );
     assert_eq!(parse_whoami(""), None);
@@ -75,8 +75,8 @@ fn whoami_reads_a_bare_name_or_a_labelled_one() {
 #[test]
 fn default_branch_project_is_what_osc_branch_uses() {
     assert_eq!(
-        default_branch_project("dany", "Base:System"),
-        "home:dany:branches:Base:System"
+        default_branch_project("alex", "Base:System"),
+        "home:alex:branches:Base:System"
     );
 }
 

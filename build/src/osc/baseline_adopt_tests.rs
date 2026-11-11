@@ -17,9 +17,9 @@ fn latest(user: &str, comment: &str) -> LatestRevision {
 /// recorded; OBS holds it as the expanded head, the checkout holds the same.
 #[test]
 fn an_own_attempt_commit_the_baseline_never_recorded_is_adopted() {
-    let l = latest("dspinella", "auto-package: Update to 2.14.0 * Opt-in");
+    let l = latest("jdoe", "auto-package: Update to 2.14.0 * Opt-in");
     assert_eq!(
-        own_attempt_commit(HEAD, HEAD, Some(OWN), &l, "dspinella", &[]),
+        own_attempt_commit(HEAD, HEAD, Some(OWN), &l, "jdoe", &[]),
         Ok(())
     );
 }
@@ -27,27 +27,27 @@ fn an_own_attempt_commit_the_baseline_never_recorded_is_adopted() {
 #[test]
 fn a_commit_by_another_user_is_refused() {
     let l = latest("someone", "auto-package: Update to 2.14.0");
-    let why = own_attempt_commit(HEAD, HEAD, Some(OWN), &l, "dspinella", &[]).unwrap_err();
+    let why = own_attempt_commit(HEAD, HEAD, Some(OWN), &l, "jdoe", &[]).unwrap_err();
     assert!(why.contains("someone"), "{why}");
 }
 
 #[test]
 fn a_commit_with_another_message_is_refused() {
-    let l = latest("dspinella", "fix the spec by hand");
-    let why = own_attempt_commit(HEAD, HEAD, Some(OWN), &l, "dspinella", &[]).unwrap_err();
+    let l = latest("jdoe", "fix the spec by hand");
+    let why = own_attempt_commit(HEAD, HEAD, Some(OWN), &l, "jdoe", &[]).unwrap_err();
     assert!(why.contains("fix the spec by hand"), "{why}");
 }
 
 #[test]
 fn a_head_the_checkout_does_not_hold_is_refused() {
-    let l = latest("dspinella", "auto-package: Update to 2.14.0");
+    let l = latest("jdoe", "auto-package: Update to 2.14.0");
     assert!(
         own_attempt_commit(
             HEAD,
             "015dbda0d164436c0ea7c10f5d4ae032",
             Some(OWN),
             &l,
-            "dspinella",
+            "jdoe",
             &[]
         )
         .is_err()
@@ -56,28 +56,26 @@ fn a_head_the_checkout_does_not_hold_is_refused() {
 
 #[test]
 fn a_revision_already_recorded_is_not_adopted_again() {
-    let l = latest("dspinella", "auto-package: Update to 2.14.0");
-    assert!(
-        own_attempt_commit(HEAD, HEAD, Some(OWN), &l, "dspinella", &[HEAD.to_string()]).is_err()
-    );
+    let l = latest("jdoe", "auto-package: Update to 2.14.0");
+    assert!(own_attempt_commit(HEAD, HEAD, Some(OWN), &l, "jdoe", &[HEAD.to_string()]).is_err());
 }
 
 /// The link's base moved: the newest revision is not the package's own.
 #[test]
 fn a_newest_revision_that_is_not_the_package_own_is_refused() {
-    let l = latest("dspinella", "auto-package: Update to 2.14.0");
+    let l = latest("jdoe", "auto-package: Update to 2.14.0");
     assert!(
         own_attempt_commit(
             HEAD,
             HEAD,
             Some("1bab7af08d87e68fc8a0bb2161fbab87"),
             &l,
-            "dspinella",
+            "jdoe",
             &[]
         )
         .is_err()
     );
-    assert!(own_attempt_commit(HEAD, HEAD, None, &l, "dspinella", &[]).is_err());
+    assert!(own_attempt_commit(HEAD, HEAD, None, &l, "jdoe", &[]).is_err());
 }
 
 #[test]

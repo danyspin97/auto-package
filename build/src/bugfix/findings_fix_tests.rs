@@ -3,7 +3,7 @@ use crate::request_review::changes_checks::{ChangesCtx, changes_findings};
 
 const OLD: &str = include_str!("../testdata/request_review/cracklib_old.changes");
 const SEP: &str = "-------------------------------------------------------------------";
-const MAIL: &str = "Danilo Spinella <danilo.spinella@suse.com>";
+const MAIL: &str = "Jane Doe <jane.doe@example.com>";
 
 fn entry(date: &str, bullets: &str) -> String {
     format!("{SEP}\n{date} - {MAIL}\n\n{bullets}\n\n")
@@ -115,7 +115,7 @@ fn the_update_bullet_is_added_when_none_exists_and_not_when_another_does() {
 #[test]
 fn a_loose_header_is_written_in_the_standard_form() {
     let new = format!(
-        "---------------------------------------------\nTue Nov 3 11:14:44 2026 -  Danilo Spinella <danilo.spinella@suse.com>\n\n- Update to 2.10.4\n\n{OLD}"
+        "---------------------------------------------\nTue Nov 3 11:14:44 2026 -  Jane Doe <jane.doe@example.com>\n\n- Update to 2.10.4\n\n{OLD}"
     );
     assert!(findings(&new, &[]).contains(&"changes.header-format"));
     let fixed = normalise_headers(&new, Some(OLD)).unwrap();

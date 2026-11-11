@@ -1,17 +1,17 @@
 use super::*;
 
-/// `/build/home:dspinella:open-webui/_result` as OBS returned it for the
+/// `/build/home:jdoe:open-webui/_result` as OBS returned it for the
 /// three dependencies of the vllm run, trimmed to their statuses: every
 /// one is fine on x86_64 and broken or excluded on i586.
 const TWO_ARCHES: &str = r#"<resultlist state="a89fd62d90378c6fa375e52c78300d1c">
-  <result project="home:dspinella:open-webui" repository="openSUSE_Tumbleweed" arch="i586" code="published" state="published">
+  <result project="home:jdoe:open-webui" repository="openSUSE_Tumbleweed" arch="i586" code="published" state="published">
     <status package="python-fastapi-cloud-cli" code="unresolvable">
       <details>nothing provides python314-fastar, nothing provides python313-fastar</details>
     </status>
     <status package="python-nvidia-cutlass-dsl-libs-base" code="excluded"/>
     <status package="python-cuda-bindings" code="succeeded"/>
   </result>
-  <result project="home:dspinella:open-webui" repository="openSUSE_Tumbleweed" arch="x86_64" code="building" state="building">
+  <result project="home:jdoe:open-webui" repository="openSUSE_Tumbleweed" arch="x86_64" code="building" state="building">
     <status package="python-fastapi-cloud-cli" code="succeeded"/>
     <status package="python-nvidia-cutlass-dsl-libs-base" code="succeeded"/>
     <status package="python-cuda-bindings" code="succeeded"/>

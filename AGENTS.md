@@ -32,7 +32,8 @@ auto-package is the only thing that changes packages.
 These add to the rules above and to the brief. On conflict, the stricter rule wins.
 
 Workspace
-- One jj workspace per task: `jj workspace add /home/danyspin97/ap-<task> -r <base>`.
+- One jj workspace per task: `jj workspace add <workspace-root>/ap-<task> -r <base>`.
+  `<workspace-root>`: the directory that holds the jj workspaces.
   Work only there. Never touch the main checkout or another agent's workspace.
 - Set only the bookmark named in the brief (`jj bookmark set <task> -r @-`).
   Do not move, create or delete other bookmarks, and do not rewrite commits
@@ -42,7 +43,8 @@ Workspace
   says so; leave the directory for the user.
 
 Cargo and disk
-- Every cargo call: `CARGO_TARGET_DIR=/home/danyspin97/proj/coding/auto-package/target cargo ...`.
+- Every cargo call: `CARGO_TARGET_DIR=<repo>/target cargo ...`.
+  `<repo>`: the main checkout; `<repo>/target` is the shared target directory.
   Never create `target/` inside a workspace or under `/tmp`.
 - Run `df -h /home` before building. Below 2.5 GB free: stop and report.
 

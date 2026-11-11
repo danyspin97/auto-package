@@ -250,10 +250,10 @@ pub(super) fn command_allowed(tools: &str, denied: &str, command: &str) -> bool 
 fn the_commands_a_refresh_turn_was_refused_are_allowed() {
     // Commands one refresh-patches turn ran that the sandbox refused, with
     // the workspace and checkout paths of that turn.
-    let base = "/home/danyspin97/Music/ap-work/home_dspinella_auto-package_mariadb-refresh2-x86_64";
+    let base = "/work/ap-work/home_jdoe_auto-package_mariadb-refresh2-x86_64";
     let ws = std::path::PathBuf::from(format!("{base}/state/mariadb"));
     let co = std::path::PathBuf::from(format!(
-        "{base}/home:dspinella:auto-package:mariadb-refresh2/mariadb"
+        "{base}/home:jdoe:auto-package:mariadb-refresh2/mariadb"
     ));
     let tools = turn_allowed_tools(Task::RefreshPatches, &ws, Some(&co));
     let denied = turn_denied_tools(&ws, Some(&co));
@@ -283,10 +283,10 @@ fn the_commands_a_refresh_turn_was_refused_are_allowed() {
 
 #[test]
 fn dangerous_variants_of_the_granted_commands_stay_refused() {
-    let base = "/home/danyspin97/Music/ap-work/home_dspinella_auto-package_mariadb-refresh2-x86_64";
+    let base = "/work/ap-work/home_jdoe_auto-package_mariadb-refresh2-x86_64";
     let ws = std::path::PathBuf::from(format!("{base}/state/mariadb"));
     let co = std::path::PathBuf::from(format!(
-        "{base}/home:dspinella:auto-package:mariadb-refresh2/mariadb"
+        "{base}/home:jdoe:auto-package:mariadb-refresh2/mariadb"
     ));
     let rpms = std::path::PathBuf::from(format!("{base}/rpms"));
     let tools = format!(
@@ -436,14 +436,15 @@ fn the_dry_run_shapes_a_refresh_turn_sent_stay_refused_and_the_prompt_says_why()
     // The two `patch --dry-run` checks one turn sent and the sandbox
     // refused. Both name the checkout's patch with `../../../`, the only
     // way out of `source/` to it: a parent path is refused by design.
-    let base = "/home/danyspin97/Music/ap-work/home_dspinella_auto-package_mariadb-refresh4-x86_64";
+    let base = "/work/ap-work/home_jdoe_auto-package_mariadb-refresh4-x86_64";
     let ws = std::path::PathBuf::from(format!("{base}/state/mariadb"));
     let co = std::path::PathBuf::from(format!(
-        "{base}/home:dspinella:auto-package:mariadb-refresh4/mariadb"
+        "{base}/home:jdoe:auto-package:mariadb-refresh4/mariadb"
     ));
     let tools = turn_allowed_tools(Task::RefreshPatches, &ws, Some(&co));
     let denied = turn_denied_tools(&ws, Some(&co));
-    let patch = "../../../home:dspinella:auto-package:mariadb-refresh4/mariadb/mariadb-10.2.4-logrotate.patch";
+    let patch =
+        "../../../home:jdoe:auto-package:mariadb-refresh4/mariadb/mariadb-10.2.4-logrotate.patch";
     for command in [
         format!("cd {base}/state/mariadb/source && patch -p0 --dry-run -i {patch}"),
         format!("cd source && patch --dry-run -p0 -i {patch}"),

@@ -6,7 +6,7 @@ use std::fs;
 /// branch, `duckdb.changes`): nine refreshes, then one bullet per agent fix.
 const DUCKDB_NEW: &str = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
   * Too many changes to list, see:
@@ -101,7 +101,7 @@ fn the_duckdb_bullets_merge_by_the_file_they_name() {
     let expected = format!(
         "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
   * Too many changes to list, see:
@@ -159,7 +159,7 @@ fn a_group_keeps_its_first_bullet_text_not_a_later_refinement() {
 fn a_spec_only_bullet_stays_as_written() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Set the CXXFLAGS of duckdb.spec to build with -O2
@@ -186,7 +186,7 @@ fn a_later_revert_replace_instead_undo_or_drop_replaces_the_first_bullet() {
         let text = format!(
             "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Add the zstd build option to duckdb-use-system-zstd.patch
@@ -216,7 +216,7 @@ Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
 fn the_last_replacing_bullet_wins_over_an_earlier_one() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Add the zstd build option to duckdb-use-system-zstd.patch
@@ -243,7 +243,7 @@ Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
 fn a_first_replacing_bullet_is_kept_when_no_later_one_replaces_it() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Revert the zstd build option in duckdb-use-system-zstd.patch
@@ -268,7 +268,7 @@ Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
 fn a_refresh_only_file_keeps_its_refresh_bullet() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Refresh duckdb-use-system-zstd.patch
@@ -336,7 +336,7 @@ fn an_entry_the_published_file_already_has_is_left_alone() {
 fn an_entry_without_an_update_bullet_is_left_alone() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Refresh duckdb-use-system-zstd.patch
 - Extend duckdb-use-system-zstd.patch to build the ICU extension
@@ -352,7 +352,7 @@ Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
 fn a_file_with_one_bullet_per_file_is_not_rewritten() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Refresh duckdb-use-system-zstd.patch
@@ -365,7 +365,7 @@ Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
 fn an_update_bullet_stays_even_when_a_line_under_it_names_an_unchanged_file() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
   FLAG: duckdb-use-system-yyjson.patch unchanged
@@ -394,7 +394,7 @@ Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
 fn a_bullet_naming_several_files_joins_the_first_one_and_drops_when_none_changed() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Refresh duckdb-use-system-zstd.patch
@@ -459,7 +459,7 @@ fn the_checkout_entry_is_rewritten_against_the_saved_baseline() {
     fs::write(checkout.join("duckdb-use-system-yyjson.patch"), "same\n").unwrap();
     let entry = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Refresh duckdb-use-system-zstd.patch
@@ -489,7 +489,7 @@ Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
 fn a_refresh_group_is_not_merged_into_the_group_of_its_first_file() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Refresh patches:
@@ -522,7 +522,7 @@ Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
 fn a_refresh_group_whose_patches_are_all_unchanged_is_dropped() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Refresh patches:
@@ -540,7 +540,7 @@ Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
 fn a_continuation_line_naming_a_file_joins_its_bullets_group() {
     let text = "\
 -------------------------------------------------------------------
-Mon Nov  2 16:04:50 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:04:50 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.0.0
 - Extend the headers

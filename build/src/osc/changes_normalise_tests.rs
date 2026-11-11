@@ -19,12 +19,12 @@ Mon Sep 28 12:52:34 UTC 2026 - Andrea Manzini <andrea.manzini@suse.com>
 /// unpublished 5.4 entry of the earlier update below it.
 const DEBUGEDIT_BRANCH: &str = "\
 -------------------------------------------------------------------
-Wed Nov  4 13:08:52 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Wed Nov  4 13:08:52 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 5.3
 
 -------------------------------------------------------------------
-Mon Nov  2 16:38:10 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:38:10 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 5.4
   * No upstream changelog found or provided
@@ -246,17 +246,17 @@ fn older_unpublished_entries_for_one_version_are_merged() {
 /// rerun on top, the 5.3 entry that lint rebased onto, then the first 5.4 one.
 const DEBUGEDIT_RERUN: &str = "\
 -------------------------------------------------------------------
-Wed Nov  4 13:39:02 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Wed Nov  4 13:39:02 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 5.4
 
 -------------------------------------------------------------------
-Wed Nov  4 13:08:52 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Wed Nov  4 13:08:52 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 5.3
 
 -------------------------------------------------------------------
-Mon Nov  2 16:38:10 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:38:10 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 5.4
   * No upstream changelog found or provided
@@ -283,7 +283,7 @@ fn the_rerun_entries_of_one_version_become_one_entry() {
     let out = normalise_unpublished_entries(ORIGIN, DEBUGEDIT_RERUN, "5.4", "debugedit").unwrap();
     let want = "\
 -------------------------------------------------------------------
-Wed Nov  4 13:39:02 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Wed Nov  4 13:39:02 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 5.4
 - Refresh patches:

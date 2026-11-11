@@ -293,15 +293,15 @@ fn a_source_project_finds_its_one_branch_directory() {
     let t = tempfile::tempdir().unwrap();
     let w = t.path();
     write(
-        &w.join("home_dany_branches_Base_System-x86_64/state/foo/state.json"),
+        &w.join("home_alex_branches_Base_System-x86_64/state/foo/state.json"),
         "{}",
     );
     write(
-        &w.join("home_dany_branches_Other-x86_64/state/foo/state.json"),
+        &w.join("home_alex_branches_Other-x86_64/state/foo/state.json"),
         "{}",
     );
     let found = resolve_project_dir(w, Some("Base:System"), "x86_64", "foo").unwrap();
-    assert!(found.ends_with("home_dany_branches_Base_System-x86_64"));
+    assert!(found.ends_with("home_alex_branches_Base_System-x86_64"));
     write(
         &w.join("home_bob_branches_Base_System-x86_64/state/foo/state.json"),
         "{}",

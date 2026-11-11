@@ -1,5 +1,5 @@
 -------------------------------------------------------------------
-Mon Nov  2 16:03:24 UTC 2026 - Danilo Spinella <danilo.spinella@suse.com>
+Mon Nov  2 16:03:24 UTC 2026 - Jane Doe <jane.doe@example.com>
 
 - Update to 2.10.4
   * Fixed a buffer overflow in `Mangle()` where the caller's buffer

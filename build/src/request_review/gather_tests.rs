@@ -16,7 +16,7 @@ const NEW_CHANGES: &str = include_str!("../testdata/request_review/cracklib_new.
 const OLD_PATCH: &str = include_str!("../testdata/request_review/visibility_old.patch");
 const NEW_PATCH: &str = include_str!("../testdata/request_review/visibility_new.patch");
 
-const SP: &str = "home:dspinella:auto-package:branches:Base:System";
+const SP: &str = "home:jdoe:auto-package:branches:Base:System";
 const TP: &str = "Base:System";
 
 /// The fake OBS holding request 1394662.

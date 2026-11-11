@@ -11,8 +11,8 @@ const EXPANDED: &str = "8cc13f95bfbd9469b56a99644611c3ac";
 fn history_with_service_run() -> String {
     format!(
         "<revisionlist>\n\
-         <revision rev=\"4\" vrev=\"1\"><srcmd5>1bab7af08d87e68fc8a0bb2161fbab87</srcmd5><user>dspinella</user><time>1794000000</time><comment>auto-package: Update to 2.13.0</comment></revision>\n\
-         <revision rev=\"5\" vrev=\"2\"><srcmd5>{SOURCE}</srcmd5><user>dspinella</user><time>1794239724</time><comment>{MESSAGE}</comment></revision>\n\
+         <revision rev=\"4\" vrev=\"1\"><srcmd5>1bab7af08d87e68fc8a0bb2161fbab87</srcmd5><user>jdoe</user><time>1794000000</time><comment>auto-package: Update to 2.13.0</comment></revision>\n\
+         <revision rev=\"5\" vrev=\"2\"><srcmd5>{SOURCE}</srcmd5><user>jdoe</user><time>1794239724</time><comment>{MESSAGE}</comment></revision>\n\
          <revision rev=\"6\" vrev=\"3\"><srcmd5>feedfeedfeedfeedfeedfeedfeedfeed</srcmd5><user>_service</user><time>1794239800</time><comment></comment></revision>\n\
          </revisionlist>"
     )
@@ -30,7 +30,7 @@ fn link_listing(own: &str, expanded: &str) -> String {
 
 #[test]
 fn the_commit_is_found_by_its_user_and_message_not_as_the_newest_revision() {
-    let source = commit_source(&history_with_service_run(), "dspinella", MESSAGE).unwrap();
+    let source = commit_source(&history_with_service_run(), "jdoe", MESSAGE).unwrap();
     assert_eq!(source.srcmd5, SOURCE);
     assert_eq!(source.rev, "5");
 }
@@ -38,7 +38,7 @@ fn the_commit_is_found_by_its_user_and_message_not_as_the_newest_revision() {
 #[test]
 fn a_message_collapses_white_space_as_the_history_does() {
     let spaced = "auto-package:   Update  to 2.14.0";
-    let source = commit_source(&history_with_service_run(), "dspinella", spaced).unwrap();
+    let source = commit_source(&history_with_service_run(), "jdoe", spaced).unwrap();
     assert_eq!(source.srcmd5, SOURCE);
 }
 
@@ -53,7 +53,7 @@ fn a_link_commit_to_a_service_package_records_the_expanded_head() {
         &history_with_service_run(),
         &link_listing(SOURCE, EXPANDED),
         EXPANDED,
-        "dspinella",
+        "jdoe",
         MESSAGE,
     );
     // The expanded revision is what OBS reports as the head and what the
@@ -69,7 +69,7 @@ fn a_non_link_service_package_records_its_directory_revision_when_it_is_the_sour
             &history_with_service_run(),
             &listing,
             SOURCE,
-            "dspinella",
+            "jdoe",
             MESSAGE
         ),
         Ok(SOURCE.to_string())
@@ -85,7 +85,7 @@ fn an_expanded_revision_that_is_not_the_source_of_the_commit_is_not_recorded() {
         &history_with_service_run(),
         &link_listing(other, EXPANDED),
         EXPANDED,
-        "dspinella",
+        "jdoe",
         MESSAGE,
     )
     .unwrap_err();
@@ -98,7 +98,7 @@ fn a_checkout_not_holding_the_expanded_head_records_nothing() {
         &history_with_service_run(),
         &link_listing(SOURCE, EXPANDED),
         "015dbda0d164436c0ea7c10f5d4ae032",
-        "dspinella",
+        "jdoe",
         MESSAGE,
     )
     .unwrap_err();
@@ -111,7 +111,7 @@ fn a_commit_missing_from_the_history_records_nothing() {
         &history_with_service_run(),
         &link_listing(SOURCE, EXPANDED),
         EXPANDED,
-        "dspinella",
+        "jdoe",
         "auto-package: Update to 9.9.9",
     )
     .unwrap_err();
@@ -126,7 +126,7 @@ fn the_recorded_expanded_revision_passes_the_restore_guard() {
         &history_with_service_run(),
         &link_listing(SOURCE, EXPANDED),
         EXPANDED,
-        "dspinella",
+        "jdoe",
         MESSAGE,
     )
     .unwrap();

@@ -175,7 +175,7 @@ fn entry(repo: &str, arch: &str, code: &str) -> ResultEntry {
 #[test]
 fn the_report_reads_source_and_baseline_results_through_the_fake() {
     let mut o = fake_with_request();
-    let sp = "home:dspinella:auto-package:branches:Base:System";
+    let sp = "home:jdoe:auto-package:branches:Base:System";
     o.results.insert(
         (sp.into(), "cracklib".into()),
         vec![

@@ -81,7 +81,7 @@ inferred; check it before relying on it).
 ### Contributing
 
 - `osc fork <project> <package>` forks the Gitea repo into the user's org
-  and creates `home:<user>:branches:<project>` with the package scmsync'd to
+  and creates `home:<user>:branches:<project>` (`<user>`: the OBS login) with the package scmsync'd to
   the fork's branch; then `git commit`, `git push`, and
   `git-obs pr create`. **[verified]** that the commands and their options
   exist (`osc fork --help`: `--target-project`, `--gitea-fork-org`,
@@ -599,14 +599,14 @@ chain, `--in-place` for
   existing repo of that name whose `parent` is not the expected repo stops
   the package, so a clash is refused, never resolved by renaming; settling
   it (`--new-repo-name`) is left to when a user hits it.
-  `dspinella/mariadb-connector-c` does not exist today **[verified]**.
+  `<user>/mariadb-connector-c` does not exist today **[verified]**.
 - **The PR skips the devel project's maintainers.** A PR to
   `pool/<pkg>#factory` is reviewed by `openSUSE/Factory`'s reviewers
   (`gitea_test`, `~legaldb`, `~factory_bot`, merge by `merge ok`), not by
   the people who push to the maintainer's fork. The OBS branch project is
   still branched from the devel package, so the build is the devel build. For the first
   target the user is one of the devel package's maintainers
-  (`server:database/mariadb-connector-c` lists `dspinella`)
+  (`server:database/mariadb-connector-c` lists `<user>`)
   **[verified]**. After a merge the maintainer's fork is behind `pool`
   until its owner syncs it; the tool does not touch it.
 - **Two routes into Factory.** The devel project can still submit to
@@ -689,7 +689,7 @@ token) leave a choice.
    branch project. The fork is of the PR target (`pool/<pkg>` in case (a)),
    never of, and never into, the maintainer's fork the devel package
    scmsyncs: for `mariadb-connector-c` that is
-   `dspinella/mariadb-connector-c` with parent `pool/mariadb-connector-c`,
+   `<user>/mariadb-connector-c` with parent `pool/mariadb-connector-c`,
    not a fork of `adamm/mariadb-connector-c`. `--fork-org` overrides the
    namespace; `pool`, the PR target's owner and the scmsync repo's owner
    are never accepted. *Why* the fork of `pool`: the PR head must be in
@@ -816,7 +816,7 @@ read-only (`osc meta`, `osc cat`, anonymous Gitea GET).
    `adamm/mariadb-connector-c#main` and the meta of
    `server:database/mariadb-connector-c`.
 2. After phase 1: `auto-package update --project server:database --only
-   mariadb-connector-c --branch-project home:dspinella:branches:server:database
+   mariadb-connector-c --branch-project home:<user>:branches:server:database
    --dry-run` refuses the package and names
    `https://src.opensuse.org/adamm/mariadb-connector-c#main`.
 3. After phase 3: the same command and `auto-package lint --project
@@ -824,15 +824,15 @@ read-only (`osc meta`, `osc cat`, anonymous Gitea GET).
    scmsync repo `adamm/mariadb-connector-c#main`, its parent
    `pool/mariadb-connector-c`, target `pool/mariadb-connector-c#factory`
    and its head, "devel fork ahead: 0", fork
-   `dspinella/mariadb-connector-c` (to be created), build branch
+   `<user>/mariadb-connector-c` (to be created), build branch
    `auto-package/factory-build`, PR branch `auto-package/factory`
    (written only by `--submit`), branch-project package
-   `home:dspinella:branches:server:database/mariadb-connector-c` with its
+   `home:<user>:branches:server:database/mariadb-connector-c` with its
    scmsync URL, and the PR title. Each line is checked against section 1.
 4. After phase 5b: the same command without `--dry-run` (still no
    `--submit`); if auto-package finds no update, `lint` is the run. Check:
    the fork's `parent` is `pool/mariadb-connector-c`; the branch-project
-   package scmsyncs `dspinella/mariadb-connector-c#auto-package/factory-build`
+   package scmsyncs `<user>/mariadb-connector-c#auto-package/factory-build`
    and its `_scmsync.obsinfo` `commit:` is the pushed commit; the
    archives OBS fetched are the tarballs, not LFS pointers; no
    `auto-package/factory` branch exists; its repositories are

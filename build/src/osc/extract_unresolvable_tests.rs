@@ -145,7 +145,7 @@ fn keeps_the_parentheses_of_a_soname_capability() {
 }
 
 /// The `<details>` of python-fastapi-cloud-cli on i586 in
-/// home:dspinella:open-webui, verbatim: every requirement on one line.
+/// home:jdoe:open-webui, verbatim: every requirement on one line.
 const FASTAPI_CLOUD_CLI_DETAILS: &str = "nothing provides python314-fastar, nothing provides python313-fastar, nothing provides python314-rignore, nothing provides python313-rignore, nothing provides python314-sentry-sdk, nothing provides python313-sentry-sdk";
 
 /// A joined details line used to yield only `python314-fastar,` (comma
@@ -383,12 +383,12 @@ fn missing_names_collapse_flavors_and_drop_what_is_not_built() {
 /// Both repositories' results arrive in one document; only the one asked
 /// for may count.
 const MULTI_REPO: &str = r#"<resultlist state="bfdf69d7aa217ca87031d1aff55605f2">
-  <result project="home:dspinella:open-webui" repository="openSUSE_Tumbleweed" arch="i586" code="published" state="published">
+  <result project="home:jdoe:open-webui" repository="openSUSE_Tumbleweed" arch="i586" code="published" state="published">
     <status package="python-fastapi-cloud-cli" code="unresolvable">
       <details>nothing provides python314-fastar, nothing provides python313-fastar</details>
     </status>
   </result>
-  <result project="home:dspinella:open-webui" repository="openSUSE_Tumbleweed" arch="x86_64" code="building" state="building">
+  <result project="home:jdoe:open-webui" repository="openSUSE_Tumbleweed" arch="x86_64" code="building" state="building">
     <status package="python-fastapi-cloud-cli" code="succeeded"/>
   </result>
 </resultlist>"#;

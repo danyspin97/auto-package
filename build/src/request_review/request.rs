@@ -245,7 +245,7 @@ mod tests {
     fn the_real_request_has_one_submit_action_with_a_revision_number() {
         let doc = parse_request(REAL).unwrap();
         assert_eq!(doc.id, "1394662");
-        assert_eq!(doc.creator, "dspinella");
+        assert_eq!(doc.creator, "jdoe");
         assert_eq!(doc.state.name, "new");
         assert_eq!(doc.state.created, "2026-11-03T11:14:44");
         let (s, t) = doc.submit_actions().next().unwrap();
