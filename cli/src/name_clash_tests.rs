@@ -285,10 +285,67 @@ fn the_pypi_line_is_true_with_and_without_a_source() {
         Some("https://github.com/someone/jay-py"),
         &v(&["https://github.com/x/jay"]),
     );
-    assert!(with.contains("(its source: https://github.com/someone/jay-py)"));
+    assert!(with.contains("  PyPI project   jay 1.0   https://github.com/someone/jay-py\n"));
     let without = clash_message("jay", "1.0", None, &v(&["https://github.com/x/jay"]));
-    assert!(without.contains("(no source repository on a known forge)"));
+    assert!(without.contains("  PyPI project   jay 1.0   no source on a known forge\n"));
     assert!(!without.contains("names no source"));
+}
+
+#[test]
+fn the_refusal_has_the_exact_layout() {
+    let m = clash_message(
+        "jay",
+        "0.2.0",
+        Some("https://github.com/colorstain/jay"),
+        &v(&[
+            "https://github.com/mahkoh/jay",
+            "https://github.com/sxcool1024/Jay",
+        ]),
+    );
+    assert_eq!(
+        m,
+        "`jay` is ambiguous: PyPI and a repository both claim it\n\
+         \n\
+         \x20 PyPI project   jay 0.2.0   https://github.com/colorstain/jay\n\
+         \x20 repository     https://github.com/mahkoh/jay\n\
+         \x20 repository     https://github.com/sxcool1024/Jay\n\
+         \n\
+         Pick one and re-run:\n\
+         \x20 auto-package build pypi:jay\n\
+         \x20 auto-package build https://github.com/mahkoh/jay\n\
+         \x20 auto-package build https://github.com/sxcool1024/Jay\n\
+         (in the TUI, type `pypi:jay` or the repository URL)"
+    );
+}
+
+#[test]
+fn every_repo_gets_its_own_command_line() {
+    let repos = v(&["https://github.com/a/jay", "https://github.com/b/jay"]);
+    let m = clash_message("jay", "1.0", None, &repos);
+    for r in &repos {
+        assert!(m.contains(&format!("\n  auto-package build {r}\n")), "{r}");
+    }
+    assert!(m.contains("\n  auto-package build pypi:jay\n"));
+}
+
+#[test]
+fn vouched_repos_come_first_then_search_hits_in_search_order() {
+    use ap_build::pipeline::RepoCandidates;
+    let found = RepoCandidates {
+        verified: v(&["https://github.com/zz/jay"]),
+        guessed: vec![],
+        unvouched_search_hits: v(&[
+            "https://github.com/sxcool1024/Jay",
+            "https://github.com/mahkoh/jay",
+        ]),
+    };
+    let want = v(&[
+        "https://github.com/zz/jay",
+        "https://github.com/sxcool1024/Jay",
+        "https://github.com/mahkoh/jay",
+    ]);
+    assert_eq!(clash_candidates(&found), want);
+    assert_eq!(clashing_repos("jay", None, &clash_candidates(&found)), want);
 }
 
 fn request(raw: &str) -> Request {

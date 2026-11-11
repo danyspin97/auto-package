@@ -97,25 +97,31 @@ pub(crate) fn clashing_repos(
         .collect()
 }
 
-/// The refusal text, naming both choices and how to take each.
+/// The refusal text, as `build` prints it after `error:`: the two kinds of
+/// choice in aligned columns, then the command for each, one per line.
 pub(crate) fn clash_message(
     name: &str,
     version: &str,
     pypi_source: Option<&str>,
     repos: &[String],
 ) -> String {
-    let pypi = match pypi_source {
-        Some(s) => format!("PyPI project {name} {version} (its source: {s})"),
-        None => format!("PyPI project {name} {version} (no source repository on a known forge)"),
-    };
-    let mut out = format!("`{name}` is ambiguous. It could be:\n  - the {pypi}\n");
+    const KIND: usize = "PyPI project".len();
+    let source = pypi_source.unwrap_or("no source on a known forge");
+    let mut out = format!("`{name}` is ambiguous: PyPI and a repository both claim it\n\n");
+    out.push_str(&format!(
+        "  {:<KIND$}   {name} {version}   {source}\n",
+        "PyPI project"
+    ));
     for r in repos {
-        out.push_str(&format!("  - the repository {r}\n"));
+        out.push_str(&format!("  {:<KIND$}   {r}\n", "repository"));
+    }
+    out.push_str("\nPick one and re-run:\n");
+    out.push_str(&format!("  auto-package build pypi:{name}\n"));
+    for r in repos {
+        out.push_str(&format!("  auto-package build {r}\n"));
     }
     out.push_str(&format!(
-        "Re-run as `build pypi:{name}` to build the PyPI project, or give the repository \
-         as the name (`build {}`), or in the TUI type `pypi:{name}` instead.",
-        repos.first().map(String::as_str).unwrap_or("<url>")
+        "(in the TUI, type `pypi:{name}` or the repository URL)"
     ));
     out
 }
