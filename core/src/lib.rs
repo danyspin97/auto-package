@@ -6,6 +6,9 @@ pub mod error;
 pub mod event;
 #[cfg(test)]
 mod event_tests;
+pub mod failure_note;
+#[cfg(test)]
+mod failure_note_tests;
 pub mod fix_event;
 pub mod fsx;
 pub mod ledger;
