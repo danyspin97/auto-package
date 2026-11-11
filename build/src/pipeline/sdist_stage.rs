@@ -3,12 +3,27 @@
 use super::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::service_source::*;
+use crate::pipeline::source_pass::*;
 
-/// Step: FetchSdist, then the quilt `source/` symlink.
+/// Step: FetchSdist, then the quilt `source/` symlink. The checkout's `_service`
+/// runs first when it makes the source (see [`run_source_pass`]).
 pub(super) fn fetch_sdist_stage(
     ctx: &RunCtx,
     st: &mut RunState,
     need_spec: bool,
+) -> Result<(), PipelineResult> {
+    let baseline = obs_baseline_dir(ctx.config).ok();
+    let mut run =
+        |dir: &Path, emit: Emit<'_>| run_checkout_service(ctx, dir, baseline.as_deref(), emit);
+    fetch_sdist_stage_with(ctx, st, need_spec, &mut run)
+}
+
+/// [`fetch_sdist_stage`] with the service run given (see [`run_source_pass`]).
+pub(super) fn fetch_sdist_stage_with(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    need_spec: bool,
+    run: &mut dyn FnMut(&Path, Emit<'_>) -> Result<(), osc::Error>,
 ) -> Result<(), PipelineResult> {
     let RunCtx {
         pkg_run,
@@ -19,12 +34,11 @@ pub(super) fn fetch_sdist_stage(
         ..
     } = ctx;
     let reporter = *reporter;
-    let step_attempts = &mut st.step_attempts;
 
     // An obs_scm source is made by OBS when the package is built: the checkout has
     // no tarball to unpack, and a missing one is not a failure.
     if source_made_at_build_time(checkout_dir) {
-        step_attempts.skip(
+        st.step_attempts.skip(
             reporter,
             StepKind::FetchSdist,
             SkipReason::Other("the source is made by OBS at build time".to_string()),
@@ -35,13 +49,18 @@ pub(super) fn fetch_sdist_stage(
     // A CUDA component is NVIDIA's binary archive: there is no source tree to
     // read, and unpacking it would copy hundreds of megabytes for nothing.
     if crate::redist::is_redist_package(&ctx.config.rpm_name) {
-        step_attempts.skip(
+        st.step_attempts.skip(
             reporter,
             StepKind::FetchSdist,
             SkipReason::Other("a redistributable archive is not unpacked".to_string()),
         );
         return Ok(());
     }
+
+    // A checkout whose source a `_service` makes runs that service first: the
+    // tarball is there to unpack below. (The service's own step is OscService.)
+    let pass = run_source_pass(ctx, st, run)?;
+    let step_attempts = &mut st.step_attempts;
 
     // ── Step: FetchSdist (extract for log analysis, if not done) ─────────────
     let tarball = find_tarball(checkout_dir, &ctx.config.version);
@@ -88,7 +107,7 @@ pub(super) fn fetch_sdist_stage(
         } else {
             reporter.report(&Event::Warning {
                 step: Some(sdist_step.id),
-                message: "no source tarball found in the checkout".to_string(),
+                message: no_tarball_message(&pass),
             });
             outcome = StepOutcome::Failed;
         }

@@ -16,9 +16,7 @@ use ap_core::sink::Reporter;
 use crate::proc::Emit;
 use crate::step::{Attempts, StepGuard};
 
-use crate::distro_bounds;
-use crate::osc;
-use crate::workspace::Workspace;
+use crate::{distro_bounds, osc, workspace::Workspace};
 
 mod baseline;
 use baseline::*;
@@ -313,6 +311,7 @@ mod carried_origin_tests;
 mod sdist_stage;
 #[cfg(test)]
 mod sdist_stage_tests;
+mod source_pass;
 #[cfg(test)]
 mod update_mode_tests;
 use patch_stage::*;

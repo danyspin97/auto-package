@@ -1,14 +1,80 @@
 use super::*;
 use crate::pipeline::archive::find_sdist_top_level;
 use crate::pipeline::sdist_stage::{
-    UNPACKED_SOURCE_MISSING, fetch_sdist_stage, unpacked_source_missing, unpacked_top_level,
+    UNPACKED_SOURCE_MISSING, fetch_sdist_stage, fetch_sdist_stage_with, unpacked_source_missing,
+    unpacked_top_level,
 };
+use crate::pipeline::source_pass::source_pass_needed;
 
 /// Discards every event.
 struct Quiet;
 
 impl Reporter for Quiet {
     fn report(&self, _: &Event) {}
+}
+
+/// Keeps the steps that finished (with their outcome) and the warnings.
+#[derive(Default)]
+struct Log {
+    kinds: std::sync::Mutex<Vec<(ap_core::event::StepId, StepKind)>>,
+    finished: std::sync::Mutex<Vec<(StepKind, String)>>,
+    warnings: std::sync::Mutex<Vec<String>>,
+}
+
+impl Log {
+    /// The outcomes of the steps of `kind`, in order.
+    fn outcomes(&self, kind: StepKind) -> Vec<String> {
+        self.finished
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| *k == kind)
+            .map(|(_, o)| o.clone())
+            .collect()
+    }
+}
+
+impl Reporter for Log {
+    fn report(&self, e: &Event) {
+        match e {
+            Event::StepStarted { step, kind, .. } => {
+                self.kinds.lock().unwrap().push((*step, *kind))
+            }
+            Event::StepFinished { step, outcome, .. } => {
+                let kind = self
+                    .kinds
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(s, _)| s == step)
+                    .map(|(_, k)| *k);
+                if let Some(kind) = kind {
+                    self.finished
+                        .lock()
+                        .unwrap()
+                        .push((kind, outcome.to_string()));
+                }
+            }
+            Event::Warning { message, .. } => self.warnings.lock().unwrap().push(message.clone()),
+            _ => {}
+        }
+    }
+}
+
+/// A `.tar.zst` at `path` holding one small file for each of `entries`.
+fn zst_tarball(path: &Path, entries: &[&str]) {
+    let file = std::fs::File::create(path).unwrap();
+    let enc = zstd::stream::write::Encoder::new(file, 0).unwrap();
+    let mut ar = tar::Builder::new(enc);
+    for name in entries {
+        let body = b"x\n";
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        ar.append_data(&mut h, name, &body[..]).unwrap();
+    }
+    ar.into_inner().unwrap().finish().unwrap();
 }
 
 /// A `.tar.gz` at `path` holding one small file for each of `entries`.
@@ -96,12 +162,25 @@ fn with_checkout<R>(
     service: &str,
     f: impl FnOnce(&RunCtx, &mut RunState) -> R,
 ) -> R {
+    with_checkout_as(&Quiet, "1.0", entries, hint, service, f)
+}
+
+/// [`with_checkout`] for a run of `version` that reports to `reporter`. The
+/// tarball, when given, is `AMQPStorm-1.0.tar.gz` whatever the version.
+fn with_checkout_as<R>(
+    reporter: &dyn Reporter,
+    version: &str,
+    entries: Option<&[&str]>,
+    hint: &str,
+    service: &str,
+    f: impl FnOnce(&RunCtx, &mut RunState) -> R,
+) -> R {
     let root = tempfile::tempdir().unwrap();
     let work = root.path().join("work");
     let state_root = work.join("state");
     let mut config = super::hygiene_tests::config("foo", &state_root);
     config.work_dir = work.clone();
-    config.version = "1.0".into();
+    config.version = version.into();
     let checkout = work.join("p/foo");
     std::fs::create_dir_all(&checkout).unwrap();
     if let Some(entries) = entries {
@@ -118,7 +197,7 @@ fn with_checkout<R>(
     let ctx = RunCtx {
         config: &config,
         pkg_run: &pkg_run,
-        reporter: &Quiet,
+        reporter,
         ws,
         rpm_name: "foo".into(),
         obs_name: "foo".into(),
@@ -214,4 +293,150 @@ fn a_source_the_pipeline_does_not_unpack_is_not_a_fault() {
             assert!(!unpacked_source_missing(ctx));
         },
     );
+}
+
+#[test]
+fn the_pass_is_needed_only_for_a_service_that_makes_the_source() {
+    let fetched = |name: &str, params: &str| {
+        format!(
+            "<services><service name=\"{name}\" mode=\"trylocal\">{params}</service></services>"
+        )
+    };
+    let url = "<param name=\"url\">https://example.org/jay.git</param>";
+    // A service that fetches the source, with and without a tarball in the checkout.
+    assert!(source_pass_needed(&fetched("tar_scm", url), false, false));
+    assert!(source_pass_needed(
+        &fetched("cargo_vendor", url),
+        false,
+        false
+    ));
+    assert!(!source_pass_needed(
+        &fetched("cargo_vendor", ""),
+        false,
+        false
+    ));
+    assert!(!source_pass_needed(&fetched("tar_scm", url), true, false));
+    // OBS makes an obs_scm source at build time: nothing runs here.
+    assert!(!source_pass_needed(&fetched("obs_scm", url), false, false));
+    // A redistributed archive is never unpacked, and a checkout without a
+    // `_service` has nothing to run.
+    assert!(!source_pass_needed(&fetched("tar_scm", url), false, true));
+    assert!(!source_pass_needed("", false, false));
+    // download_files lists the sources to fetch; it is a pass too.
+    assert!(source_pass_needed(
+        &fetched("download_files", ""),
+        false,
+        false
+    ));
+    assert!(!source_pass_needed(
+        &format!(
+            "{}{}",
+            fetched("obs_scm", url),
+            fetched("download_files", "")
+        ),
+        false,
+        false
+    ));
+}
+
+#[test]
+fn a_pass_that_makes_the_tarball_unpacks_it() {
+    let log = Log::default();
+    let service = "<services><service name=\"tar_scm\"/></services>\n";
+    with_checkout_as(&log, "1.15.0", None, "jay-1.15.0", service, |ctx, st| {
+        let mut calls = 0;
+        let mut run = |dir: &Path, _: Emit<'_>| {
+            calls += 1;
+            zst_tarball(&dir.join("jay-1.15.0.tar.zst"), &["jay-1.15.0/x"]);
+            Ok(())
+        };
+        fetch_sdist_stage_with(ctx, st, false, &mut run)
+            .unwrap_or_else(|_| panic!("the stage fails"));
+        assert_eq!(calls, 1, "the service runs once");
+        assert!(
+            ctx.ws.dir().join("source/x").exists(),
+            "source/ is unpacked"
+        );
+        assert!(!unpacked_source_missing(ctx));
+        assert_eq!(log.outcomes(StepKind::OscService), ["ok"]);
+        assert_eq!(log.outcomes(StepKind::FetchSdist), ["ok"]);
+    });
+}
+
+#[test]
+fn a_pass_that_makes_no_tarball_fails_its_steps_and_the_run_goes_on() {
+    let log = Log::default();
+    let service = "<services><service name=\"tar_scm\"/></services>\n";
+    with_checkout_as(&log, "1.15.0", None, "jay-1.15.0", service, |ctx, st| {
+        let mut run = |_: &Path, _: Emit<'_>| {
+            Err(osc::Error::OscFailed {
+                cmd: "service".into(),
+                code: 1,
+                stderr: "tar_scm: no such tag".into(),
+            })
+        };
+        fetch_sdist_stage_with(ctx, st, false, &mut run)
+            .unwrap_or_else(|_| panic!("the run goes on past a failed service"));
+        assert_eq!(log.outcomes(StepKind::OscService), ["failed"]);
+        assert_eq!(log.outcomes(StepKind::FetchSdist), ["failed"]);
+        let warnings = log.warnings.lock().unwrap();
+        assert!(
+            warnings.iter().any(|w| w
+                .starts_with("the _service ran but made no source tarball: osc service failed")
+                && w.contains("tar_scm: no such tag")),
+            "{warnings:?}"
+        );
+    });
+}
+
+#[test]
+fn a_service_the_machine_cannot_run_stops_the_run() {
+    let log = Log::default();
+    let service = "<services><service name=\"tar_scm\"/></services>\n";
+    with_checkout_as(&log, "1.15.0", None, "jay-1.15.0", service, |ctx, st| {
+        let mut run = |_: &Path, _: Emit<'_>| {
+            Err(osc::Error::Launch(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "osc: not found",
+            )))
+        };
+        assert!(fetch_sdist_stage_with(ctx, st, false, &mut run).is_err());
+    });
+}
+
+#[test]
+fn the_pass_runs_only_when_the_checkout_needs_it() {
+    let tar_scm = "<services><service name=\"tar_scm\"/></services>\n";
+    let obs_scm = "<services><service name=\"obs_scm\" mode=\"buildtime\"/></services>\n";
+    let never = |_: &Path, _: Emit<'_>| -> Result<(), osc::Error> {
+        panic!("the service pass must not run here")
+    };
+    // A new package: GenerateSpec and its service made the tarball.
+    with_checkout(
+        Some(&["amqpstorm-1.0/x"]),
+        "AMQPStorm-1.0",
+        tar_scm,
+        |ctx, st| {
+            let mut run = never;
+            fetch_sdist_stage_with(ctx, st, true, &mut run)
+                .unwrap_or_else(|_| panic!("the stage fails"));
+        },
+    );
+    // A plain tarball with no `_service`.
+    with_checkout(
+        Some(&["amqpstorm-1.0/x"]),
+        "AMQPStorm-1.0",
+        "",
+        |ctx, st| {
+            let mut run = never;
+            fetch_sdist_stage_with(ctx, st, false, &mut run)
+                .unwrap_or_else(|_| panic!("the stage fails"));
+        },
+    );
+    // An OBS-made source.
+    with_checkout(None, "AMQPStorm-1.0", obs_scm, |ctx, st| {
+        let mut run = never;
+        fetch_sdist_stage_with(ctx, st, false, &mut run)
+            .unwrap_or_else(|_| panic!("the stage fails"));
+    });
 }
