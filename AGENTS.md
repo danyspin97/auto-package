@@ -19,6 +19,14 @@ auto-package is the only thing that changes packages.
   rule), fix auto-package (the code, the conventions, the skills), rebuild it and
   run it again. Never fix the package instead.
 
+## Bare package names
+
+`auto-package build <name>` stops when PyPI and a same-named repository both
+claim the name. Pick one: `build pypi:<name>` builds the PyPI project, and
+`build <repo url>` builds the repository. The TUI `n` prompt takes the same
+forms (`pypi:<name>` or a repository URL). Never work around the refusal by
+hand.
+
 ## Working on auto-package itself
 
 - Commit each change on a branch with `jj` (not raw `git`); never push.
@@ -33,7 +41,8 @@ These add to the rules above and to the brief. On conflict, the stricter rule wi
 
 Workspace
 - One jj workspace per task: `jj workspace add <workspace-root>/ap-<task> -r <base>`.
-  `<workspace-root>`: the directory that holds the jj workspaces.
+  `<workspace-root>`: the parent directory of the repository checkout, where the
+  jj workspaces live (siblings of the checkout, never inside it).
   Work only there. Never touch the main checkout or another agent's workspace.
 - Set only the bookmark named in the brief (`jj bookmark set <task> -r @-`).
   Do not move, create or delete other bookmarks, and do not rewrite commits
@@ -53,6 +62,8 @@ Commits
 - Body wrapped at 72, stating only causes the diff shows. No history, no
   "as discussed", no claims the diff does not support.
 - Trailer, exactly: `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`
+- Keep the author and committer that jj already has configured; never set them
+  (no `--author`, no `jj config set user.*`, no `GIT_AUTHOR_*` or `GIT_COMMITTER_*`).
 - Every commit compiles and passes on its own: `cargo fmt`,
   `cargo check -q --all-targets`, `cargo test -q -p <crate>` for the crates it
   touches and their dependents. Crates: `ap-build`, `ap-cli`, `ap-core`, `ap-ecosystem`.

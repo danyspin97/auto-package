@@ -20,8 +20,8 @@ the order of the remaining work.
 - About 190 `<workspace-root>/ap-*` workspace directories and logs, and the work directory `<work-dir>`
   (65 GB of run data: open-webui 24G, open-webui_nvidia 17G, vllm 13G are old),
   are the owner's to remove. Workers cannot `rm -rf`.
-  (`<workspace-root>`: the directory that holds the jj workspaces;
-  `<work-dir>`: the `--work-dir` the runs used.)
+  (`<work-dir>`: the `--work-dir` the runs used; `<workspace-root>` is defined
+  in AGENTS.md.)
 
 ## 2. Goal and numbers
 

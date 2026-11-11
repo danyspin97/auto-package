@@ -14,7 +14,7 @@ For the main session that delegates. Read `AGENTS.md` first; its section
 
 - Independent tasks run in parallel, each in its own jj workspace on its own
   bookmark (`<workspace-root>/ap-<task>`, bookmark `<task>`), all launched in
-  one message. `<workspace-root>`: the directory that holds the jj workspaces.
+  one message. `<workspace-root>` is defined in AGENTS.md.
 - Tasks that edit the same files run one after the other, the next based on
   the previous one's bookmark. Do not run them in parallel and merge later.
 - One concern per task. If a task grows a second concern, give it a second

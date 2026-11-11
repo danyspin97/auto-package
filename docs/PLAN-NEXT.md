@@ -17,7 +17,7 @@ and the order of the remaining work, so it can be picked up cold.
   (ap-build 1304, ap-cli 199, ap-core 67, ap-ecosystem 286) apart from one flaky sandbox test
   that was fixed afterwards (it now passes 3 of 3).
 - A jj workspace `ap-split2` (`<workspace-root>/ap-split2`) was created for the commit split and
-  holds only an empty commit (`<workspace-root>`: the directory that holds the jj workspaces). Remove it: `jj workspace forget ap-split2 && rm -rf <workspace-root>/ap-split2`.
+  holds only an empty commit. Remove it: `jj workspace forget ap-split2 && rm -rf <workspace-root>/ap-split2`.
 
 ### Uncommitted work, by topic (this is the list to turn into atomic commits)
 
@@ -97,7 +97,6 @@ jj workspace (hunk-level `git apply`, see how the 43 existing commits were made)
   `update --only mariadb` (branch `home:<user>:auto-package:mariadb`), and
   `update --only mariadb --revision 354 --to-version 13.0.2`
   (branch `home:<user>:auto-package:mariadb-refresh`). Stop one with SIGINT (the tool handles it).
-  `<user>` is the OBS login of the person running the tool.
 - The `mariadb-refresh` run was made with the OLD behaviour: the agent dropped patches 12 and 14
   without proof. Re-run into a fresh branch project with the new binary once the patch check is in
   the binary (the tool refuses to reuse a branch package when `--revision` is given).
