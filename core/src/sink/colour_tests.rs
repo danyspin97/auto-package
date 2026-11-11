@@ -15,7 +15,7 @@ info: searching for source repository candidates for: jay
   ✗ no verified repositories found after trying 7 URLs";
 
 /// `text` without its SGR sequences (`ESC [ ... m`).
-fn strip_sgr(text: &str) -> String {
+pub(super) fn strip_sgr(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
