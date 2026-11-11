@@ -87,6 +87,23 @@ fn a_recorded_origin_names_the_row_over_the_rpm_name_guess() {
 }
 
 #[test]
+fn a_refusal_for_a_name_is_settled_by_its_pypi_or_url_build() {
+    // The refusal was for `jay` as typed. Building `pypi:jay`, or the URL of the
+    // same package, settles it; another package's request does not.
+    let events = vec![fin("python-jay", PackageOutcome::Built)];
+    for origin in ["pypi:jay", "https://github.com/mahkoh/jay"] {
+        let mut failures = vec![failed("jay", 0)];
+        let settles = move |row: &str| (row == "python-jay").then(|| origin.to_string());
+        withdraw_settled_failures(&mut failures, &row_ends(&events), settles);
+        assert!(failures.is_empty(), "{origin}");
+    }
+    let mut failures = vec![failed("jay", 0)];
+    let other = |row: &str| (row == "python-jay").then(|| "pypi:other".to_string());
+    withdraw_settled_failures(&mut failures, &row_ends(&events), other);
+    assert_eq!(labels(&failures), vec!["jay"]);
+}
+
+#[test]
 fn a_dependency_label_settles_a_request_only_under_its_own_name() {
     // `python-foo` was built as the dependency `foo`: it settles a failed
     // request `foo`. `python-bar` settles nothing of `foo`.

@@ -130,10 +130,13 @@ pub(crate) fn withdraw_settled_failures(
             // dependency under one; otherwise the label names the package through
             // its RPM name (`foo` is `python-foo`), compared without case or
             // separators.
+            // Names are compared as requested: `pypi:jay`, the URL of jay and
+            // `jay` are the same package.
+            let want = crate::name_clash::requested_name(&f.label);
             let named = match label_of(row) {
-                Some(label) => label == f.label,
+                Some(label) => crate::name_clash::requested_name(&label) == want,
                 None => {
-                    ap_build::osc::fuzzy_key(&ap_build::osc::rpm_name(&f.label))
+                    ap_build::osc::fuzzy_key(&ap_build::osc::rpm_name(&want))
                         == ap_build::osc::fuzzy_key(row)
                 }
             };

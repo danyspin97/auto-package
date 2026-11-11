@@ -388,6 +388,7 @@ fn build_item(
             base_reporter,
             ctx.tui_ctrl.clone(),
             Some(&build),
+            None,
         )
     })
     .map_err(|e| format!("{e:#}"))

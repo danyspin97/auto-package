@@ -442,6 +442,7 @@ fn cmd_update(
             base_reporter.clone(),
             tui_ctrl.clone(),
             Some(&existing),
+            None,
         );
         if let Err(e) = r {
             failures.push((name, e.to_string()));

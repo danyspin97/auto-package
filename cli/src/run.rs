@@ -357,45 +357,43 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                                     let finished_before = memory.finished().len();
                                     let r = match &raw {
                                         None => Err(color_eyre::eyre::eyre!(NO_REQUEST_NAME)),
-                                        Some(raw) => {
-                                            let (extra, extra_repo) = if looks_like_url(raw) {
-                                                (repo_package_name(raw), Some(raw.clone()))
-                                            } else {
-                                                (raw.clone(), None)
-                                            };
-                                            validate_package_name(&extra)
-                                                .map_err(|e| color_eyre::eyre::eyre!(e))
-                                                .and_then(|()| {
-                                                    catch_panic(|| {
-                                                        cmd_build(
-                                                            &extra,
-                                                            None,
-                                                            project,
-                                                            work_dir,
-                                                            state_root,
-                                                            rpms_dir,
-                                                            distro,
-                                                            arch,
-                                                            max_attempts,
-                                                            budget_usd,
-                                                            None,
-                                                            false, // force: reuse anything already built
-                                                            false, // regen
-                                                            no_agent,
-                                                            sem.clone(),
-                                                            false, // sweep
-                                                            extra_repo,
-                                                            source_urls.clone(),
-                                                            python_flavors.clone(),
-                                                            run_dir,
-                                                            watch.clone(),
-                                                            base_reporter.clone(),
-                                                            tui_ctrl.clone(),
-                                                            None,
-                                                        )
-                                                    })
-                                                })
-                                        }
+                                        Some(raw) => name_clash::admit(
+                                            raw,
+                                            source_urls,
+                                            nvidia_given,
+                                            reporter.as_ref(),
+                                        )
+                                        .and_then(|req| {
+                                            catch_panic(|| {
+                                                cmd_build(
+                                                    &req.name,
+                                                    None,
+                                                    project,
+                                                    work_dir,
+                                                    state_root,
+                                                    rpms_dir,
+                                                    distro,
+                                                    arch,
+                                                    max_attempts,
+                                                    budget_usd,
+                                                    None,
+                                                    false, // force: reuse anything already built
+                                                    false, // regen
+                                                    no_agent,
+                                                    sem.clone(),
+                                                    false, // sweep
+                                                    req.repo,
+                                                    source_urls.clone(),
+                                                    python_flavors.clone(),
+                                                    run_dir,
+                                                    watch.clone(),
+                                                    base_reporter.clone(),
+                                                    tui_ctrl.clone(),
+                                                    None,
+                                                    req.pypi.then(|| raw.clone()),
+                                                )
+                                            })
+                                        }),
                                     };
                                     reporter.report(&match &r {
                                         Ok(()) => {
@@ -504,6 +502,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                             base_reporter.clone(),
                             tui_ctrl.clone(),
                             None,
+                            name_clash::root_text(&name, pypi),
                         )
                     });
                     // The TUI stays open after the root build until it finds

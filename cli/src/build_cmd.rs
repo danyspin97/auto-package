@@ -65,6 +65,9 @@ pub(crate) fn cmd_build(
     // Set by `update`, which builds in a branch project; `None` for
     // every other command.
     branch: Option<&update_project::BranchBuild>,
+    // The text a TUI request was typed as, when it is not the name (`pypi:foo`).
+    // It is the row's origin, which a retry resends.
+    request_text: Option<String>,
 ) -> color_eyre::Result<()> {
     // Reporter for events belonging to a single package: still delivered to
     // jsonl/memory like `reporter`, but tagged so the TUI can attribute
@@ -87,7 +90,10 @@ pub(crate) fn cmd_build(
     };
     // The name this build was requested under, before discovery below may
     // turn it into a repository. A TUI retry resends it (see `tui_ctrl`).
-    let request_name = source_repo.clone().unwrap_or_else(|| name.to_string());
+    let request_name = source_repo
+        .clone()
+        .or(request_text)
+        .unwrap_or_else(|| name.to_string());
     // Resolve the version if it was not pinned. A repository has no package
     // index behind it, so "latest" comes from the forge's own release list.
     let pinned_version = version.map(str::to_string);

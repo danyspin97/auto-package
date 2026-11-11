@@ -158,6 +158,7 @@ pub(super) fn resolve_dependency_config(
     // A C/C++ library (reported as `lib<x>-devel`, `pkgconfig(x)`, a soname) is
     // never looked up on PyPI: a PyPI project that happens to share its name is
     // not it, and would be packaged as `python-<x>`.
+    // A Python parent's dependency stays PyPI-first, unchecked: not a user's bare name.
     let parent_is_python = is_python_parent(&config.rpm_name, native, config.unknown_build_system);
 
     // `--nvidia-redist`: a CUDA component is NVIDIA's archive at the version of

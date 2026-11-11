@@ -165,6 +165,37 @@ pub(crate) fn check(name: &str, reporter: &dyn Reporter) -> color_eyre::Result<(
     )))
 }
 
+/// A TUI request as the run admits it: read, its name validated, and checked
+/// for a clash under the same gate as `build`. `pypi:<name>` is not checked.
+pub(crate) fn admit(
+    raw: &str,
+    source_urls: &ap_build::sources::SourceMap,
+    nvidia: bool,
+    reporter: &dyn Reporter,
+) -> color_eyre::Result<Request> {
+    let req = parse_request(raw).map_err(|e| color_eyre::eyre::eyre!(e))?;
+    crate::validate_package_name(&req.name).map_err(|e| color_eyre::eyre::eyre!(e))?;
+    let mapped = source_urls.get(&req.name).is_some();
+    if !req.pypi && applies(&req.name, req.repo.is_some(), nvidia, mapped) {
+        check(&req.name, reporter)?;
+    }
+    Ok(req)
+}
+
+/// The package a request names, for matching it to a failure: `pypi:<name>`,
+/// a repository URL and a bare name of the same package give the same name.
+pub(crate) fn requested_name(text: &str) -> String {
+    parse_request(text)
+        .map(|r| r.name)
+        .unwrap_or_else(|_| text.to_string())
+}
+
+/// The origin of a root build given as `pypi:<name>`: a retry of its row sends
+/// the same text, so the PyPI choice survives. None for any other root.
+pub(crate) fn root_text(name: &str, pypi: bool) -> Option<String> {
+    pypi.then(|| format!("pypi:{name}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +425,21 @@ mod tests {
     #[test]
     fn the_stripped_pypi_name_is_a_valid_package_name() {
         assert!(crate::validate_package_name(&request("pypi:jay").name).is_ok());
+    }
+
+    #[test]
+    fn a_request_names_its_package_under_any_spelling() {
+        assert_eq!(requested_name("PYPI:jay"), "jay");
+        assert_eq!(requested_name("jay"), "jay");
+        assert_eq!(requested_name("https://github.com/mahkoh/jay.git"), "jay");
+    }
+
+    #[test]
+    fn the_root_text_of_a_pypi_build_is_read_back_as_pypi() {
+        assert_eq!(root_text("jay", true).as_deref(), Some("pypi:jay"));
+        assert_eq!(root_text("jay", false), None);
+        let r = request(&root_text("jay", true).unwrap());
+        assert!(r.pypi && r.name == "jay" && r.repo.is_none());
     }
 
     #[test]
