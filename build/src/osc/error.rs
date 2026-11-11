@@ -1,29 +1,9 @@
 //! Error classification of OBS output: the error type, the transient and not-found
-//! tests of its text, and the host macro warning.
+//! tests of its text.
 
 use super::*;
 use crate::osc::checkout::*;
 use crate::osc::query::*;
-
-/// Fired at most once per process the first time `rpmspec --parse` is
-/// invoked, surfacing the host-vs-target-repo macro-mismatch gap. It only
-/// tells the user to treat a passing `rpmspec` as a cheap syntax check, not
-/// as a reproduction of what the OBS worker will do.
-pub(super) fn emit_host_macro_warning(emit: Emit<'_>) {
-    use std::sync::Once;
-    static WARNED: Once = Once::new();
-    WARNED.call_once(|| {
-        emit.reporter.report(&Event::Warning {
-            step: emit.step,
-            message: "`rpmspec --parse` validates specs using host RPM macros, not \
-                 the target OBS build repo's macros — a clean parse here does \
-                 not guarantee the OBS worker will see the same expansions \
-                 (e.g. `%python3_sitelib`, `%python_module`, `%suse_version`). \
-                 Treat it as a syntax check, not a reproduction."
-                .to_string(),
-        });
-    });
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

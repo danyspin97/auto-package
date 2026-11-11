@@ -144,16 +144,13 @@ pub(super) fn sandbox_spec_dir(spec_path: &Path, cwd: &Path) -> PathBuf {
 /// the OBS build worker if the host's macro set diverges from the target
 /// distro's — `%python3_sitelib`, `%python_module`, `%suse_version` and the
 /// like are all host-local here. The agent still relies on this as a cheap
-/// pre-flight syntax check; the one-shot [`emit_host_macro_warning`] call
-/// below surfaces the gap to the user. A durable fix would require
-/// containerized validation against the target repo's rpm-config.
+/// pre-flight syntax check. A durable fix would require containerized
+/// validation against the target repo's rpm-config.
 ///
 /// Expanding a spec can run code (`%(...)`, `%{lua:...}`), so it runs inside
 /// bubblewrap when that works. Without a sandbox, a spec containing such a
 /// macro is refused rather than expanded on the host.
 pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> {
-    emit_host_macro_warning(emit);
-
     let spec = spec_path.to_string_lossy().into_owned();
     let out = if rpmspec_sandbox_works() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
