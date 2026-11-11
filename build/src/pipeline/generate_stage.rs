@@ -116,7 +116,14 @@ pub(super) fn generate_spec_stage(
                     carried_from = old_version.clone();
                     Ok(res)
                 }
-                Err(why) => {
+                Err(err) => {
+                    // A machine that lacks a tool the carry runs ends the package,
+                    // rather than regenerating a recipe for it.
+                    if let Some(remedy) = err.remedy {
+                        step.finish(StepOutcome::Failed);
+                        return Err(ctx.failed_remedy(err.why, remedy));
+                    }
+                    let why = err.why;
                     if let Err(msg) = unknown_gate(Some(Err(&why))) {
                         step.finish(StepOutcome::Failed);
                         return Err(ctx.failed(msg));
@@ -397,10 +404,10 @@ pub(super) fn osc_service_stage(
             let service_xml = render_service_file(repo_url, &config.version, &config.pkg_name);
             let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
                 .map_err(|e| {
-                    (
-                        false,
-                        format!("writing _service failed for {}: {e}", config.pkg_name),
-                    )
+                    ctx.failed(format!(
+                        "writing _service failed for {}: {e}",
+                        config.pkg_name
+                    ))
                 })
                 .and_then(|()| {
                     run_service_with_retries(
@@ -409,11 +416,11 @@ pub(super) fn osc_service_stage(
                         obs_baseline_dir(config).ok().as_deref(),
                         Emit::new(reporter, step.id),
                     )
-                    .map_err(|e| (e.is_transient(), e.to_string()))
+                    .map_err(|e| ctx.failed_osc_text(&e))
                 });
 
-            if let Err((transient, reason)) = result {
-                return Err(ctx.failed_text(transient, reason));
+            if let Err(failed) = result {
+                return Err(failed);
             }
             step.finish(StepOutcome::Ok);
         } else {
@@ -501,10 +508,10 @@ pub(super) fn osc_service_stage(
                 render_maturin_service_file(&normalized, &extra_manifests, locked, root_manifest);
             let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
                 .map_err(|e| {
-                    (
-                        false,
-                        format!("writing _service failed for {}: {e}", config.pkg_name),
-                    )
+                    ctx.failed(format!(
+                        "writing _service failed for {}: {e}",
+                        config.pkg_name
+                    ))
                 })
                 .and_then(|()| {
                     run_service_with_retries(
@@ -513,11 +520,11 @@ pub(super) fn osc_service_stage(
                         obs_baseline_dir(config).ok().as_deref(),
                         Emit::new(reporter, step.id),
                     )
-                    .map_err(|e| (e.is_transient(), e.to_string()))
+                    .map_err(|e| ctx.failed_osc_text(&e))
                 });
 
-            if let Err((transient, reason)) = result {
-                return Err(ctx.failed_text(transient, reason));
+            if let Err(failed) = result {
+                return Err(failed);
             }
             step.finish(StepOutcome::Ok);
         } else {

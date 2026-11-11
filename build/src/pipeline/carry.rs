@@ -1,6 +1,7 @@
 //! Carrying a spec forward from the previous version: the repo and service forms.
 
 use super::*;
+use crate::pipeline::carry_error::*;
 use crate::pipeline::prompt_notes::*;
 use crate::pipeline::sdist_name::saved_sdist_name;
 use crate::pipeline::service_source::*;
@@ -17,7 +18,7 @@ pub(super) fn carry_forward_spec(
     spec_path: &Path,
     step: &StepDir,
     reporter: &dyn Reporter,
-) -> Result<GenSpecResult, String> {
+) -> Result<GenSpecResult, CarryError> {
     use ap_ecosystem::{pypi, sdist};
 
     if config.source_repo.is_some() {
@@ -42,7 +43,7 @@ pub(super) fn carry_forward_spec(
         .map_err(|e| format!("downloading {}: {e}", release.sdist.url))?;
     let info = sdist::inspect(&tarball).map_err(|e| format!("inspecting the sdist: {e}"))?;
     if !info.subprojects.is_empty() {
-        return Err("the sdist holds several projects".to_string());
+        return Err("the sdist holds several projects".into());
     }
 
     // The old source goes once the new spec is written: the spec names the new
@@ -158,7 +159,7 @@ fn carry_forward_repo_spec(
     spec_path: &Path,
     step: &StepDir,
     reporter: &dyn Reporter,
-) -> Result<GenSpecResult, String> {
+) -> Result<GenSpecResult, CarryError> {
     let old = std::fs::read_to_string(spec_path).map_err(|e| format!("reading the spec: {e}"))?;
     let mut bumped =
         crate::spec::set_version_and_tag(&old, &config.version, config.upstream_tag.as_deref())?;
@@ -238,7 +239,7 @@ fn carry_forward_repo_spec(
     }
     let sources = crate::spec::expanded_sources(&bumped);
     if sources.is_empty() {
-        return Err("the spec's sources have no web address to download from".to_string());
+        return Err("the spec's sources have no web address to download from".into());
     }
     // Only a source whose address changes with the version is fetched again;
     // the others (a keyring, a rpmlintrc) stay as they are.
@@ -281,7 +282,7 @@ fn carry_forward_repo_spec(
         }
     }
     if fetched.is_empty() {
-        return Err("no source of the spec changes with the version".to_string());
+        return Err("no source of the spec changes with the version".into());
     }
     let top = fetched.iter().find_map(|path| {
         ap_ecosystem::sdist::inspect(path)
@@ -329,7 +330,7 @@ fn carry_forward_service_spec(
     step: &StepDir,
     bumped: String,
     reporter: &dyn Reporter,
-) -> Result<GenSpecResult, String> {
+) -> Result<GenSpecResult, CarryError> {
     let service_path = checkout_dir.join("_service");
     let service =
         std::fs::read_to_string(&service_path).map_err(|e| format!("reading _service: {e}"))?;
@@ -367,7 +368,7 @@ fn carry_forward_service_spec(
         let _ = std::fs::write(&service_path, &service);
         let _ = std::fs::write(spec_path, &old_spec);
     };
-    let result = (|| -> Result<(String, PathBuf), String> {
+    let result = (|| -> Result<(String, PathBuf), CarryError> {
         ap_core::fsx::write_atomic(&service_path, &moved)
             .map_err(|e| format!("writing _service: {e}"))?;
         ap_core::fsx::write_atomic(spec_path, &bumped)
@@ -378,7 +379,7 @@ fn carry_forward_service_spec(
             obs_baseline_dir(config).ok().as_deref(),
             Emit::quiet(),
         )
-        .map_err(|e| format!("running the _service: {e}"))?;
+        .map_err(|e| CarryError::service(&e))?;
         // The service writes `Version:` from the tarball (`set_version`) when it
         // is enabled; the version asked for is what the spec must say.
         let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| bumped.clone());

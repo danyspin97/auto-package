@@ -162,6 +162,8 @@ impl PipelineConfig {
 mod failure_kind;
 pub use failure_kind::*;
 #[cfg(test)]
+mod failed_osc_tests;
+#[cfg(test)]
 mod failure_kind_tests;
 
 #[derive(Debug)]
@@ -419,6 +421,7 @@ pub use archive::*;
 mod gen_spec;
 use gen_spec::*;
 mod carry;
+mod carry_error;
 mod carry_fallback;
 #[cfg(test)]
 mod commit_gate_tests;

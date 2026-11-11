@@ -8,7 +8,7 @@ const SPEC: &str =
     "Name: foo\nVersion: 1.0\nPatch0: a.patch\nPatch1: b.mbox\n\n%prep\n%autosetup -p1\n";
 
 /// A checkout with `SPEC`, `a.patch` and `b.mbox`, and a context over it.
-fn with_ctx<R>(f: impl FnOnce(&RunCtx, &Path) -> R) -> R {
+pub(super) fn with_ctx<R>(f: impl FnOnce(&RunCtx, &Path) -> R) -> R {
     let root = tempfile::tempdir().unwrap();
     let work = root.path().join("work");
     let state_root = work.join("state");
