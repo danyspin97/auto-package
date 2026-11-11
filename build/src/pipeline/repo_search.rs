@@ -10,15 +10,8 @@ pub(super) fn is_nvidia_package_name(lower: &str) -> bool {
         || lower == "nvidia"
 }
 
-/// Source repository candidates for a package with no (or no usable) PyPI
-/// entry.
-pub struct RepoCandidates {
-    /// Confirmed to exist via `verify_repo_exists` — safe to build from
-    /// automatically without a human/agent confirming it first.
-    pub verified: Vec<String>,
-    /// Unverified guesses, surfaced only for a human/agent to check manually.
-    pub guessed: Vec<String>,
-}
+mod candidates;
+pub use candidates::RepoCandidates;
 
 /// Find candidate source repositories for a package.
 ///
@@ -49,6 +42,7 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
     let lower = pkg_name.to_lowercase();
     let mut candidates = Vec::new();
     let mut verified_candidates = Vec::new();
+    let mut search_hits = Vec::new();
     let mut distro_evidence: Option<crate::discovery::DistroInfo> = None;
 
     // Known package mappings for special cases
@@ -171,6 +165,7 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
                 .unwrap_or_else(|e| std::panic::resume_unwind(e));
             (github, forges)
         });
+        search_hits.extend(github.iter().flatten().cloned());
         if let Some(urls) = github {
             for url in urls {
                 if !verified_candidates.contains(&url) && !candidates.contains(&url) {
@@ -190,6 +185,7 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
                 verified_candidates.insert(0, url);
             }
         }
+        search_hits.extend(others.iter().cloned());
         for url in &others {
             if !verified_candidates.contains(url) && !candidates.contains(url) {
                 ap_core::diag!("  found via forge search: {}", url);
@@ -295,6 +291,11 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
     let (trusted, unvetted): (Vec<String>, Vec<String>) =
         verified_candidates.into_iter().partition(|u| vouched(u));
     let mut verified_candidates = trusted;
+    let unvouched_search_hits = unvetted
+        .iter()
+        .filter(|u| search_hits.contains(u))
+        .cloned()
+        .collect();
     for url in unvetted {
         ap_core::diag!("  not used automatically (not the project's recorded upstream): {url}");
         if !candidates.contains(&url) {
@@ -359,6 +360,7 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
     RepoCandidates {
         verified: verified_candidates,
         guessed: candidates,
+        unvouched_search_hits,
     }
 }
 
