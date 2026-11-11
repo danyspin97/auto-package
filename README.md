@@ -71,6 +71,7 @@ press `Y` or type the name. The agent cannot read or write the file.
 ### TUI Controls
 
 - `↑`/`↓` or `j`/`k`: Select a package to view its detail pane
+- `n` or `+`: Add a package to this run. The prompt takes a name, `pypi:<name>` or a repository URL. A bare name gets the clash check of `build` (see `pypi:<name>` under Options). When it refuses, no row is added: the TUI log shows the message as a warning, and the run exits with it as an error once the TUI closes. To go on, add `pypi:<name>` (the PyPI project) or the repository's URL instead. `pypi:<name>` skips the check, and a retry of a row keeps that choice.
 - `q` or `Esc`: Exit the TUI
 - `Ctrl+C`: Force quit
 
@@ -108,6 +109,16 @@ auto-package build https://github.com/BurntSushi/ripgrep --project home:user:rus
 - `--no-agent`: Build only, never call the AI model
 - `--unsafe-resolve`: Run pip without its sandbox (see the threat model)
 - `--source-url [PKG=]URL`: Source repository for a wheel-only package; `PKG=wheel` repackages the upstream wheel instead of building from source (e.g. `--source-url torch=wheel`), replacing an existing source recipe
+- `pypi:<name>` (on the command line, `build pypi:<name>`, or typed in the TUI): build the PyPI project of that name, without the clash check. Without it, `build <name>` stops when PyPI and a source repository of the same name both claim the name, and PyPI's source URL does not point at that repository. The refusal lists both and how to go on:
+
+  ```
+  `<name>` is ambiguous. It could be:
+    - the PyPI project <name> <version> (its source: <url>)
+    - the repository https://github.com/<owner>/<name>
+  Re-run as `build pypi:<name>` to build the PyPI project, or give the repository as the name (`build https://github.com/<owner>/<name>`), or in the TUI type `pypi:<name>` instead.
+  ```
+
+  So either build `pypi:<name>`, or give the repository's URL as the name. No check runs for a repository URL or `--url`, for a name that has a source in `sources.toml` or from `--source-url`, for an NVIDIA option or an NVIDIA-named package. `pypi:<name>` cannot be combined with `--url`.
 - `--force`: Rebuild even if already built
 - `--regen`: Regenerate spec from scratch
 - `--cleanup`: Delete rebuildable caches (`rpms/`, `state/<pkg>/sdist`) before building and print the bytes freed. Never deletes `runs/`, `state/`, `ledger.json` or osc checkouts, and refuses (listing them) when a checkout has uncommitted changes.
