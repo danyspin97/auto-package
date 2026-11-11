@@ -174,6 +174,7 @@ pub(super) fn unknowns(ex: &Explanation, has_state: bool) -> Vec<String> {
         "The agent's reasoning and evidence are the model's own summary of its turn, not a proof of what it intended or of why the build then behaved as it did.".to_string(),
         "No per-attempt changelog text is recorded: the changelog shown is the checkout's newest entry as it is now.".to_string(),
         "The cost counts the model turns the events report; time and cost of OBS builds are not included.".to_string(),
+        "`rpmspec --parse` validates specs using the host's RPM macros, not the OBS build repo's: a clean parse is a syntax check, not a reproduction of the OBS worker's expansions (e.g. `%python3_sitelib`, `%python_module`, `%suse_version`).".to_string(),
     ];
     if ex.run.is_none() {
         u.push("No run touched this package: only state and notes are shown.".into());

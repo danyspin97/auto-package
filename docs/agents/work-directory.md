@@ -22,6 +22,11 @@ in the run). Without a package, `auto-package explain --run <id>` lists the trie
 of every package of the run. In the TUI, `e` on a row shows the same report.
 Use the recipes below only for what it does not answer.
 
+`rpmspec --parse` validates specs with the host's RPM macros, not the OBS build
+repo's. A clean parse is therefore a syntax check, not a reproduction of the OBS
+worker's expansions: `%python3_sitelib`, `%python_module` and `%suse_version`
+may expand differently there.
+
 ## Layout
 
 `--work-dir` (default `ap-work`) holds one directory per OBS project and arch,
