@@ -8,6 +8,8 @@
 
 use owo_colors::{OwoColorize, Stream::Stderr};
 
+use super::style::{Role, paint};
+
 /// Whether stderr takes colour: a terminal, `NO_COLOR` unset, and
 /// `CLICOLOR_FORCE` honoured (owo-colors' rule for every stderr line).
 pub fn stderr_colour() -> bool {
@@ -23,15 +25,15 @@ pub fn eprint_coloured(line: &str) {
 }
 
 /// Leading labels and their SGR codes (bold colour on, bold and colour off).
-const LABELS: [(&str, &str); 4] = [
-    ("note:", "1;36"),
-    ("info:", "1;34"),
-    ("warning:", "1;33"),
-    ("error:", "1;31"),
-];
+/// `error:` has the failure role instead (see [`colour_line`]).
+const LABELS: [(&str, &str); 3] = [("note:", "1;36"), ("info:", "1;34"), ("warning:", "1;33")];
 
-/// Sub-step verbs at the start of a line, and their SGR codes.
-const VERBS: [(&str, &str); 3] = [("searching", "2"), ("checking", "2"), ("found", "32")];
+/// Sub-step verbs at the start of a line, and their roles.
+const VERBS: [(&str, Role); 3] = [
+    ("searching", Role::Dim),
+    ("checking", Role::Dim),
+    ("found", Role::Success),
+];
 
 /// Phrases that mark a problem or a skipped step, wherever they occur.
 const YELLOW_PHRASES: [&str; 3] = ["not used automatically", "rate-limited", "failed"];
@@ -56,6 +58,13 @@ fn colour_line(line: &str) -> String {
     let body = line.trim_start_matches(' ');
     let indent = &line[..line.len() - body.len()];
     if indent.is_empty() {
+        if let Some(rest) = body.strip_prefix("error:").filter(|r| r.starts_with(' ')) {
+            return format!(
+                "{}{}",
+                paint("error:", Role::Failure, true),
+                inline(rest, None)
+            );
+        }
         for (label, sgr) in LABELS {
             if let Some(rest) = body.strip_prefix(label) {
                 if rest.starts_with(' ') {
@@ -64,29 +73,23 @@ fn colour_line(line: &str) -> String {
             }
         }
     }
-    for (mark, sgr) in [("✓", "32"), ("✗", "31")] {
-        if body.starts_with(mark) {
-            return format!("{indent}\x1b[{sgr}m{}\x1b[39m", inline(body, Some(sgr)));
-        }
+    if body.starts_with('✓') {
+        return format!(
+            "{indent}{}",
+            paint(&inline(body, Some("32")), Role::Success, true)
+        );
+    }
+    if body.starts_with('✗') {
+        return format!("{indent}\x1b[31m{}\x1b[39m", inline(body, Some("31")));
     }
     let mut verb_out = None;
-    for (verb, sgr) in VERBS {
+    for (verb, role) in VERBS {
         if let Some(rest) = word_rest(body, verb) {
-            verb_out = Some(format!(
-                "{}{}",
-                wrap(verb, sgr, off_for(sgr)),
-                inline(rest, None)
-            ));
+            verb_out = Some(format!("{}{}", paint(verb, role, true), inline(rest, None)));
             break;
         }
     }
     format!("{indent}{}", verb_out.unwrap_or_else(|| inline(body, None)))
-}
-
-/// The SGR code that ends `sgr` again: bold and dim end with 22, colours
-/// with 39 (default foreground).
-fn off_for(sgr: &str) -> &'static str {
-    if sgr == "2" { "22" } else { "39" }
 }
 
 /// `rest` when `text` starts with the word `word` (followed by a space, a
@@ -103,7 +106,6 @@ fn word_rest<'a>(text: &'a str, word: &str) -> Option<&'a str> {
 /// `text` with URLs underlined and the problem phrases in yellow. Inside a
 /// coloured line (`base`), a coloured span ends by returning to that colour.
 fn inline(text: &str, base: Option<&str>) -> String {
-    let close_fg = base.unwrap_or("39");
     let mut out = String::with_capacity(text.len() + 16);
     let mut plain = 0;
     let mut i = 0;
@@ -111,13 +113,13 @@ fn inline(text: &str, base: Option<&str>) -> String {
         match span_at(text, i) {
             Some((len, Span::Url)) => {
                 out.push_str(&text[plain..i]);
-                out.push_str(&wrap(&text[i..i + len], "4", "24"));
+                out.push_str(&paint(&text[i..i + len], Role::Url, true));
                 i += len;
                 plain = i;
             }
             Some((len, Span::Yellow)) => {
                 out.push_str(&text[plain..i]);
-                out.push_str(&wrap(&text[i..i + len], "33", close_fg));
+                out.push_str(&yellow(&text[i..i + len], base));
                 i += len;
                 plain = i;
             }
@@ -131,6 +133,15 @@ fn inline(text: &str, base: Option<&str>) -> String {
 enum Span {
     Url,
     Yellow,
+}
+
+/// A problem phrase: warning-coloured, or closed with the enclosing colour
+/// (`base`) when it is inside a coloured line.
+fn yellow(phrase: &str, base: Option<&str>) -> String {
+    match base {
+        None => paint(phrase, Role::Warning, true),
+        Some(close) => wrap(phrase, "33", close),
+    }
 }
 
 /// A URL or a problem phrase that starts at byte `i` of `text`, and its length.
