@@ -165,11 +165,8 @@ fn span_at(text: &str, i: usize) -> Option<(usize, Span)> {
     }
     if at_word_start {
         for phrase in YELLOW_PHRASES {
-            if rest.starts_with(phrase) {
-                let ends_word = rest[phrase.len()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| !c.is_alphanumeric());
+            if let Some(after) = rest.strip_prefix(phrase) {
+                let ends_word = after.chars().next().is_none_or(|c| !c.is_alphanumeric());
                 if ends_word {
                     return Some((phrase.len(), Span::Yellow));
                 }
