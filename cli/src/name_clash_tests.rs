@@ -381,7 +381,7 @@ fn the_pypi_prefix_is_read_without_regard_to_case() {
         assert_eq!((r.name.as_str(), r.pypi), ("Foo", true), "{raw}");
     }
     // Not a prefix at all: a bare name that does not start with `pypi:`.
-    assert_eq!(request("pypí:x").pypi, false);
+    assert!(!request("pypí:x").pypi);
 }
 
 #[test]
