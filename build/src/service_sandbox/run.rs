@@ -122,6 +122,7 @@ pub(crate) fn run_services(
             scratch: scratch.path(),
             proxy_dir: proxy.dir(),
             extra_env: &identity,
+            ro_binds: &[],
             hosts_file: &hosts_file,
             tunnels: &map,
         };

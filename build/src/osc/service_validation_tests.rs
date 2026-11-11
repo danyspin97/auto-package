@@ -329,6 +329,7 @@ fn awww_helper_runs_through_the_sandbox_with_its_argv() {
         scratch: Path::new("/work/awww/.ap-service-x"),
         proxy_dir: Path::new("/tmp/ap-service-proxy-x"),
         extra_env: &[],
+        ro_binds: &[],
         hosts_file: Path::new("/tmp/ap-service-proxy-x/hosts"),
         tunnels: &[],
     };

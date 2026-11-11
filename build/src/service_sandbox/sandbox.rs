@@ -10,6 +10,8 @@ pub(crate) struct Profile<'a> {
     pub proxy_dir: &'a Path,
     /// More variables (the changelog identity).
     pub extra_env: &'a [(String, String)],
+    /// Host directories bound read-only at their own path, after the checkout.
+    pub ro_binds: &'a [PathBuf],
     /// The hosts file bound over the sandbox's `/etc/hosts`.
     pub hosts_file: &'a Path,
     /// The address each mapped host name is reached at, as in `hosts_file`
@@ -130,12 +132,14 @@ pub(crate) fn bwrap_args(p: &Profile<'_>, program: &[String]) -> Result<Vec<Stri
             "--ro-bind",
             proxy_dir,
             SANDBOX_PROXY_DIR,
-            "--chdir",
-            checkout,
-            "--clearenv",
         ]
         .map(String::from),
     );
+    for dir in p.ro_binds {
+        let dir = utf8(dir)?;
+        args.extend(["--ro-bind", dir, dir].map(String::from));
+    }
+    args.extend(["--chdir", checkout, "--clearenv"].map(String::from));
     args.extend(dev_args());
     let hosts = utf8(p.hosts_file)?;
     args.extend(["--ro-bind", hosts, "/etc/hosts"].map(String::from));

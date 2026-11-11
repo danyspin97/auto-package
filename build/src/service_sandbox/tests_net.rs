@@ -28,6 +28,7 @@ fn the_sandbox_dev_has_only_the_device_nodes_it_needs() {
         scratch: Path::new("/work/proj/pkg/.ap-service-x"),
         proxy_dir: Path::new("/tmp/ap-service-proxy-x"),
         extra_env: &[],
+        ro_binds: &[],
         hosts_file: Path::new("/tmp/ap-service-proxy-x/hosts"),
         tunnels: &[],
     };
@@ -55,6 +56,7 @@ pub(super) fn run_sandboxed(program: &[&str]) -> std::process::Output {
         scratch: &scratch,
         proxy_dir: proxy.dir(),
         extra_env: &[],
+        ro_binds: &[],
         hosts_file: &hosts,
         tunnels: &[],
     };

@@ -222,6 +222,7 @@ fn profile_args(env: &[(String, String)]) -> Vec<String> {
         scratch: Path::new("/work/proj/pkg/.ap-service-x"),
         proxy_dir: Path::new("/tmp/ap-service-proxy-x"),
         extra_env: env,
+        ro_binds: &[],
         hosts_file: Path::new("/tmp/ap-service-proxy-x/hosts"),
         tunnels: &[],
     };
@@ -323,6 +324,7 @@ fn extra_env_is_appended_and_relative_checkouts_are_refused() {
         scratch: Path::new("pkg/s"),
         proxy_dir: Path::new("/tmp/p"),
         extra_env: &[],
+        ro_binds: &[],
         hosts_file: Path::new("/tmp/p/hosts"),
         tunnels: &[],
     };
@@ -413,6 +415,7 @@ fn the_sandbox_isolates_home_bus_network_and_osc_metadata() {
         scratch: &scratch,
         proxy_dir: proxy.dir(),
         extra_env: &[],
+        ro_binds: &[],
         hosts_file: &hosts,
         tunnels: &[],
     };
@@ -517,6 +520,7 @@ fn probe_services_fetch_through_the_proxy() {
             scratch: &scratch,
             proxy_dir: proxy.dir(),
             extra_env: &[],
+            ro_binds: &[],
             hosts_file: &hosts,
             tunnels: &[],
         };

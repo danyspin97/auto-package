@@ -89,6 +89,7 @@ impl GitRun for SandboxGit {
             scratch: &scratch,
             proxy_dir: proxy.dir(),
             extra_env: &extra,
+            ro_binds: &[],
             hosts_file: &hosts_file,
             tunnels: &map,
         };

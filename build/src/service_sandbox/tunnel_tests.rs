@@ -159,6 +159,7 @@ fn run_mapped(map: &[(String, String)], program: &[&str]) -> (std::process::Outp
         scratch: &scratch,
         proxy_dir: proxy.dir(),
         extra_env: &[],
+        ro_binds: &[],
         hosts_file: &hosts,
         tunnels: map,
     };

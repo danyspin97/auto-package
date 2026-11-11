@@ -40,6 +40,9 @@ mod proxy;
 #[cfg(test)]
 mod proxy_slots_tests;
 mod run;
+mod rustup_home;
+#[cfg(test)]
+mod rustup_home_tests;
 mod sandbox;
 #[cfg(test)]
 mod tests;
@@ -52,5 +55,6 @@ mod tunnel_tests;
 pub(crate) use allowlist::*;
 pub(crate) use proxy::*;
 pub(crate) use run::*;
+pub(crate) use rustup_home::*;
 pub(crate) use sandbox::*;
 pub(crate) use tunnel::*;
