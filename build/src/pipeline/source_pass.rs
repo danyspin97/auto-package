@@ -39,6 +39,13 @@ pub(super) fn source_pass_needed(service: &str, tarball_present: bool, redist: b
     !redist && !tarball_present && makes_source_by_service(service)
 }
 
+/// Whether [`run_source_pass`] runs the checkout's `_service` for `config`.
+pub(super) fn pass_will_run(checkout_dir: &Path, config: &PipelineConfig) -> bool {
+    let tarball_present = find_tarball(checkout_dir, &config.version).is_some();
+    let redist = crate::redist::is_redist_package(&config.rpm_name);
+    source_pass_needed(&checkout_service(checkout_dir), tarball_present, redist)
+}
+
 /// Whether the `_service` text `service` makes the source when it runs: a
 /// `tar_scm` or `cargo_vendor` with a `url` (see `source_service`), or a
 /// `download_files`. An `obs_scm` source is made at build time instead.
@@ -70,10 +77,7 @@ pub(super) fn run_source_pass(
         ..
     } = ctx;
     let reporter = *reporter;
-    let service = checkout_service(checkout_dir);
-    let tarball_present = find_tarball(checkout_dir, &ctx.config.version).is_some();
-    let redist = crate::redist::is_redist_package(&ctx.config.rpm_name);
-    if !source_pass_needed(&service, tarball_present, redist) {
+    if !pass_will_run(checkout_dir, ctx.config) {
         return Ok(SourcePass::NotRun);
     }
 

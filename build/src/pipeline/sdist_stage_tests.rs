@@ -5,7 +5,7 @@ use crate::pipeline::sdist_stage::{
     unpacked_top_level,
 };
 use crate::pipeline::source_pass::{
-    NoTarball, SourcePass, classify_no_tarball, source_pass_needed,
+    NoTarball, SourcePass, classify_no_tarball, pass_will_run, source_pass_needed,
 };
 
 /// Discards every event.
@@ -577,5 +577,21 @@ fn source_archives_finds_every_archive_spelling_but_no_bundle() {
             "foo-1.0.tzst",
             "foo-1.0.zip"
         ]
+    );
+}
+
+#[test]
+fn the_pass_will_run_for_a_service_without_its_tarball() {
+    let tar_scm = "<services><service name=\"tar_scm\"/></services>\n";
+    with_checkout(None, "AMQPStorm-1.0", tar_scm, |ctx, _| {
+        assert!(pass_will_run(&ctx.checkout_dir, ctx.config));
+    });
+    with_checkout(
+        Some(&["amqpstorm-1.0/x"]),
+        "AMQPStorm-1.0",
+        tar_scm,
+        |ctx, _| {
+            assert!(!pass_will_run(&ctx.checkout_dir, ctx.config));
+        },
     );
 }

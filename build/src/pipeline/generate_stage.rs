@@ -13,6 +13,7 @@ use crate::pipeline::render::*;
 use crate::pipeline::rpm_deps::*;
 use crate::pipeline::sdist_wheel::*;
 use crate::pipeline::sibling_specs;
+use crate::pipeline::source_pass::pass_will_run;
 use crate::pipeline::tarball::*;
 use crate::pipeline::unknown_build::*;
 
@@ -416,7 +417,14 @@ pub(super) fn osc_service_stage(
             }
             step.finish(StepOutcome::Ok);
         } else {
-            step_attempts.skip(reporter, StepKind::OscService, SkipReason::ServiceUpToDate);
+            // The source pass runs an existing `_service` that makes the source
+            // (see `source_pass`), before the sdist is unpacked.
+            let reason = if pass_will_run(checkout_dir, config) {
+                SkipReason::Other("the existing _service runs before unpacking".to_string())
+            } else {
+                SkipReason::ServiceUpToDate
+            };
+            step_attempts.skip(reporter, StepKind::OscService, reason);
         }
     } else if is_rust && !is_maturin {
         // Without a repository there is nothing for `tar_scm` to fetch; say so
