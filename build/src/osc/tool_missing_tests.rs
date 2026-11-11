@@ -165,3 +165,30 @@ fn an_unset_toolchain_carries_a_same_command_remedy_and_is_not_transient() {
         "no default toolchain is configured for cargo"
     );
 }
+
+#[test]
+fn a_failed_service_run_with_rustups_text_is_an_unset_toolchain() {
+    let err = super::service::service_run_failed(
+        std::path::Path::new("/co"),
+        1,
+        UNSET_RUSTUP.to_string(),
+    );
+    assert!(matches!(err, Error::ToolchainUnset { tool } if tool == "cargo"));
+}
+
+#[test]
+fn any_other_failed_service_run_keeps_its_text() {
+    let err = super::service::service_run_failed(
+        std::path::Path::new("/co"),
+        3,
+        "service cargo_vendor failed:\nboom".to_string(),
+    );
+    match err {
+        Error::OscFailed { cmd, code, stderr } => {
+            assert_eq!(cmd, "service ra in /co");
+            assert_eq!(code, 3);
+            assert_eq!(stderr, "service cargo_vendor failed:\nboom");
+        }
+        other => panic!("{other}"),
+    }
+}

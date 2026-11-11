@@ -495,17 +495,24 @@ pub fn run_service(
             .filter(|l| !l.starts_with("gpg:") || !l.contains(" aka "))
             .collect::<Vec<_>>()
             .join("\n");
-        if let Some(err) = service_tool_error(&stderr) {
-            return Err(err);
-        }
-        return Err(Error::OscFailed {
-            cmd: format!("service ra in {}", checkout_dir.display()),
-            code: out.code,
-            stderr,
-        });
+        return Err(service_run_failed(checkout_dir, out.code, stderr));
     }
     collapse_generated_changes(checkout_dir, baseline);
     Ok(())
+}
+
+/// The error for a `_service` run that exited with `code` and printed
+/// `stderr`: an unset toolchain when the output says so, else the osc failure
+/// with its text.
+pub fn service_run_failed(checkout_dir: &Path, code: i32, stderr: String) -> Error {
+    if let Some(err) = service_tool_error(&stderr) {
+        return err;
+    }
+    Error::OscFailed {
+        cmd: format!("service ra in {}", checkout_dir.display()),
+        code,
+        stderr,
+    }
 }
 
 /// A `tar_scm` service with `changesgenerate` writes one entry listing every

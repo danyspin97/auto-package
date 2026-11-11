@@ -164,6 +164,9 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
             // Run it before calling the files missing, and keep its error
             // so the agent sees why a download did not happen.
             let mut service_error = None;
+            // A service that failed for the machine (a tool or toolchain it
+            // needs is missing) ends the package below: no agent turn can fix it.
+            let mut environment_error = None;
             // A Source URL with no `_service` at all gets the `download_files` one
             // written here; it is taken away again when it does not fetch, so the
             // checkout is as the agent left it.
@@ -177,6 +180,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                     Emit::new(reporter, validate_step.id),
                 ) {
                     Ok(()) => missing = missing_at_checkout(&expanded, checkout_dir),
+                    Err(e) if e.remedy().is_some() => environment_error = Some(e),
                     Err(e) => {
                         service_error = Some(if generated {
                             format!("a generated `download_files` service failed: {e}")
@@ -190,6 +194,10 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                 }
             }
             if !missing.is_empty() {
+                if let Some(e) = environment_error {
+                    validate_step.finish(StepOutcome::Failed);
+                    return Err(ctx.failed_osc(&e));
+                }
                 let validate_step = validate_step.finish(StepOutcome::Failed);
                 reporter.report(&Event::SpecRejected {
                     step: validate_step.id,

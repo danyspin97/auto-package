@@ -84,3 +84,25 @@ fn the_service_text_path_keeps_a_remedy_and_reads_a_full_disk_as_transient() {
         assert_eq!(remedy, None);
     });
 }
+
+#[test]
+fn a_service_run_with_rustups_text_ends_the_package_as_an_unset_toolchain() {
+    with_ctx(|ctx, _| {
+        let stderr = "Error: Custom { kind: Interrupted, error: \"error: rustup could not \
+            choose a version of cargo to run, because one wasn't specified explicitly, and no \
+            default is configured.\" }"
+            .to_string();
+        let err = osc::service_run_failed(std::path::Path::new("/co"), 1, stderr);
+        let (kind, _, remedy) = outcome(ctx.failed_osc(&err));
+        assert_eq!(kind, FailureKind::Environment);
+        assert_eq!(
+            remedy,
+            Some(ap_core::remedy::Remedy {
+                cause: ap_core::remedy::Cause::ToolchainUnset {
+                    tool: "cargo".into()
+                },
+                retry: ap_core::remedy::Retry::SameCommand,
+            })
+        );
+    });
+}
