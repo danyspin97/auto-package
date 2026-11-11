@@ -78,18 +78,14 @@ pub(super) fn run(args: &ExplainArgs) -> color_eyre::Result<()> {
     }
 }
 
-/// The width and colour of a report on stdout.
+/// The width and colour of a report on stdout, as the shared palette decides
+/// them: the colour switch honours `NO_COLOR` and `CLICOLOR_FORCE`.
 fn terminal_style() -> (usize, bool) {
     use std::io::IsTerminal;
     let tty = std::io::stdout().is_terminal();
-    let width = if tty {
-        crossterm::terminal::size().map_or(100, |(w, _)| w as usize)
-    } else {
-        100
-    };
     (
-        width.clamp(40, 140),
-        tty && std::env::var_os("NO_COLOR").is_none(),
+        ap_core::sink::terminal_width(tty),
+        ap_core::sink::stdout_colour(),
     )
 }
 
