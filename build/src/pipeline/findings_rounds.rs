@@ -160,14 +160,7 @@ pub(super) fn findings_rounds(
             Ok(v) => v,
             Err((e, kind)) => {
                 let why = format!("the findings turn failed: {e}");
-                let verdict = match kind {
-                    FailureKind::NeedsMaintainer => "needs_maintainer",
-                    FailureKind::RateLimited
-                    | FailureKind::AgentUnavailable
-                    | FailureKind::Exhausted => "exhausted",
-                    _ => "failed",
-                };
-                return Err(fs.stop(verdict, kind, why));
+                return Err(fs.stop(turn_failure_verdict(kind), kind, why));
             }
         };
         let roll_back = || {

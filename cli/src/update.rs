@@ -496,4 +496,17 @@ mod tests {
             PackageOutcome::Failed { .. }
         ));
     }
+
+    #[test]
+    fn an_environment_failure_is_a_failed_package_with_its_reason() {
+        let result = PipelineResult::Failed {
+            rpm_name: "lsvpd".into(),
+            reason: "osc is missing".into(),
+            kind: FailureKind::Environment,
+        };
+        assert!(matches!(
+            package_outcome(&result),
+            PackageOutcome::Failed { reason, disk_full: false } if reason == "osc is missing"
+        ));
+    }
 }

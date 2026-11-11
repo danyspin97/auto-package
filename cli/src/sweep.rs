@@ -379,9 +379,10 @@ impl Sweep {
 /// dependent to ask in a later run nor depends on the round count. Other
 /// failures are retried within `max_attempts` rounds, except a spent allowance
 /// or a rate limit, which a repeat would only reproduce, a build OBS does not
-/// make for this arch (excluded or disabled), and a turn rejected
+/// make for this arch (excluded or disabled), a turn rejected
 /// for touching the checkout's metadata or the package's Version, which the
-/// pipeline does not retry.
+/// pipeline does not retry, and an environment failure, which a rerun on this
+/// machine repeats.
 pub(super) fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts: usize) -> bool {
     match kind {
         FailureKind::ConditionUnmet => true,
@@ -391,7 +392,8 @@ pub(super) fn dep_failure_retries(kind: FailureKind, rounds: usize, max_attempts
         | FailureKind::Tampered
         | FailureKind::VersionChanged
         | FailureKind::NoFix
-        | FailureKind::FixDoesNotApply => false,
+        | FailureKind::FixDoesNotApply
+        | FailureKind::Environment => false,
         _ => rounds < max_attempts,
     }
 }

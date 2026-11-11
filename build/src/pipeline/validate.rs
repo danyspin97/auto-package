@@ -466,16 +466,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                         // refusals still fail the package below. Every problem
                         // here is style, so an exhausted ladder is style too.
                         Err(PipelineResult::Failed { reason, kind, .. })
-                            if matches!(
-                                kind,
-                                FailureKind::AgentUnavailable
-                                    | FailureKind::AgentFailed
-                                    | FailureKind::RateLimited
-                                    | FailureKind::Busy
-                                    | FailureKind::Transient
-                                    | FailureKind::DiskFull
-                                    | FailureKind::Exhausted
-                            ) =>
+                            if style_failure_warns(kind) =>
                         {
                             // The ladder memo would refuse a later rebuild of
                             // this spec as spent; a style-only failure must not.

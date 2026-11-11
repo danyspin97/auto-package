@@ -193,6 +193,14 @@ fn a_condition_failure_is_queued_again_in_the_same_run() {
     assert!(!r(K::Excluded, 0, 1));
 }
 
+#[test]
+fn an_environment_failure_is_never_queued_again() {
+    use super::{FailureKind as K, dep_failure_retries as r};
+    assert!(!r(K::Environment, 0, 3));
+    assert!(!r(K::Environment, 0, 1));
+    assert!(r(K::Other, 0, 3));
+}
+
 use super::*;
 
 #[test]

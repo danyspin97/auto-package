@@ -47,6 +47,13 @@ pub(super) fn identical_stop_applies(kind: FailureKind) -> bool {
     kind == FailureKind::Other
 }
 
+/// Whether the frontier never retries a failure of this kind. An environment
+/// failure is not the package's, and a rerun on this machine repeats it until
+/// the machine changes, so it is given up at once.
+pub(super) fn never_retried(kind: FailureKind) -> bool {
+    kind == FailureKind::Environment
+}
+
 /// Whether a failure with `reason` repeats the previous failure of the same
 /// package with no build finished in between: a retry would start from the
 /// same inputs and fail the same way. The reasons are compared with what changes
@@ -210,6 +217,7 @@ impl Frontier<'_> {
                 // whole-round retry count, so without this a package that
                 // burned its budget would repeat the same loop over and over.
                 let exhausted = kind == FailureKind::Exhausted;
+                let unrunnable = never_retried(kind);
                 // A package whose resolution ladder was spent is not run
                 // again: the same spec would fail the same ladder again. It
                 // is a failure of the tool to investigate, never a `blocked`.
@@ -256,7 +264,7 @@ impl Frontier<'_> {
                 } else {
                     self.max_target_retries
                 };
-                if exhausted || stop || cap_reached(*count, limit) {
+                if exhausted || unrunnable || stop || cap_reached(*count, limit) {
                     self.permanently_failed.insert(rpm_name.clone());
                     self.give_ups.insert(
                         rpm_name.clone(),
@@ -264,6 +272,8 @@ impl Frontier<'_> {
                             format!("every resolution rung failed ({reason})")
                         } else if exhausted {
                             format!("it spent its full budget/attempt allowance ({reason})")
+                        } else if unrunnable {
+                            format!("this machine cannot run it ({reason})")
                         } else if stop {
                             record.give_up_text()
                         } else {
@@ -286,6 +296,13 @@ impl Frontier<'_> {
                                  ({reason}) — another round would just repeat the same \
                                  fix loop with a fresh budget; anything depending on it \
                                  stays blocked, but the rest of the closure keeps going"
+                            )
+                        } else if unrunnable {
+                            format!(
+                                "giving up on {rpm_name} for now: this machine cannot run \
+                                 it ({reason}). That is not a failure of the package, and a \
+                                 rerun here repeats it; anything depending on it stays \
+                                 blocked, but the rest of the closure keeps going"
                             )
                         } else if stop {
                             format!(
@@ -409,6 +426,16 @@ mod tests {
         ] {
             assert!(!identical_stop_applies(kind), "{kind:?} must be retried");
         }
+    }
+
+    #[test]
+    fn an_environment_failure_is_given_up_at_once() {
+        assert!(never_retried(FailureKind::Environment));
+        assert!(!never_retried(FailureKind::Other));
+        assert!(!never_retried(FailureKind::Transient));
+        // Not an ordinary failure: no identical-failure stop, no skip.
+        assert!(!identical_stop_applies(FailureKind::Environment));
+        assert!(!settles_as_skip(FailureKind::Environment));
     }
 
     #[test]

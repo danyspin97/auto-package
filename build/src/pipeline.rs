@@ -159,69 +159,10 @@ impl PipelineConfig {
     }
 }
 
-/// Why a package failed. Callers decide what to retry, count and give up on
-/// from this, never from the wording of `reason`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FailureKind {
-    #[default]
-    Other,
-    /// The API answered 429 and the shared pause did not clear it.
-    RateLimited,
-    /// The package used up its budget or its attempt allowance.
-    Exhausted,
-    /// Another process held the package's build lock past the wait. Nothing
-    /// was tried, so the package is deferred rather than failed.
-    Busy,
-    /// The run was aborted because the agent cannot work at all (claude is not
-    /// logged in). Not a package failure: nothing is retried or counted.
-    AgentUnavailable,
-    /// The network, OBS or this machine failed (a dropped connection, an OBS
-    /// 5xx, a timeout), not the package. Recorded as `interrupted`, so the
-    /// package reads as re-runnable; the caller retries it within its usual
-    /// bound.
-    Transient,
-    /// The disk is full (`ENOSPC`). Handled like `Transient`, and told apart
-    /// so the user can free space and retry the package.
-    DiskFull,
-    /// A patch turn ran but did not make the dependent's shipping condition
-    /// true. The package's own condition counters bound the repeats (a second
-    /// patch turn, then the upstream wheel), so the caller re-queues the
-    /// request within the same run whatever its round count.
-    ConditionUnmet,
-    /// The agent's turn itself failed: the process crashed or timed out, or its
-    /// answer could not be read. Not a refusal of the package's edit (the apply
-    /// gate's refusals are `Other`), and a style-only failure downgrades it like
-    /// the other agent-side kinds.
-    AgentFailed,
-    /// The agent's turn changed the checkout's osc or git metadata, or left a
-    /// link that leaves the tree (see `agent::integrity`). Its own kind: no
-    /// caller downgrades it to a warning or retries it, because the checkout
-    /// may not be as the pipeline left it. A change that could not be put back
-    /// is named in the reason.
-    Tampered,
-    /// The new release needs a decision a maintainer makes, such as a signing
-    /// key the package's keyring lacks. Nothing was sent to OBS, and nothing is
-    /// retried: the same refusal would come back.
-    NeedsMaintainer,
-    /// OBS does not build the package for this repository and arch (excluded
-    /// or disabled there). Recorded as a skip with the reason, not a failure.
-    Excluded,
-    /// A source the package needs is gone upstream: its URL answers 404 or
-    /// 410, so the release moved or was removed outside the tool (class 4 of
-    /// D-06). Nothing is retried: the same answer would come back.
-    BrokenOutside,
-    /// The spec's `Version:` is not the package's before or after a turn: it
-    /// was changed between turns, or by a turn that may not change it. The
-    /// spec is put back and the package stops; no caller downgrades this.
-    VersionChanged,
-    /// `auto-package fix` found that the bug needs no fix here (the fix is in
-    /// the source already, or the package is not affected) or found no fix:
-    /// the reason says which. Nothing is retried.
-    NoFix,
-    /// The upstream fix could not be made to apply to this version. Nothing is
-    /// retried.
-    FixDoesNotApply,
-}
+mod failure_kind;
+pub use failure_kind::*;
+#[cfg(test)]
+mod failure_kind_tests;
 
 #[derive(Debug)]
 pub enum PipelineResult {

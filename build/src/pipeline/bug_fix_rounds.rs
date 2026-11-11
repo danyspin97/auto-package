@@ -245,15 +245,7 @@ pub(super) fn fix_rounds(
             Ok(v) => v,
             Err((e, kind)) => {
                 let why = format!("the fix turn failed: {e}");
-                // The verdict says what ended it: only a maintainer's decision is one.
-                let verdict = match kind {
-                    FailureKind::NeedsMaintainer => "needs_maintainer",
-                    FailureKind::RateLimited
-                    | FailureKind::AgentUnavailable
-                    | FailureKind::Exhausted => "exhausted",
-                    _ => "failed",
-                };
-                return Err(fix.stop(verdict, kind, why));
+                return Err(fix.stop(turn_failure_verdict(kind), kind, why));
             }
         };
         let roll_back = || {

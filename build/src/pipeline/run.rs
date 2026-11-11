@@ -205,24 +205,15 @@ fn finish_package(
     // (killed children, refused spawns): report it as the abort, not as the
     // package's own failure.
     let result = match (result, crate::proc::abort_reason()) {
-        (
+        (PipelineResult::Failed { rpm_name, kind, .. }, Some(reason))
+            if reported_as_abort(kind) =>
+        {
             PipelineResult::Failed {
                 rpm_name,
-                kind:
-                    FailureKind::Other
-                    | FailureKind::AgentUnavailable
-                    | FailureKind::AgentFailed
-                    | FailureKind::Transient
-                    | FailureKind::DiskFull
-                    | FailureKind::ConditionUnmet,
-                ..
-            },
-            Some(reason),
-        ) => PipelineResult::Failed {
-            rpm_name,
-            reason,
-            kind: FailureKind::AgentUnavailable,
-        },
+                reason,
+                kind: FailureKind::AgentUnavailable,
+            }
+        }
         (result, _) => result,
     };
     let expected = expected_checkout(config);

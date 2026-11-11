@@ -283,13 +283,8 @@ pub(super) fn review_stage(
                         if let Some(problem) = patching
                             && matches!(
                                 result,
-                                PipelineResult::Failed {
-                                    kind: FailureKind::Exhausted
-                                        | FailureKind::Other
-                                        | FailureKind::AgentFailed
-                                        | FailureKind::NeedsMaintainer,
-                                    ..
-                                }
+                                PipelineResult::Failed { kind, .. }
+                                    if declines_request_after_ladder(kind)
                             )
                         {
                             decline_patch_request(ws, reporter, problem);
@@ -391,7 +386,7 @@ pub(super) fn review_stage(
             // `patch_turn_failed`). Only the package-side kinds count:
             // AgentUnavailable, RateLimited and Busy say nothing about the package.
             if let Some(problem) = patching
-                && matches!(kind, FailureKind::Other | FailureKind::AgentFailed)
+                && declines_request_after_turn(kind)
             {
                 decline_patch_request(ws, reporter, problem);
             }
