@@ -35,8 +35,15 @@ const VERBS: [(&str, Role); 3] = [
     ("found", Role::Success),
 ];
 
-/// Phrases that mark a problem or a skipped step, wherever they occur.
-const YELLOW_PHRASES: [&str; 3] = ["not used automatically", "rate-limited", "failed"];
+/// Phrases that mark a problem or a skipped step, wherever they occur. The
+/// held and interrupted phrases are the ones the end-of-run lines use.
+const YELLOW_PHRASES: [&str; 5] = [
+    "not used automatically",
+    "rate-limited",
+    "failed",
+    "held while the TUI was open",
+    "Interrupted",
+];
 
 /// `text` as the terminal shows it. With `colour` off it is returned byte for
 /// byte. With it on, each line is coloured line by line (newlines are kept),

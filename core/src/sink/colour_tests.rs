@@ -168,3 +168,15 @@ fn the_sample_lines_get_the_expected_labels_and_marks() {
         out.ends_with("  \x1b[31m✗ no verified repositories found after trying 7 URLs\x1b[39m")
     );
 }
+
+#[test]
+fn the_exit_lines_phrases_are_coloured() {
+    assert_eq!(
+        colour_diag("Interrupted — tokens: 1 in / 2 out — cost: $0.00", true),
+        "\x1b[33mInterrupted\x1b[39m — tokens: 1 in / 2 out — cost: $0.00"
+    );
+    assert_eq!(
+        colour_diag("3 messages held while the TUI was open, see /tmp/x", true),
+        "3 messages \x1b[33mheld while the TUI was open\x1b[39m, see /tmp/x"
+    );
+}

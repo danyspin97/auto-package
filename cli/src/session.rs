@@ -113,7 +113,7 @@ pub(crate) fn print_exit_lines(
         (held.0, held.1.as_deref()),
         waited,
     ) {
-        eprintln!("{line}");
+        ap_core::sink::eprint_coloured(&line);
     }
 }
 
