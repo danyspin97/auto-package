@@ -37,12 +37,14 @@ impl AllowHostArgs {
             let host = normalize_user_host(raw).map_err(|e| eyre!("--allow-host {raw}: {e}"))?;
             match hosts.allow(&host, Origin::Run(Via::Flag), None) {
                 Ok(AllowOutcome::Added) => {
-                    eprintln!("note: {host} is allowed for this run (--allow-host)");
+                    ap_core::sink::eprint_coloured(&format!(
+                        "note: {host} is allowed for this run (--allow-host)"
+                    ));
                     self.added.push(host.clone());
                 }
-                Ok(AllowOutcome::AlreadyAllowed(origin)) => {
-                    eprintln!("note: {host} is already allowed ({})", origin.label())
-                }
+                Ok(AllowOutcome::AlreadyAllowed(origin)) => ap_core::sink::eprint_coloured(
+                    &format!("note: {host} is already allowed ({})", origin.label()),
+                ),
                 Err(e) => return Err(eyre!("--allow-host {raw}: {e}")),
             }
         }
@@ -50,7 +52,7 @@ impl AllowHostArgs {
         // so the run does not silently drop a host it was meant to allow.
         self.problems = hosts.problems();
         for p in &self.problems {
-            eprintln!("warning: {p}");
+            ap_core::sink::eprint_coloured(&format!("warning: {p}"));
         }
         Ok(())
     }

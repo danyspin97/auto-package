@@ -118,7 +118,7 @@ pub fn run(mut a: FixArgs, summary: &mut Option<String>) -> color_eyre::Result<(
     )
     .map_err(|e| eyre!(e))?;
     for w in &input.warnings {
-        eprintln!("warning: {w}");
+        ap_core::sink::eprint_coloured(&format!("warning: {w}"));
     }
     // Before any lookup: a host the user allows here is read from at once.
     a.allow_host.apply()?;

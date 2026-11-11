@@ -379,7 +379,7 @@ fn main() -> color_eyre::Result<()> {
     }
     // Checked before the interrupt case: an abort also raises the shutdown flag.
     if let Some(reason) = ap_build::proc::abort_reason() {
-        eprintln!("\nerror: run stopped: {reason}");
+        ap_core::sink::eprint_coloured(&format!("\nerror: run stopped: {reason}"));
         std::process::exit(EXIT_AGENT_UNAVAILABLE);
     }
     if let Err(e) = &result
@@ -391,13 +391,13 @@ fn main() -> color_eyre::Result<()> {
     if let Err(e) = &result
         && let Some(unavailable) = e.downcast_ref::<AgentUnavailable>()
     {
-        eprintln!("error: {unavailable}");
+        ap_core::sink::eprint_coloured(&format!("error: {unavailable}"));
         std::process::exit(EXIT_AGENT_UNAVAILABLE);
     }
     if let Err(e) = &result
         && let Some(not_submitted) = e.downcast_ref::<NotSubmitted>()
     {
-        eprintln!("error: {not_submitted}");
+        ap_core::sink::eprint_coloured(&format!("error: {not_submitted}"));
         std::process::exit(EXIT_NOT_SUBMITTED);
     }
     if ap_build::proc::shutting_down() {

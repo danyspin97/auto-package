@@ -6,7 +6,6 @@
 //! at that repository, auto-package stops and lists both.
 
 use crate::*;
-use owo_colors::{OwoColorize, Stream};
 
 /// Whether the clash check runs for a bare name. It does not when the name is
 /// a repository (a URL, or `--url`), when an NVIDIA option is given, when
@@ -111,9 +110,7 @@ fn paint(text: &str, colour: bool, sgr: &str) -> String {
 /// Whether stderr takes colour, by the rule every other stderr line follows
 /// (owo-colors: a terminal, `NO_COLOR` unset, `CLICOLOR_FORCE` honoured).
 pub(crate) fn stderr_colour() -> bool {
-    !"".if_supports_color(Stream::Stderr, |t| t.red())
-        .to_string()
-        .is_empty()
+    ap_core::sink::stderr_colour()
 }
 
 /// The refusal text, as `build` prints it after `error:`: the two kinds of

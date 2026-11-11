@@ -60,10 +60,9 @@ impl AgentSlot {
         if !valid {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
-                eprintln!(
-                    "warning: AUTO_PACKAGE_AGENT_JOBS is not a positive number; \
-                     using the default cap of {DEFAULT_AGENT_JOBS}"
-                );
+                ap_core::sink::eprint_coloured(&format!(
+                    "warning: AUTO_PACKAGE_AGENT_JOBS is not a positive number; using the default cap of {DEFAULT_AGENT_JOBS}"
+                ));
             });
         }
         cap

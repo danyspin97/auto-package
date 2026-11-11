@@ -93,12 +93,12 @@ pub(crate) fn apply_nvidia_mode(
     };
     let (mode, warning) = resolve_nvidia_mode(explicit, remembered);
     if let Some(w) = warning {
-        eprintln!("warning: {w}");
+        ap_core::sink::eprint_coloured(&format!("warning: {w}"));
     }
     ap_build::redist::set_enabled(mode == NvidiaMode::Redist);
     if mode == NvidiaMode::Redist {
-        eprintln!(
-            "info: NVIDIA CUDA libraries are packaged from NVIDIA's archives (--nvidia redist)"
+        ap_core::sink::eprint_coloured(
+            "info: NVIDIA CUDA libraries are packaged from NVIDIA's archives (--nvidia redist)",
         );
     }
     Ok(mode)

@@ -83,7 +83,7 @@ pub(super) fn run_maintenance(
 ) -> color_eyre::Result<()> {
     use ap_build::maintenance;
     let say = |m: &str| println!("{m}");
-    let warn = |m: &str| eprintln!("warning: {m}");
+    let warn = |m: &str| ap_core::sink::eprint_coloured(&format!("warning: {m}"));
     // Without a terminal the maintenance run says itself what to pass instead.
     let ask = |q: &str| ask_line(q, &|_| {});
     let confirm = |q: &str| confirm_with(q, &warn);

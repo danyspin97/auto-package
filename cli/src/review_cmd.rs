@@ -116,7 +116,7 @@ pub(super) fn main(args: &ReviewArgs) -> i32 {
     match run(args) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {e}");
+            ap_core::sink::eprint_coloured(&format!("error: {e}"));
             EXIT_ERROR
         }
     }

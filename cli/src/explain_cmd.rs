@@ -104,7 +104,7 @@ fn run_command(
     let err = |e: String| color_eyre::eyre::eyre!(e);
     let dir = ap_build::explain::resolve_run_dir(work_dir, project, arch).map_err(err)?;
     if project.is_some() {
-        eprintln!("note: reading {}", dir.display());
+        ap_core::sink::eprint_coloured(&format!("note: reading {}", dir.display()));
     }
     let rt = ap_build::explain::run_tries(&dir, run).map_err(err)?;
     if json {
@@ -133,7 +133,7 @@ fn explain_command(
     let dir = ap_build::explain::resolve_project_dir(work_dir, project, arch, name).map_err(err)?;
     if project.is_some() {
         // Says which directory was read: after `update` it is the branch's.
-        eprintln!("note: reading {}", dir.display());
+        ap_core::sink::eprint_coloured(&format!("note: reading {}", dir.display()));
     }
     ap_build::package_notes::set_notes_dir(std::path::absolute(notes_dir)?);
     let package_notes = ap_build::package_notes::path_for(name)

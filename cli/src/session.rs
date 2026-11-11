@@ -268,7 +268,9 @@ pub(super) fn tui_run_exit(
         return run_and_failures(run, failures);
     }
     if let Some(e) = tui_failure {
-        eprintln!("warning: the TUI stopped before the run ended ({e})");
+        ap_core::sink::eprint_coloured(&format!(
+            "warning: the TUI stopped before the run ended ({e})"
+        ));
         return run_and_failures(run, failures);
     }
     if run.is_err() || !failures.is_empty() {
@@ -305,7 +307,9 @@ pub(super) fn start_tui(
     match tui::TuiController::new(memory, scope, accepts_requests) {
         Ok(tui) => Some(tui),
         Err(e) => {
-            eprintln!("warning: cannot show the TUI ({e}); printing plain output instead");
+            ap_core::sink::eprint_coloured(&format!(
+                "warning: cannot show the TUI ({e}); printing plain output instead"
+            ));
             None
         }
     }
