@@ -4,6 +4,16 @@
 use super::*;
 use crate::osc::checkout::*;
 use crate::osc::query::*;
+use ap_core::remedy::{Cause, Remedy, Retry};
+
+/// The text of [`Error::ToolMissing`]: what is missing, and where it was looked
+/// for when that is known. No install command.
+fn missing_tool_text(tool: &str, path: Option<&Path>) -> String {
+    match path {
+        Some(path) => format!("{tool} is not installed ({} is missing)", path.display()),
+        None => format!("{tool} is not installed (could not launch it)"),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -33,6 +43,12 @@ pub enum Error {
 
     #[error("cannot sandbox the checkout's _service: {0}")]
     ServiceSandbox(String),
+
+    /// A tool the machine needs is not installed, or could not be launched.
+    /// `path` is where it was looked for, when that is known. The install
+    /// command is not in the text: it is built from the remedy.
+    #[error("{}", missing_tool_text(.tool, .path.as_deref()))]
+    ToolMissing { tool: String, path: Option<PathBuf> },
 
     #[error("nothing to publish in {0}: no spec or archive found")]
     NothingToPublish(PathBuf),
@@ -224,6 +240,22 @@ impl Error {
             Error::OscFailed { stderr, .. } => child_output_says_disk_full(stderr),
             _ => false,
         }
+    }
+
+    /// What must be done on this machine before a rerun can succeed, when the
+    /// failure is a missing tool.
+    pub fn remedy(&self) -> Option<Remedy> {
+        let cause = match self {
+            Error::ToolMissing { tool, path } => Cause::MissingTool {
+                tool: tool.clone(),
+                path: path.clone(),
+            },
+            _ => return None,
+        };
+        Some(Remedy {
+            cause,
+            retry: Retry::SameCommand,
+        })
     }
 
     /// Whether the failure says nothing about the package and a later attempt

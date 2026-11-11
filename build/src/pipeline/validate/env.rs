@@ -33,6 +33,9 @@ pub(in crate::pipeline) enum CheckFailure {
 pub(in crate::pipeline) fn check_failure(err: &osc::Error, tool_on_path: bool) -> CheckFailure {
     match err {
         osc::Error::Process(ProcessError::Launch { source, .. }) => launch_failure(source),
+        osc::Error::ToolMissing { .. } => {
+            CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string())
+        }
         osc::Error::Process(
             ProcessError::Timeout { .. } | ProcessError::OutputLost { .. } | ProcessError::Io(_),
         ) => CheckFailure::Transient,
@@ -127,6 +130,21 @@ mod tests {
         for on_path in [false, true] {
             assert_eq!(
                 check_failure(&launch(io::ErrorKind::NotFound), on_path),
+                CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string()),
+                "on_path={on_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_rpmspec_tool_stops_the_package_too() {
+        let err = osc::Error::ToolMissing {
+            tool: "rpmspec".into(),
+            path: None,
+        };
+        for on_path in [false, true] {
+            assert_eq!(
+                check_failure(&err, on_path),
                 CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string()),
                 "on_path={on_path}"
             );

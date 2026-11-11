@@ -251,3 +251,6 @@ mod transient_broken_tests;
 
 #[cfg(test)]
 mod transient_error_tests;
+
+#[cfg(test)]
+mod tool_missing_tests;

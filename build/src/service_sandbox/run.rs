@@ -1,5 +1,15 @@
 use super::*;
 
+/// The error for a service whose program is not in `dir` (the OBS service
+/// directory), or `None` when it is there.
+fn service_not_installed(name: &str, dir: &Path) -> Option<Error> {
+    let path = dir.join(name);
+    (!path.is_file()).then(|| Error::ToolMissing {
+        tool: name.to_string(),
+        path: Some(path),
+    })
+}
+
 /// Remove what an earlier run generated, as osc does before running.
 pub(super) fn remove_generated(checkout: &Path) {
     let Ok(rd) = fs::read_dir(checkout) else {
@@ -73,11 +83,8 @@ pub(crate) fn run_services(
     }
     let bwrap = sandbox_ready()?;
     for s in services {
-        if !Path::new(SERVICE_DIR).join(&s.name).is_file() {
-            return Err(Error::ServiceSandbox(format!(
-                "obs-service-{} is not installed ({SERVICE_DIR}/{} is missing)",
-                s.name, s.name
-            )));
+        if let Some(err) = service_not_installed(&s.name, Path::new(SERVICE_DIR)) {
+            return Err(err);
         }
     }
     let checkout = fs::canonicalize(checkout_dir).map_err(Error::Io)?;
@@ -157,4 +164,34 @@ pub(crate) fn run_services(
         }
     }
     Ok(ok)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_service_with_no_program_in_the_service_dir_is_a_missing_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = service_not_installed("cargo_vendor", dir.path()).unwrap();
+        let path = dir.path().join("cargo_vendor");
+        assert!(matches!(
+            &err,
+            Error::ToolMissing { tool, path: Some(p) } if tool == "cargo_vendor" && *p == path
+        ));
+        assert_eq!(
+            err.remedy().map(|r| r.cause),
+            Some(ap_core::remedy::Cause::MissingTool {
+                tool: "cargo_vendor".into(),
+                path: Some(path),
+            })
+        );
+    }
+
+    #[test]
+    fn a_service_that_is_installed_is_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tar_scm"), "#!/bin/sh\n").unwrap();
+        assert!(service_not_installed("tar_scm", dir.path()).is_none());
+    }
 }

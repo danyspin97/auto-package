@@ -132,6 +132,22 @@ pub(super) fn sandbox_spec_dir(spec_path: &Path, cwd: &Path) -> PathBuf {
         .map_or_else(|| PathBuf::from("/"), Path::to_path_buf)
 }
 
+/// A launch of `rpmspec` that found no program is a missing tool; any other
+/// launch or wait failure stays a process error.
+fn rpmspec_launch_error(e: proc::ProcessError) -> Error {
+    match e {
+        proc::ProcessError::Launch { source, .. }
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Error::ToolMissing {
+                tool: "rpmspec".into(),
+                path: None,
+            }
+        }
+        other => Error::Process(other),
+    }
+}
+
 /// Run `rpmspec --parse` on a spec file and check for syntax errors.
 ///
 /// Judges on exit status only (warnings in stderr are not treated as failures).
@@ -169,7 +185,8 @@ pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> 
                 marker: marker.to_string(),
             });
         }
-        proc::capture("rpmspec", &["--parse", &spec], &anywhere(), emit)?
+        proc::capture("rpmspec", &["--parse", &spec], &anywhere(), emit)
+            .map_err(rpmspec_launch_error)?
     };
 
     if !out.success() {
@@ -181,4 +198,32 @@ pub fn rpmspec_check(spec_path: &Path, emit: Emit<'_>) -> Result<String, Error> 
     }
 
     Ok(out.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn launch(kind: std::io::ErrorKind) -> proc::ProcessError {
+        proc::ProcessError::Launch {
+            program: "rpmspec".into(),
+            source: std::io::Error::from(kind),
+        }
+    }
+
+    #[test]
+    fn rpmspec_with_no_program_is_a_missing_tool() {
+        assert!(matches!(
+            rpmspec_launch_error(launch(std::io::ErrorKind::NotFound)),
+            Error::ToolMissing { tool, path: None } if tool == "rpmspec"
+        ));
+    }
+
+    #[test]
+    fn any_other_launch_failure_stays_a_process_error() {
+        assert!(matches!(
+            rpmspec_launch_error(launch(std::io::ErrorKind::PermissionDenied)),
+            Error::Process(proc::ProcessError::Launch { .. })
+        ));
+    }
 }
