@@ -35,6 +35,7 @@ macro_rules! diag {
     };
 }
 
+mod colour;
 mod diagnostics;
 mod human;
 mod jsonl;
@@ -45,6 +46,8 @@ mod reporter;
 mod text;
 
 #[cfg(test)]
+mod colour_tests;
+#[cfg(test)]
 mod diagnostics_tests;
 #[cfg(test)]
 mod elapsed_tests;
@@ -53,6 +56,7 @@ mod printable_tests;
 #[cfg(test)]
 mod tests;
 
+pub use colour::*;
 pub use diagnostics::*;
 pub use human::*;
 pub use jsonl::*;
