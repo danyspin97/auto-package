@@ -458,15 +458,8 @@ fn ensure_publishable(
     }
     // A check that could not run is the host's failure: the same reasons as
     // the validation round, not a verdict on the spec.
-    osc::rpmspec_check(&ctx.spec_path, Emit::new(ctx.reporter, step)).map_err(|e| {
-        match validate::env::check_failure(&e, validate::env::rpmspec_on_path()) {
-            validate::env::CheckFailure::Environment(reason) => ctx.failed(reason),
-            validate::env::CheckFailure::Transient => ctx.failed_text(true, e.to_string()),
-            validate::env::CheckFailure::Spec => ctx.failed(format!(
-                "the spec does not parse, so it is not committed: {e}"
-            )),
-        }
-    })
+    osc::rpmspec_check(&ctx.spec_path, Emit::new(ctx.reporter, step))
+        .map_err(|e| validate::env::publish_check_failed(ctx, &e))
 }
 
 /// The sources and patches the expanded spec names that are not in the

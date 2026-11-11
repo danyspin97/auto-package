@@ -505,7 +505,9 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
             // not run ends the package here, so no turn is started for it.
             match env::check_failure(&e, env::rpmspec_on_path()) {
                 env::CheckFailure::Spec => {}
-                env::CheckFailure::Environment(reason) => return Err(ctx.failed(reason)),
+                env::CheckFailure::Environment { reason, remedy } => {
+                    return Err(ctx.failed_env(reason, remedy));
+                }
                 env::CheckFailure::Transient => return Err(ctx.failed_text(true, e.to_string())),
             }
             reporter.report(&Event::SpecRejected {

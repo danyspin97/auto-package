@@ -214,6 +214,7 @@ mod notes_step;
 mod run;
 pub use run::*;
 mod obs_names;
+mod osc_failure;
 use obs_names::*;
 mod checkout;
 use checkout::*;

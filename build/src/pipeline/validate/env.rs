@@ -8,11 +8,19 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use ap_core::remedy::Remedy;
+
+use crate::pipeline::PipelineResult;
+use crate::pipeline::run::RunCtx;
+
 use crate::osc;
 use crate::proc::ProcessError;
 
-/// Why a package stops when `rpmspec` is not installed.
-pub(in crate::pipeline) const RPMSPEC_NOT_INSTALLED: &str = "rpmspec is not installed (could not launch it); install rpm-build (sudo zypper install rpm-build) and run again";
+/// Why a package stops when `rpmspec` is not installed. The install command
+/// is not in the text: the remedy carries the cause, and the renderer builds
+/// the command from it.
+pub(in crate::pipeline) const RPMSPEC_NOT_INSTALLED: &str =
+    "rpmspec is not installed (could not launch it)";
 
 /// The message bubblewrap prints when `rpmspec` is not on the sandbox's PATH.
 const SANDBOX_NO_RPMSPEC: &str = "execvp rpmspec: No such file or directory";
@@ -22,8 +30,12 @@ const SANDBOX_NO_RPMSPEC: &str = "execvp rpmspec: No such file or directory";
 pub(in crate::pipeline) enum CheckFailure {
     /// rpmspec judged the spec: the agent gets a fix turn.
     Spec,
-    /// rpmspec cannot run here: the package stops now with this one-line reason.
-    Environment(String),
+    /// rpmspec cannot run here: the package stops now with this one-line
+    /// reason and, when the cause is a missing tool, its remedy.
+    Environment {
+        reason: String,
+        remedy: Option<Remedy>,
+    },
     /// rpmspec timed out or its output was lost: a later run may pass.
     Transient,
 }
@@ -32,34 +44,74 @@ pub(in crate::pipeline) enum CheckFailure {
 /// is an executable on the host's PATH.
 pub(in crate::pipeline) fn check_failure(err: &osc::Error, tool_on_path: bool) -> CheckFailure {
     match err {
-        osc::Error::Process(ProcessError::Launch { source, .. }) => launch_failure(source),
-        osc::Error::ToolMissing { .. } => {
-            CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string())
+        osc::Error::Process(ProcessError::Launch { program, source }) => {
+            launch_failure(program, source)
         }
+        osc::Error::ToolMissing { .. } => CheckFailure::Environment {
+            reason: err.to_string(),
+            remedy: err.remedy(),
+        },
         osc::Error::Process(
             ProcessError::Timeout { .. } | ProcessError::OutputLost { .. } | ProcessError::Io(_),
         ) => CheckFailure::Transient,
         osc::Error::RpmspecFailed { stderr, .. } if stderr.contains(SANDBOX_NO_RPMSPEC) => {
-            CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string())
+            not_installed()
         }
         // Without rpmspec on PATH the spec is refused for the tool's absence,
         // not for its content.
-        osc::Error::UnsandboxedMacro { .. } if !tool_on_path => {
-            CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string())
-        }
+        osc::Error::UnsandboxedMacro { .. } if !tool_on_path => not_installed(),
         _ => CheckFailure::Spec,
     }
 }
 
-/// A launch failure of `rpmspec` is the environment's: a missing program has
-/// its own reason, any other refusal to start it names the OS error.
-fn launch_failure(source: &io::Error) -> CheckFailure {
-    if source.kind() == io::ErrorKind::NotFound {
-        CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string())
-    } else {
-        CheckFailure::Environment(format!(
-            "rpmspec could not be started ({source}); fix the local install and run again"
-        ))
+/// The failure of a missing `rpmspec`: its reason and the remedy that names
+/// the tool.
+fn not_installed() -> CheckFailure {
+    let missing = osc::Error::ToolMissing {
+        tool: "rpmspec".into(),
+        path: None,
+    };
+    CheckFailure::Environment {
+        reason: RPMSPEC_NOT_INSTALLED.to_string(),
+        remedy: missing.remedy(),
+    }
+}
+
+/// A launch failure is the environment's. A missing `rpmspec` has its own
+/// reason; any other missing program (bubblewrap, say) is a missing tool named
+/// by its program. Any other refusal to start a program names the OS error.
+fn launch_failure(program: &str, source: &io::Error) -> CheckFailure {
+    if source.kind() != io::ErrorKind::NotFound {
+        return CheckFailure::Environment {
+            reason: format!(
+                "{program} could not be started ({source}); fix the local install and run again"
+            ),
+            remedy: None,
+        };
+    }
+    if program == "rpmspec" {
+        return not_installed();
+    }
+    let missing = osc::Error::ToolMissing {
+        tool: program.to_string(),
+        path: None,
+    };
+    CheckFailure::Environment {
+        reason: missing.to_string(),
+        remedy: missing.remedy(),
+    }
+}
+
+/// The end of a package whose `rpmspec` check failed on its way to a commit:
+/// a verdict on the spec is the spec's error, a check that could not run ends
+/// the package as the environment or transient failure it is.
+pub(in crate::pipeline) fn publish_check_failed(ctx: &RunCtx, e: &osc::Error) -> PipelineResult {
+    match check_failure(e, rpmspec_on_path()) {
+        CheckFailure::Environment { reason, remedy } => ctx.failed_env(reason, remedy),
+        CheckFailure::Transient => ctx.failed_text(true, e.to_string()),
+        CheckFailure::Spec => ctx.failed(format!(
+            "the spec does not parse, so it is not committed: {e}"
+        )),
     }
 }
 
@@ -101,6 +153,7 @@ mod tests {
 
     use crate::osc;
     use crate::proc::ProcessError;
+    use ap_core::remedy::{Cause, Retry};
     use std::io;
 
     fn launch(kind: io::ErrorKind) -> osc::Error {
@@ -130,7 +183,7 @@ mod tests {
         for on_path in [false, true] {
             assert_eq!(
                 check_failure(&launch(io::ErrorKind::NotFound), on_path),
-                CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string()),
+                not_installed(),
                 "on_path={on_path}"
             );
         }
@@ -145,20 +198,85 @@ mod tests {
         for on_path in [false, true] {
             assert_eq!(
                 check_failure(&err, on_path),
-                CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string()),
+                not_installed(),
                 "on_path={on_path}"
             );
         }
     }
 
     #[test]
-    fn the_reason_is_one_line_and_names_the_package_to_install() {
+    fn the_reason_is_one_line_and_names_the_tool_without_an_install_command() {
         assert!(!RPMSPEC_NOT_INSTALLED.contains('\n'));
         assert_eq!(
             RPMSPEC_NOT_INSTALLED,
-            "rpmspec is not installed (could not launch it); install rpm-build \
-             (sudo zypper install rpm-build) and run again"
+            "rpmspec is not installed (could not launch it)"
         );
+        assert!(!RPMSPEC_NOT_INSTALLED.contains("zypper"));
+    }
+
+    #[test]
+    fn a_missing_bwrap_is_named_bwrap_not_rpmspec() {
+        let err = osc::Error::Process(ProcessError::Launch {
+            program: "bwrap".into(),
+            source: io::Error::from(io::ErrorKind::NotFound),
+        });
+        assert_eq!(
+            check_failure(&err, true),
+            CheckFailure::Environment {
+                reason: "bwrap is not installed (could not launch it)".into(),
+                remedy: Some(Remedy {
+                    cause: Cause::MissingTool {
+                        tool: "bwrap".into(),
+                        path: None,
+                    },
+                    retry: Retry::SameCommand,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn a_missing_rpmspec_ends_a_commit_as_an_environment_failure_with_its_remedy() {
+        crate::pipeline::review_marks_tests::with_ctx(|ctx, _| {
+            let err = osc::Error::ToolMissing {
+                tool: "rpmspec".into(),
+                path: None,
+            };
+            match publish_check_failed(ctx, &err) {
+                PipelineResult::Failed {
+                    kind,
+                    reason,
+                    remedy,
+                    ..
+                } => {
+                    assert_eq!(kind, crate::pipeline::FailureKind::Environment);
+                    assert_eq!(reason, RPMSPEC_NOT_INSTALLED);
+                    assert_eq!(remedy, not_installed_remedy());
+                }
+                _ => panic!("the package did not fail"),
+            }
+        });
+    }
+
+    #[test]
+    fn a_missing_rpmspec_carries_a_remedy_for_the_tool() {
+        assert_eq!(
+            not_installed(),
+            CheckFailure::Environment {
+                reason: RPMSPEC_NOT_INSTALLED.to_string(),
+                remedy: not_installed_remedy(),
+            }
+        );
+    }
+
+    fn not_installed_remedy() -> Option<Remedy> {
+        Some(Remedy {
+            cause: Cause::MissingTool {
+                tool: "rpmspec".into(),
+                path: None,
+            },
+            retry: Retry::SameCommand,
+        })
     }
 
     #[test]
@@ -169,12 +287,13 @@ mod tests {
             io::ErrorKind::Other,
         ] {
             match check_failure(&launch(kind), true) {
-                CheckFailure::Environment(reason) => {
+                CheckFailure::Environment { reason, remedy } => {
                     assert!(
                         reason.starts_with("rpmspec could not be started ("),
                         "{reason}"
                     );
                     assert!(reason.contains("fix the local install"), "{reason}");
+                    assert_eq!(remedy, None);
                 }
                 other => panic!("{kind:?} gave {other:?}"),
             }
@@ -218,7 +337,7 @@ mod tests {
         for on_path in [false, true] {
             assert_eq!(
                 check_failure(&err, on_path),
-                CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string()),
+                not_installed(),
                 "on_path={on_path}"
             );
         }
@@ -237,7 +356,7 @@ mod tests {
         for marker in ["%(", "%{lua:", "%lua", "%include"] {
             assert_eq!(
                 check_failure(&refused(marker), false),
-                CheckFailure::Environment(RPMSPEC_NOT_INSTALLED.to_string()),
+                not_installed(),
                 "marker={marker}"
             );
         }
