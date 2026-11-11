@@ -413,7 +413,7 @@ fn main() -> color_eyre::Result<()> {
         // The message as the user needs it: the causes, without the source
         // location. RUST_BACKTRACE asks for the full report.
         Err(e) if std::env::var_os("RUST_BACKTRACE").is_none() => {
-            eprintln!("error: {e:#}");
+            eprintln!("error: {}", name_clash::error_text(&e));
             std::process::exit(1);
         }
         Err(e) => Err(e),

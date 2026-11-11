@@ -126,6 +126,67 @@ pub(crate) fn clash_message(
     out
 }
 
+/// A refusal: the clash `check` found, as the error it returns. Its Display is
+/// the table `build` prints (see `error_text`); the TUI shows `tui_line`.
+#[derive(Debug)]
+pub(crate) struct Refusal {
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) pypi_source: Option<String>,
+    pub(crate) repos: Vec<String>,
+}
+
+impl Refusal {
+    /// The table `build` prints, as `clash_message` lays it out.
+    pub(crate) fn table(&self) -> String {
+        clash_message(
+            &self.name,
+            &self.version,
+            self.pypi_source.as_deref(),
+            &self.repos,
+        )
+    }
+}
+
+impl Refusal {
+    /// One line, for the TUI's warning row: the name, and the two ways on.
+    /// Plain, with no newline.
+    pub(crate) fn tui_line(&self) -> String {
+        format!(
+            "`{0}` is ambiguous: PyPI and a repository both claim it. Type `pypi:{0}`, or a repository URL: {1}",
+            self.name,
+            self.repos.join(", ")
+        )
+    }
+}
+
+impl std::fmt::Display for Refusal {
+    /// The plain table, the same text `build` prints after `error:`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.table())
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// The warning or failure line of a request the TUI could not add: the one
+/// line of a refusal, and any other error as it always was.
+pub(crate) fn tui_failure(label: &str, e: &color_eyre::Report) -> String {
+    match e.downcast_ref::<Refusal>() {
+        Some(refusal) => format!("{label}: {}", refusal.tui_line()),
+        None => format!("{label}: {e:#}"),
+    }
+}
+
+/// The text `main` prints after `error:`: the table of a refusal, and any
+/// other error as it always was.
+pub(crate) fn error_text(e: &color_eyre::Report) -> String {
+    match e.downcast_ref::<Refusal>() {
+        Some(refusal) => refusal.table(),
+        None => format!("{e:#}"),
+    }
+}
+
 /// The repositories a clash can be with: the vouched ones, and the name search
 /// hits that exist. A generated guess (github.com/<name>/<name> and the like)
 /// is not one, even when it exists.
@@ -233,12 +294,13 @@ pub(crate) fn check(name: &str, reporter: &dyn Reporter) -> color_eyre::Result<(
     if repos.is_empty() {
         return Ok(());
     }
-    Err(color_eyre::eyre::eyre!(clash_message(
-        name,
-        &version,
-        pypi_source.as_deref(),
-        &repos
-    )))
+    Err(Refusal {
+        name: name.to_string(),
+        version,
+        pypi_source,
+        repos,
+    }
+    .into())
 }
 
 /// A TUI request as the run admits it: read, its name validated, and checked

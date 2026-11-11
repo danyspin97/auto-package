@@ -430,3 +430,57 @@ fn the_message_offers_both_choices() {
     assert!(m.contains("build pypi:jay") && m.contains("build https://github.com/mahkoh/jay"));
     assert!(m.contains("type `pypi:jay`"));
 }
+
+fn refusal() -> Refusal {
+    Refusal {
+        name: "jay".into(),
+        version: "0.2.0".into(),
+        pypi_source: None,
+        repos: v(&[
+            "https://github.com/mahkoh/jay",
+            "https://github.com/sxcool1024/Jay",
+        ]),
+    }
+}
+
+#[test]
+fn the_tui_line_is_one_line_and_names_both_ways_on() {
+    let line = refusal().tui_line();
+    assert!(!line.contains('\n') && !line.contains('\x1b'), "{line:?}");
+    assert!(line.contains("Type `pypi:jay`"));
+    assert!(line.contains("https://github.com/mahkoh/jay, https://github.com/sxcool1024/Jay"));
+}
+
+#[test]
+fn display_is_the_plain_table_and_the_tui_gets_its_one_line() {
+    let err = color_eyre::Report::from(refusal());
+    let refused = err.downcast_ref::<Refusal>().expect("a refusal");
+    assert_eq!(
+        refused.to_string(),
+        clash_message("jay", "0.2.0", None, &refusal().repos)
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("\n  auto-package build pypi:jay\n")
+    );
+    assert_eq!(
+        tui_failure("jay", &err),
+        format!("jay: {}", refused.tui_line())
+    );
+    assert_eq!(
+        tui_failure("jay", &color_eyre::eyre::eyre!("no network")),
+        "jay: no network"
+    );
+}
+
+#[test]
+fn build_prints_the_table_of_a_refusal_and_other_errors_as_before() {
+    let err = color_eyre::Report::from(refusal());
+    assert_eq!(error_text(&err), refusal().table());
+    assert!(
+        error_text(&err).starts_with("`jay` is ambiguous: PyPI and a repository both claim it\n")
+    );
+    let other = color_eyre::eyre::eyre!("no network");
+    assert_eq!(error_text(&other), "no network");
+}
