@@ -258,11 +258,7 @@ fn source_archives(checkout: &Path) -> Vec<String> {
         .flatten()
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| {
-            [".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tgz", ".zip"]
-                .iter()
-                .any(|ext| n.ends_with(ext))
-        })
+        .filter(|n| crate::pipeline::is_source_archive_name(n))
         .collect();
     found.sort();
     found

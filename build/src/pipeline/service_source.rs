@@ -281,13 +281,6 @@ fn vendor_suffix(compression: &str) -> &'static str {
     }
 }
 
-/// Whether `name` ends like a source archive.
-pub(super) fn is_archive_name(name: &str) -> bool {
-    [".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar"]
-        .iter()
-        .any(|s| name.ends_with(s))
-}
-
 /// The tarballs (by file name) in `dir`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SourceService {

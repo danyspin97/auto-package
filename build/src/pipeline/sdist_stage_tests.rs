@@ -440,3 +440,75 @@ fn the_pass_runs_only_when_the_checkout_needs_it() {
             .unwrap_or_else(|_| panic!("the stage fails"));
     });
 }
+
+#[test]
+fn a_replaced_release_loses_only_its_tarballs() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in [
+        "foo-1.0.tar.gz",
+        "foo-1.0.tar",
+        "foo-1.0.zip",
+        "foo-1.0-py3-none-any.whl",
+        "vendor.tar.zst",
+        "registry.tar.zst",
+        "foo-2.0.tar.gz",
+        "foo.spec",
+    ] {
+        std::fs::write(dir.path().join(name), b"").unwrap();
+    }
+    let before = crate::pipeline::carry::tarballs_in(dir.path());
+    let gone =
+        crate::pipeline::archive::superseded_tarballs(&before, "1.0", "2.0", "foo-2.0.tar.gz", &[]);
+    // The old tarball and its bare `.tar` go; the zip, the wheel and the Cargo
+    // bundles stay, as they did before the list was unified.
+    assert_eq!(gone, ["foo-1.0.tar", "foo-1.0.tar.gz"]);
+}
+
+#[test]
+fn a_bare_tar_beside_the_source_is_not_unpacked() {
+    // `deps.tar` sorts before `foo.tar.gz`, and no extractor reads a bare tar:
+    // the source is the one that unpacks.
+    with_checkout(
+        Some(&["amqpstorm-1.0/x"]),
+        "AMQPStorm-1.0",
+        "",
+        |ctx, st| {
+            std::fs::write(ctx.checkout_dir.join("deps.tar"), b"not a source").unwrap();
+            let found = crate::pipeline::archive::find_tarball(&ctx.checkout_dir, "1.0");
+            assert_eq!(
+                found.and_then(|p| p.file_name().map(|n| n.to_owned())),
+                Some("AMQPStorm-1.0.tar.gz".into())
+            );
+            fetch_sdist_stage(ctx, st, false).unwrap_or_else(|_| panic!("the stage fails"));
+            assert!(
+                ctx.ws.dir().join("source/x").exists(),
+                "the source unpacked"
+            );
+        },
+    );
+}
+
+#[test]
+fn source_archives_finds_every_archive_spelling_but_no_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let all = "foo-1.0.tar foo-1.0.tbz2 foo-1.0.txz foo-1.0.tzst foo-1.0.tar.gz foo-1.0.zip vendor.tar.zst vendor.tar.gz registry.tar.zst foo.spec";
+    for name in all.split(' ') {
+        std::fs::write(dir.path().join(name), b"").unwrap();
+    }
+    // A bare `.tar` is not a source: no extractor reads it.
+    let mut found: Vec<String> = crate::pipeline::archive::source_archives(dir.path())
+        .into_iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "foo-1.0.tar.gz",
+            "foo-1.0.tbz2",
+            "foo-1.0.txz",
+            "foo-1.0.tzst",
+            "foo-1.0.zip"
+        ]
+    );
+}

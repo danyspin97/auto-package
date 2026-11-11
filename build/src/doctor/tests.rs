@@ -367,3 +367,22 @@ fn an_old_archive_obs_holds_is_no_finding_and_a_tracked_file_the_spec_does_not_n
     );
     assert!(!found.contains("not named by the spec"), "{found}");
 }
+
+#[test]
+fn the_doctor_lists_source_archives_by_the_one_list() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in [
+        "foo-1.0.zip",
+        "foo-1.0-py3-none-any.whl",
+        "foo-1.0.tar",
+        "vendor.tar.zst",
+        "registry.tar.zst",
+        "foo.spec",
+    ] {
+        std::fs::write(dir.path().join(name), b"").unwrap();
+    }
+    assert_eq!(
+        source_archives(dir.path()),
+        ["foo-1.0-py3-none-any.whl", "foo-1.0.zip"]
+    );
+}

@@ -4,28 +4,56 @@
 use super::*;
 use crate::pipeline::prompt_notes::*;
 
-/// The source archives in `dir`, in directory order. Cargo dep bundles are not
-/// source archives.
+/// The suffixes of a tarball the extractor reads (`classify` in ecosystem): the
+/// tar family, the short spellings too.
+const TARBALL_SUFFIXES: [&str; 8] = [
+    ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tzst",
+];
+
+/// The suffix of an uncompressed tar. No extractor reads it, so it is never a
+/// source; a replaced release's bare tar is still deleted (see `is_tarball_name`).
+const BARE_TAR_SUFFIX: &str = ".tar";
+
+/// The suffixes of the other source archives: zip and wheels.
+const ZIP_WHEEL_SUFFIXES: [&str; 2] = [".zip", ".whl"];
+
+/// Whether `name` is a Cargo dep bundle (`vendor.tar*`, `registry.tar*`), which
+/// the vendoring services make: never a source archive.
+fn is_dep_bundle(name: &str) -> bool {
+    matches!(
+        name.split_once('.'),
+        Some(("vendor" | "registry", rest)) if rest.starts_with("tar")
+    )
+}
+
+/// Whether `name` is a tarball that is a source: one the extractor reads.
+fn is_extractable_tarball(name: &str) -> bool {
+    !is_dep_bundle(name) && TARBALL_SUFFIXES.iter().any(|s| name.ends_with(s))
+}
+
+/// Whether `name` is the file name of a tarball of a release, for the deletion
+/// of the release a new one replaces (carry): an extractable tarball or a bare
+/// `.tar`, which is not a source and so is never unpacked.
+pub(crate) fn is_tarball_name(name: &str) -> bool {
+    is_extractable_tarball(name) || (!is_dep_bundle(name) && name.ends_with(BARE_TAR_SUFFIX))
+}
+
+/// Whether `name` is the file name of a source archive: a tarball the extractor
+/// reads, a zip or a wheel. The one list of source archive names: `find_tarball`,
+/// the doctor's checks and `source_archives` use it.
+pub(crate) fn is_source_archive_name(name: &str) -> bool {
+    is_extractable_tarball(name)
+        || (!is_dep_bundle(name) && ZIP_WHEEL_SUFFIXES.iter().any(|s| name.ends_with(s)))
+}
+
+/// The source archives in `dir`, in directory order.
 pub(super) fn source_archives(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .filter_map(|e| {
             let e = e.ok()?;
-            let name = e.file_name();
-            let n = name.to_string_lossy();
-            // Exclude Cargo dep bundles — not the Python/Rust source tarball.
-            if n == "vendor.tar.zst" || n == "registry.tar.zst" {
-                return None;
-            }
-            (n.ends_with(".tar.gz")
-                || n.ends_with(".tgz")
-                || n.ends_with(".tar.bz2")
-                || n.ends_with(".tar.xz")
-                || n.ends_with(".tar.zst")
-                || n.ends_with(".zip")
-                || n.ends_with(".whl"))
-            .then(|| e.path())
+            is_source_archive_name(&e.file_name().to_string_lossy()).then(|| e.path())
         })
         .collect()
 }
@@ -90,6 +118,31 @@ pub(super) fn names_version(name: &str, version: &str) -> bool {
                     // `-python.tar.gz` is another archive, not this version's.
                     || (is_wheel && rest.starts_with('-')))
         })
+}
+
+/// The tarballs of `before` (the checkout's tarballs before the service ran)
+/// that the new release replaces: those that carry `old_version` and not
+/// `new_version`, other than `made` (the new tarball's file name) and the
+/// sources of the checkout's sibling specs. Sorted.
+pub(super) fn superseded_tarballs(
+    before: &std::collections::HashSet<String>,
+    old_version: &str,
+    new_version: &str,
+    made: &str,
+    siblings: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = before
+        .iter()
+        .filter(|old| {
+            old.contains(old_version)
+                && !old.contains(new_version)
+                && old.as_str() != made
+                && !siblings.contains(old)
+        })
+        .cloned()
+        .collect();
+    out.sort();
+    out
 }
 
 /// The source archive of `old_version` in `dir` that a new version replaces.

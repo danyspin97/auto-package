@@ -399,14 +399,15 @@ fn carry_forward_service_spec(
     // The tarball of the release being replaced goes; an archive that does not
     // carry the old version in its name (a vendor bundle) is left alone.
     if let Some(old_version) = old_version.filter(|v| *v != config.version) {
-        for old in before {
-            if old.contains(&old_version)
-                && !old.contains(&config.version)
-                && made.file_name().is_none_or(|n| n.to_string_lossy() != old)
-                && !sibling_files.contains(&old)
-            {
-                let _ = std::fs::remove_file(checkout_dir.join(&old));
-            }
+        let made_name = made.file_name().map(|n| n.to_string_lossy().into_owned());
+        for old in superseded_tarballs(
+            &before,
+            &old_version,
+            &config.version,
+            made_name.as_deref().unwrap_or_default(),
+            &sibling_files,
+        ) {
+            let _ = std::fs::remove_file(checkout_dir.join(&old));
         }
     }
     let top = ap_ecosystem::sdist::inspect(&made)
@@ -517,13 +518,13 @@ pub(super) fn carry_forward_obs_scm_spec(
 /// Refuses an `obs_scm` source next to a vendoring service that OBS does not
 /// make at build time: its archive would stay the old one in the checkout and
 /// the package would build the new source with the old dependencies.
-fn tarballs_in(dir: &Path) -> std::collections::HashSet<String> {
+pub(super) fn tarballs_in(dir: &Path) -> std::collections::HashSet<String> {
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| is_archive_name(n))
+        .filter(|n| is_tarball_name(n))
         .collect()
 }
 
