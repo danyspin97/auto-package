@@ -30,13 +30,19 @@ fn claude_that_times_out_or_cannot_launch_is_a_warning_not_a_missing_login() {
     };
     let p = probe(path.clone(), services.path(), &timed_out);
     let rows = run(&needs, &p);
-    assert!(matches!(row(&rows, "claude").outcome, Outcome::WarnText(_)));
+    assert!(matches!(
+        row(&rows, "claude").outcome,
+        Outcome::Unchecked(_)
+    ));
     assert_eq!(*seen.borrow(), Some(Duration::from_secs(30)));
 
     let launch_failed = |_: &[&str], _: Duration| Err("could not launch claude".to_string());
     let p = probe(path.clone(), services.path(), &launch_failed);
     let rows = run(&needs, &p);
-    assert!(matches!(row(&rows, "claude").outcome, Outcome::WarnText(_)));
+    assert!(matches!(
+        row(&rows, "claude").outcome,
+        Outcome::Unchecked(_)
+    ));
 }
 
 #[test]
@@ -134,7 +140,7 @@ fn sudo_that_cannot_be_asked_is_a_warning() {
     let mut p = probe(OsString::new(), services.path(), &broken);
     p.uid = 1000;
     let rows = run(&needs, &p);
-    assert!(matches!(row(&rows, "sudo").outcome, Outcome::WarnText(_)));
+    assert!(matches!(row(&rows, "sudo").outcome, Outcome::Unchecked(_)));
 }
 
 #[test]
@@ -319,16 +325,16 @@ fn only_rustup_on_path_is_a_warning_that_says_so() {
 fn an_unsafe_sandbox_warning_does_not_repeat_the_switch_in_its_reason() {
     let services = tempfile::tempdir().unwrap();
     let mut p = probe(OsString::new(), services.path(), &no_run);
-    p.sandbox = Err(
-        "bwrap is not installed. Install bubblewrap or set AUTO_PACKAGE_UNSAFE_SERVICE=1"
+    p.sandbox = Err(Cause::SandboxUnavailable {
+        why: "bwrap cannot create user namespaces here. Set AUTO_PACKAGE_UNSAFE_SERVICE=1"
             .to_string(),
-    );
+    });
     p.env.insert(UNSAFE_ENV.to_string(), "1".to_string());
     let rows = run(&Needs::default(), &p);
     match &row(&rows, "sandbox").outcome {
         Outcome::WarnText(text) => {
             assert_eq!(text.matches(UNSAFE_ENV).count(), 1, "{text}");
-            assert!(!text.contains("bwrap is not installed"), "{text}");
+            assert!(!text.contains("bwrap cannot create"), "{text}");
         }
         other => panic!("{other:?}"),
     }

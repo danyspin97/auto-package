@@ -3,6 +3,11 @@
 mod build_cmd;
 mod cleanup;
 mod diffview;
+mod doctor_cmd;
+#[cfg(test)]
+mod doctor_cmd_tests;
+#[cfg(test)]
+mod doctor_render_tests;
 mod edit_bytes;
 mod explain_cmd;
 mod fix_cmd;
@@ -39,6 +44,7 @@ use build_cmd::*;
 Exit status:
   0    success (review: no finding at or above --fail-on)
   1    the run failed: a package failed, or a check of the arguments failed
+  1    doctor: a required item is missing (warnings never fail)
   2    usage error (clap)
   3    fix: no fix needed, or none found
   4    fix: a maintainer must decide
@@ -323,6 +329,11 @@ enum Commands {
     /// build results, a signed file's download), or `--agent` is given and claude
     /// is not logged in or the day's spend cap is reached).
     Review(review_cmd::ReviewArgs),
+    /// Check this machine for what auto-package needs and say what to install
+    /// or set up. No OBS request unless `--online`; it installs nothing and needs no
+    /// project or work directory. Exit status: 0 when no required item is
+    /// missing, 1 otherwise.
+    Doctor(doctor_cmd::DoctorArgs),
 }
 mod allow_host;
 #[cfg(test)]
@@ -366,6 +377,10 @@ fn main() -> color_eyre::Result<()> {
         let code = review_cmd::main(args);
         finish();
         std::process::exit(code);
+    }
+    // Handled before `run`: it needs no project, lock, agent or interrupt handler.
+    if let Commands::Doctor(args) = &cli.command {
+        std::process::exit(doctor_cmd::main(args));
     }
     let mut summary: Option<String> = None;
     let result = run(cli, &mut summary);

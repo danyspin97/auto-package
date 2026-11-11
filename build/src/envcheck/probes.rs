@@ -20,6 +20,9 @@ use crate::service_sandbox::{
 const CLAUDE_TIMEOUT: Duration = Duration::from_secs(30);
 const WHOIS_TIMEOUT: Duration = Duration::from_secs(10);
 const SUDO_TIMEOUT: Duration = Duration::from_secs(5);
+/// What to do when claude is not installed: it is not a distribution package.
+const CLAUDE_INSTALL: &str =
+    "install the Claude Code CLI (https://claude.com/claude-code), then run: claude auth login";
 
 /// Whether `name` is an executable file in a directory of the host's PATH.
 pub fn tool_on_path(name: &str) -> bool {
@@ -141,7 +144,7 @@ pub fn sandbox(probe: &Probe<'_>) -> Outcome {
         (Ok(()), true) => Outcome::WarnText(format!(
             "services run WITHOUT a sandbox: {UNSAFE_ENV} is set"
         )),
-        (Err(why), false) => Outcome::Missing(Cause::SandboxUnavailable { why: why.clone() }),
+        (Err(cause), false) => Outcome::Missing(cause.clone()),
         (Ok(()), false) => {
             Outcome::Ok("bubblewrap, user namespaces, python3 and setpriv are in place".to_string())
         }
@@ -153,14 +156,14 @@ pub fn sandbox(probe: &Probe<'_>) -> Outcome {
 /// odd output) is a warning, as the agent's own start check lets it pass.
 pub fn claude(probe: &Probe<'_>) -> Outcome {
     if !on_path_in("claude", &probe.path) {
-        return Outcome::Missing(missing_tool("claude"));
+        return Outcome::MissingText(CLAUDE_INSTALL.to_string());
     }
     match (probe.run)(&["claude", "auth", "status"], CLAUDE_TIMEOUT) {
         Ok(out) if status_says_logged_out(&out.stdout) => {
             Outcome::MissingText(NOT_LOGGED_IN_MESSAGE.to_string())
         }
         Ok(_) => Outcome::Ok("claude did not report a logout".to_string()),
-        Err(e) => Outcome::WarnText(format!("claude auth status could not run: {e}")),
+        Err(e) => Outcome::Unchecked(format!("claude auth status could not run: {e}")),
     }
 }
 
@@ -181,7 +184,7 @@ pub fn sudo(probe: &Probe<'_>) -> Outcome {
              as root"
                 .to_string(),
         ),
-        Err(e) => Outcome::WarnText(format!("sudo cannot be checked: {e}")),
+        Err(e) => Outcome::Unchecked(format!("sudo cannot be checked: {e}")),
     }
 }
 
@@ -366,7 +369,7 @@ pub fn osc_whois(probe: &Probe<'_>) -> Outcome {
             "osc whois failed: {}",
             out.stderr.lines().next().unwrap_or("no output")
         )),
-        Err(e) => Outcome::WarnText(format!("osc whois could not run: {e}")),
+        Err(e) => Outcome::Unchecked(format!("osc whois could not run: {e}")),
     }
 }
 

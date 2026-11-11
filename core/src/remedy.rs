@@ -147,6 +147,10 @@ fn suse_table(tool: &str) -> Option<&'static str> {
         "gpg" => "gpg2",
         "rpmspec" => "rpm-build",
         "quilt" => "quilt",
+        // Both verified against the openSUSE repositories: `gcc` ships
+        // /usr/bin/gcc, and `rustup` ships /usr/bin/cargo.
+        "gcc" => "gcc",
+        "cargo" => "rustup",
         "bwrap" => "bubblewrap",
         "setpriv" => "util-linux",
         "cargo_vendor" | "cargo_audit" => "obs-service-cargo",
@@ -208,6 +212,8 @@ mod tests {
             ("build", "build"),
             ("gpg", "gpg2"),
             ("quilt", "quilt"),
+            ("gcc", "gcc"),
+            ("cargo", "rustup"),
             ("bwrap", "bubblewrap"),
             ("setpriv", "util-linux"),
             ("cargo_vendor", "obs-service-cargo"),

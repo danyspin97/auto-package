@@ -270,7 +270,7 @@ fn claude_missing_from_the_path_is_missing_without_a_run() {
     let rows = run(&needs, &p);
     assert!(matches!(
         &row(&rows, "claude").outcome,
-        Outcome::Missing(Cause::MissingTool { tool, .. }) if tool == "claude"
+        Outcome::MissingText(text) if text.contains("claude auth login")
     ));
 }
 
@@ -297,12 +297,27 @@ fn the_build_root_is_the_probe_fact() {
 fn the_sandbox_is_missing_with_its_reason_and_warned_when_unsafe() {
     let services = tempfile::tempdir().unwrap();
     let mut p = probe(OsString::new(), services.path(), &no_run);
-    p.sandbox = Err("bwrap is not installed".to_string());
+    p.sandbox = Err(Cause::SandboxUnavailable {
+        why: "bwrap cannot create user namespaces here".to_string(),
+    });
     let rows = run(&Needs::default(), &p);
     assert_eq!(
         row(&rows, "sandbox").outcome,
         Outcome::Missing(Cause::SandboxUnavailable {
-            why: "bwrap is not installed".to_string()
+            why: "bwrap cannot create user namespaces here".to_string()
+        })
+    );
+    // A missing tool keeps its own row, so the install line can name it.
+    p.sandbox = Err(Cause::MissingTool {
+        tool: "bwrap".to_string(),
+        path: None,
+    });
+    let rows = run(&Needs::default(), &p);
+    assert_eq!(
+        row(&rows, "sandbox").outcome,
+        Outcome::Missing(Cause::MissingTool {
+            tool: "bwrap".to_string(),
+            path: None
         })
     );
 

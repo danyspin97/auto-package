@@ -29,7 +29,8 @@ use crate::osc::check_build_root_space;
 use crate::osc::local_build;
 use crate::proc::{self, Emit};
 use crate::service_sandbox::{
-    CARGO_PATHS, HostVars, SERVICE_DIR, UNSAFE_ENV, cargo_is_rustup, oscrc_paths, sandbox_ready,
+    CARGO_PATHS, HostVars, PYTHON, SERVICE_DIR, SETPRIV, UNSAFE_ENV, cargo_is_rustup, oscrc_paths,
+    sandbox_ready,
 };
 
 /// Whether a missing check stops a run that needs it.
@@ -81,8 +82,9 @@ pub struct Probe<'a> {
     pub uid: u32,
     /// Whether `cargo` resolves to rustup (the sandbox's own check).
     pub cargo_is_rustup: bool,
-    /// Whether the service sandbox can start, or why not.
-    pub sandbox: Result<(), String>,
+    /// Whether the service sandbox can start, or why not: a missing tool, or
+    /// the sandbox's own reason as `SandboxUnavailable`.
+    pub sandbox: Result<(), Cause>,
     /// The free space of the build root (its bytes and directory, or why it
     /// is not enough). A call runs `df`, so only the local rows call it.
     pub build_root: Box<dyn Fn() -> Result<(u64, PathBuf), String>>,
@@ -106,6 +108,9 @@ pub enum Outcome {
     MissingText(String),
     /// Optional and not right, for a fix that is not a [`Cause`].
     WarnText(String),
+    /// A probe that could not run, so the fact is not known. Shown as a
+    /// warning; a required row so found is counted as unchecked in a verdict.
+    Unchecked(String),
     /// Does not apply to this machine's configuration: the row is left out.
     NotApplicable,
 }
@@ -318,6 +323,36 @@ pub fn run(needs: &Needs, probe: &Probe<'_>) -> Vec<CheckResult> {
     rows
 }
 
+/// The rows of OBS services that a run uses for some packages only. Each is
+/// optional: a missing helper is a warning whose text is `why` (the install
+/// hint is the one a required service gets). [`run`] makes the rows of the
+/// services a run names, which are required.
+pub fn optional_service_rows(probe: &Probe<'_>, names: &[&str], why: &str) -> Vec<CheckResult> {
+    let host = parse_os_release(&probe.os_release);
+    names
+        .iter()
+        .map(|&name| {
+            let outcome = match probes::service(probe, name) {
+                Outcome::Missing(cause) => Outcome::Warn(cause),
+                Outcome::MissingText(text) => Outcome::WarnText(text),
+                other => other,
+            };
+            let is_warn = matches!(outcome, Outcome::Warn(_));
+            let mut row = result(
+                format!("service:{}", printable(name)),
+                format!("OBS service {}", printable(name)),
+                Required::No,
+                outcome,
+                host,
+            );
+            if is_warn {
+                row.outcome = Outcome::WarnText(format!("not installed; {why}"));
+            }
+            row
+        })
+        .collect()
+}
+
 fn result(
     id: String,
     name: String,
@@ -377,10 +412,7 @@ pub fn host_probe() -> Probe<'static> {
         rustup_vars: HostVars::from_env(),
         uid,
         cargo_is_rustup: cargo_is_rustup(&CARGO_PATHS),
-        sandbox: sandbox_ready().map(|_| ()).map_err(|e| match e {
-            Error::ServiceSandbox(why) => why,
-            other => other.to_string(),
-        }),
+        sandbox: sandbox_cause(),
         // Read at row time, not here: `enable_local_build` may run after this.
         build_root: Box::new(|| {
             check_build_root_space(&local_build().cloned().unwrap_or_default())
@@ -389,6 +421,35 @@ pub fn host_probe() -> Probe<'static> {
         env,
         run: &host_run,
     }
+}
+
+/// Why the service sandbox cannot start, as a cause. It follows the order of
+/// `sandbox_ready`: a missing bwrap, bwrap that cannot run, then the python3
+/// and setpriv helpers. A missing tool is a `MissingTool` (its package is named
+/// on openSUSE); anything else keeps the sandbox's own reason.
+fn sandbox_cause() -> Result<(), Cause> {
+    let why = match sandbox_ready() {
+        Ok(_) => return Ok(()),
+        Err(Error::ServiceSandbox(why)) => why,
+        Err(other) => other.to_string(),
+    };
+    let missing = |tool: &str, path: Option<&str>| Cause::MissingTool {
+        tool: tool.to_string(),
+        path: path.map(PathBuf::from),
+    };
+    if ap_core::sandbox::bwrap_path().is_none() {
+        return Err(missing("bwrap", None));
+    }
+    if !ap_core::sandbox::bwrap_works() {
+        return Err(Cause::SandboxUnavailable { why });
+    }
+    if !Path::new(PYTHON).is_file() {
+        return Err(missing("python3", Some(PYTHON)));
+    }
+    if !Path::new(SETPRIV).is_file() {
+        return Err(missing("setpriv", Some(SETPRIV)));
+    }
+    Err(Cause::SandboxUnavailable { why })
 }
 
 /// The oscrc files osc reads. With `OSC_CONFIG` set, osc reads that file alone

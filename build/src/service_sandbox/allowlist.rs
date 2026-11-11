@@ -7,10 +7,10 @@ pub(crate) const UNSAFE_ENV: &str = "AUTO_PACKAGE_UNSAFE_SERVICE";
 pub(crate) const SERVICE_DIR: &str = "/usr/lib/obs/service";
 
 /// The interpreter running the loopback bridge; osc itself needs it.
-pub(super) const PYTHON: &str = "/usr/bin/python3";
+pub(crate) const PYTHON: &str = "/usr/bin/python3";
 
 /// util-linux `setpriv`, which starts each service without capabilities.
-pub(super) const SETPRIV: &str = "/usr/bin/setpriv";
+pub(crate) const SETPRIV: &str = "/usr/bin/setpriv";
 
 /// Where the proxy's socket directory appears inside the sandbox.
 pub(super) const SANDBOX_PROXY_DIR: &str = "/run/ap-proxy";
