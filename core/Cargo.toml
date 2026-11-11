@@ -11,6 +11,8 @@ thiserror = "2.0.20"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 owo-colors = { version = "4", features = ["supports-colors"] }
+crossterm = "0.28"
+unicode-width = "0.2.0"
 libc = "0.2.189"
 
 [dev-dependencies]

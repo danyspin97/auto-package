@@ -140,6 +140,7 @@ dependencies = [
 name = "ap-core"
 version = "0.1.0"
 dependencies = [
+ "crossterm",
  "eyre",
  "libc",
  "owo-colors",
@@ -147,6 +148,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
