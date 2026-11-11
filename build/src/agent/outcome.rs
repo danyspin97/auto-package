@@ -474,6 +474,12 @@ pub struct TurnOutcome {
     /// A FixFindings turn's bullets for the request's own newest `.changes`
     /// entry; empty when it gave none.
     pub changes_entry: String,
+    /// The reply's plain-words summary of what is wrong, for the user. `None`
+    /// when the reply gave none, or gave one that was refused (see `user_text`).
+    pub user_summary: Option<String>,
+    /// One step the user can take, as a command or an instruction. `None` when
+    /// the reply gave none, or gave one that was refused.
+    pub user_action: Option<String>,
     pub confidence: Confidence,
     pub usage: Usage,
     pub tool_calls: Vec<ToolCall>,

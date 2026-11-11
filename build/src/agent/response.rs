@@ -46,6 +46,8 @@ pub(super) const TURN_RESPONSE_SCHEMA: &str = r#"{
       "description": "Every file you Read or pattern you Grepped before editing, e.g. ['Read source/pyproject.toml', 'Grep for console_scripts in source/']. Must be non-empty when action is edited."
     },
     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    "user_summary": {"type": "string", "description": "Optional, only when the Context asks for it: at most two plain sentences for the package's maintainer saying what is wrong. No convention or section numbers, no file paths of the tool, no logs."},
+    "user_action": {"type": "string", "description": "Optional, only when the Context asks for it: one concrete step the maintainer can take, as a command or an instruction; empty when no such step is known."},
     "unresolvable_packages": {"type": "array", "items": {"type": "string"}},
     "patch_dependencies": {
       "type": "array",
@@ -287,6 +289,12 @@ pub(super) struct TurnResponse {
     pub(super) finding_answers: Vec<super::FindingAnswer>,
     #[serde(default)]
     pub(super) changes_entry: String,
+    /// Optional, asked for in a resolution round only. Normalised on read.
+    #[serde(default, deserialize_with = "super::user_text::summary_field")]
+    pub(super) user_summary: Option<String>,
+    /// Optional, asked for in a resolution round only. Normalised on read.
+    #[serde(default, deserialize_with = "super::user_text::action_field")]
+    pub(super) user_action: Option<String>,
 }
 
 /// Pick a usable `TurnResponse` out of a finished turn's output.

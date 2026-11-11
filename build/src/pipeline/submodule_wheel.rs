@@ -120,6 +120,8 @@ pub(super) fn pipeline_wheel_outcome(why: &str) -> crate::agent::TurnOutcome {
         review_findings: Vec::new(),
         finding_answers: Vec::new(),
         changes_entry: String::new(),
+        user_summary: None,
+        user_action: None,
         confidence: crate::agent::Confidence::High,
         usage: crate::agent::Usage::default(),
         tool_calls: Vec::new(),

@@ -561,6 +561,8 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
         review_findings: resp.findings.unwrap_or_default(),
         finding_answers: resp.finding_answers,
         changes_entry: resp.changes_entry,
+        user_summary: resp.user_summary,
+        user_action: resp.user_action,
         confidence: resp.confidence,
         usage,
         tool_calls,

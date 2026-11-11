@@ -56,6 +56,8 @@ fn outcome(findings: Vec<AgentFinding>, cost: f64) -> TurnOutcome {
         review_findings: findings,
         finding_answers: Vec::new(),
         changes_entry: String::new(),
+        user_summary: None,
+        user_action: None,
         drops_changelog: Vec::new(),
         bug_fix: None,
         confidence: Confidence::High,
