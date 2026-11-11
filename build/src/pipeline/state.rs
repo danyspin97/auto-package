@@ -106,6 +106,9 @@ pub struct PkgState {
     /// with `ladder_spec_hash`, which every write of the memo sets with it.
     #[serde(default)]
     pub ladder_needs_maintainer: bool,
+    /// The memo's short recap (see `ladder_fields`); same JSON object.
+    #[serde(flatten)]
+    pub ladder_recap: crate::pipeline::ladder_fields::LadderRecapFields,
     /// Hash of the build.log the last PreFix agent turn read. The same log is
     /// not handed to a turn twice (it would find nothing new, at a turn's cost).
     #[serde(default)]
@@ -532,6 +535,7 @@ impl PkgState {
         // and a later rebuild of the same spec must not be refused for it.
         self.ladder_spec_hash = None;
         self.ladder_reason = None;
+        self.ladder_recap = Default::default();
     }
 
     /// The ladder history of a failed resolution of exactly this spec content,

@@ -334,14 +334,19 @@ mod bug_fix_rounds;
 mod bug_fix_stage;
 #[cfg(test)]
 mod bug_fix_stage_tests;
+mod failed_note;
 mod findings_rounds;
 mod findings_stage;
 mod ladder;
+mod ladder_fields;
+#[cfg(test)]
+mod ladder_fields_tests;
 mod ladder_memo;
 mod ladder_recap;
 #[cfg(test)]
 mod ladder_recap_tests;
 pub use ladder::*;
+pub use ladder_fields::LadderRecapFields;
 use ladder_memo::*;
 mod logs;
 mod sdist_name;
