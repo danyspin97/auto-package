@@ -73,10 +73,10 @@ fn colour_line(line: &str) -> String {
             );
         }
         for (label, sgr) in LABELS {
-            if let Some(rest) = body.strip_prefix(label) {
-                if rest.starts_with(' ') {
-                    return format!("{}{}", wrap(label, sgr, "22;39"), inline(rest, None));
-                }
+            if let Some(rest) = body.strip_prefix(label)
+                && rest.starts_with(' ')
+            {
+                return format!("{}{}", wrap(label, sgr, "22;39"), inline(rest, None));
             }
         }
     }
