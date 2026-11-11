@@ -284,9 +284,10 @@ fn the_pypi_line_is_true_with_and_without_a_source() {
         "1.0",
         Some("https://github.com/someone/jay-py"),
         &v(&["https://github.com/x/jay"]),
+        false,
     );
     assert!(with.contains("  PyPI project   jay 1.0   https://github.com/someone/jay-py\n"));
-    let without = clash_message("jay", "1.0", None, &v(&["https://github.com/x/jay"]));
+    let without = clash_message("jay", "1.0", None, &v(&["https://github.com/x/jay"]), false);
     assert!(without.contains("  PyPI project   jay 1.0   no source on a known forge\n"));
     assert!(!without.contains("names no source"));
 }
@@ -301,6 +302,7 @@ fn the_refusal_has_the_exact_layout() {
             "https://github.com/mahkoh/jay",
             "https://github.com/sxcool1024/Jay",
         ]),
+        false,
     );
     assert_eq!(
         m,
@@ -321,7 +323,7 @@ fn the_refusal_has_the_exact_layout() {
 #[test]
 fn every_repo_gets_its_own_command_line() {
     let repos = v(&["https://github.com/a/jay", "https://github.com/b/jay"]);
-    let m = clash_message("jay", "1.0", None, &repos);
+    let m = clash_message("jay", "1.0", None, &repos, false);
     for r in &repos {
         assert!(m.contains(&format!("\n  auto-package build {r}\n")), "{r}");
     }
@@ -426,7 +428,13 @@ fn pypi_with_a_url_or_no_name_is_refused() {
 
 #[test]
 fn the_message_offers_both_choices() {
-    let m = clash_message("jay", "1.0", None, &v(&["https://github.com/mahkoh/jay"]));
+    let m = clash_message(
+        "jay",
+        "1.0",
+        None,
+        &v(&["https://github.com/mahkoh/jay"]),
+        false,
+    );
     assert!(m.contains("build pypi:jay") && m.contains("build https://github.com/mahkoh/jay"));
     assert!(m.contains("type `pypi:jay`"));
 }
@@ -457,7 +465,7 @@ fn display_is_the_plain_table_and_the_tui_gets_its_one_line() {
     let refused = err.downcast_ref::<Refusal>().expect("a refusal");
     assert_eq!(
         refused.to_string(),
-        clash_message("jay", "0.2.0", None, &refusal().repos)
+        clash_message("jay", "0.2.0", None, &refusal().repos, false)
     );
     assert!(
         refused
@@ -477,10 +485,77 @@ fn display_is_the_plain_table_and_the_tui_gets_its_one_line() {
 #[test]
 fn build_prints_the_table_of_a_refusal_and_other_errors_as_before() {
     let err = color_eyre::Report::from(refusal());
-    assert_eq!(error_text(&err), refusal().table());
+    assert_eq!(error_text(&err, false), refusal().table(false));
     assert!(
-        error_text(&err).starts_with("`jay` is ambiguous: PyPI and a repository both claim it\n")
+        error_text(&err, false)
+            .starts_with("`jay` is ambiguous: PyPI and a repository both claim it\n")
     );
     let other = color_eyre::eyre::eyre!("no network");
-    assert_eq!(error_text(&other), "no network");
+    assert_eq!(error_text(&other, false), "no network");
+}
+
+/// The text with its SGR escapes removed.
+fn without_escapes(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for d in chars.by_ref() {
+                if d == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn the_plain_refusal_has_no_escapes() {
+    let m = clash_message(
+        "jay",
+        "0.2.0",
+        None,
+        &v(&["https://github.com/mahkoh/jay"]),
+        false,
+    );
+    assert!(!m.contains('\x1b'), "{m:?}");
+}
+
+#[test]
+fn the_coloured_refusal_stripped_of_escapes_is_the_plain_one() {
+    for source in [Some("https://github.com/colorstain/jay"), None] {
+        let repos = v(&[
+            "https://github.com/mahkoh/jay",
+            "https://github.com/sxcool1024/Jay",
+        ]);
+        let plain = clash_message("jay", "0.2.0", source, &repos, false);
+        let coloured = clash_message("jay", "0.2.0", source, &repos, true);
+        assert_eq!(without_escapes(&coloured), plain);
+        assert!(coloured.contains('\x1b'));
+    }
+}
+
+#[test]
+fn the_coloured_refusal_styles_each_part() {
+    let coloured = clash_message(
+        "jay",
+        "0.2.0",
+        Some("https://github.com/colorstain/jay"),
+        &v(&["https://github.com/mahkoh/jay"]),
+        true,
+    );
+    for part in [
+        "\x1b[1m`jay`\x1b[0m",
+        "\x1b[36mPyPI project\x1b[0m",
+        "\x1b[36mrepository  \x1b[0m",
+        "\x1b[4mhttps://github.com/colorstain/jay\x1b[0m",
+        "\x1b[4mhttps://github.com/mahkoh/jay\x1b[0m",
+        "\x1b[32mauto-package build pypi:jay\x1b[0m",
+        "\x1b[32mauto-package build https://github.com/mahkoh/jay\x1b[0m",
+    ] {
+        assert!(coloured.contains(part), "missing {part:?} in {coloured:?}");
+    }
 }

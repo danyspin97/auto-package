@@ -6,6 +6,7 @@
 //! at that repository, auto-package stops and lists both.
 
 use crate::*;
+use owo_colors::{OwoColorize, Stream};
 
 /// Whether the clash check runs for a bare name. It does not when the name is
 /// a repository (a URL, or `--url`), when an NVIDIA option is given, when
@@ -97,28 +98,63 @@ pub(crate) fn clashing_repos(
         .collect()
 }
 
+/// Wrap `text` in the SGR code `sgr` when `colour` is on. The columns are
+/// padded before this runs, so the escapes never change a width.
+fn paint(text: &str, colour: bool, sgr: &str) -> String {
+    if colour {
+        format!("\x1b[{sgr}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Whether stderr takes colour, by the rule every other stderr line follows
+/// (owo-colors: a terminal, `NO_COLOR` unset, `CLICOLOR_FORCE` honoured).
+pub(crate) fn stderr_colour() -> bool {
+    !"".if_supports_color(Stream::Stderr, |t| t.red())
+        .to_string()
+        .is_empty()
+}
+
 /// The refusal text, as `build` prints it after `error:`: the two kinds of
-/// choice in aligned columns, then the command for each, one per line.
+/// choice in aligned columns, then the command for each, one per line. With
+/// `colour` the name is bold, the kinds cyan, the URLs underlined and the
+/// commands green; stripped of escapes it is the same text.
 pub(crate) fn clash_message(
     name: &str,
     version: &str,
     pypi_source: Option<&str>,
     repos: &[String],
+    colour: bool,
 ) -> String {
     const KIND: usize = "PyPI project".len();
-    let source = pypi_source.unwrap_or("no source on a known forge");
-    let mut out = format!("`{name}` is ambiguous: PyPI and a repository both claim it\n\n");
+    let kind = |k: &str| paint(&format!("{k:<KIND$}"), colour, "36");
+    let url = |u: &str| paint(u, colour, "4");
+    let source = match pypi_source {
+        Some(s) => url(s),
+        None => "no source on a known forge".to_string(),
+    };
+    let mut out = format!(
+        "{} is ambiguous: PyPI and a repository both claim it\n\n",
+        paint(&format!("`{name}`"), colour, "1")
+    );
     out.push_str(&format!(
-        "  {:<KIND$}   {name} {version}   {source}\n",
-        "PyPI project"
+        "  {}   {name} {version}   {source}\n",
+        kind("PyPI project")
     ));
     for r in repos {
-        out.push_str(&format!("  {:<KIND$}   {r}\n", "repository"));
+        out.push_str(&format!("  {}   {}\n", kind("repository"), url(r)));
     }
     out.push_str("\nPick one and re-run:\n");
-    out.push_str(&format!("  auto-package build pypi:{name}\n"));
+    let command = |c: &str| {
+        format!(
+            "  {}\n",
+            paint(&format!("auto-package build {c}"), colour, "32")
+        )
+    };
+    out.push_str(&command(&format!("pypi:{name}")));
     for r in repos {
-        out.push_str(&format!("  auto-package build {r}\n"));
+        out.push_str(&command(r));
     }
     out.push_str(&format!(
         "(in the TUI, type `pypi:{name}` or the repository URL)"
@@ -138,12 +174,13 @@ pub(crate) struct Refusal {
 
 impl Refusal {
     /// The table `build` prints, as `clash_message` lays it out.
-    pub(crate) fn table(&self) -> String {
+    pub(crate) fn table(&self, colour: bool) -> String {
         clash_message(
             &self.name,
             &self.version,
             self.pypi_source.as_deref(),
             &self.repos,
+            colour,
         )
     }
 }
@@ -163,7 +200,7 @@ impl Refusal {
 impl std::fmt::Display for Refusal {
     /// The plain table, the same text `build` prints after `error:`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.table())
+        f.write_str(&self.table(false))
     }
 }
 
@@ -180,9 +217,9 @@ pub(crate) fn tui_failure(label: &str, e: &color_eyre::Report) -> String {
 
 /// The text `main` prints after `error:`: the table of a refusal, and any
 /// other error as it always was.
-pub(crate) fn error_text(e: &color_eyre::Report) -> String {
+pub(crate) fn error_text(e: &color_eyre::Report, colour: bool) -> String {
     match e.downcast_ref::<Refusal>() {
-        Some(refusal) => refusal.table(),
+        Some(refusal) => refusal.table(colour),
         None => format!("{e:#}"),
     }
 }

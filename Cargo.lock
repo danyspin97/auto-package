@@ -125,6 +125,7 @@ dependencies = [
  "crossterm",
  "ctrlc",
  "diff",
+ "owo-colors",
  "ratatui",
  "serde",
  "serde_json",

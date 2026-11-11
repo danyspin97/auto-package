@@ -413,7 +413,11 @@ fn main() -> color_eyre::Result<()> {
         // The message as the user needs it: the causes, without the source
         // location. RUST_BACKTRACE asks for the full report.
         Err(e) if std::env::var_os("RUST_BACKTRACE").is_none() => {
-            eprintln!("error: {}", name_clash::error_text(&e));
+            use owo_colors::{OwoColorize, Stream, Style};
+            let colour = name_clash::stderr_colour();
+            let label =
+                "error:".if_supports_color(Stream::Stderr, |t| t.style(Style::new().red().bold()));
+            eprintln!("{label} {}", name_clash::error_text(&e, colour));
             std::process::exit(1);
         }
         Err(e) => Err(e),
