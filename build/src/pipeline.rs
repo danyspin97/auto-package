@@ -342,6 +342,7 @@ mod failed_note;
 mod findings_rounds;
 mod findings_stage;
 mod ladder;
+mod ladder_end;
 mod ladder_fields;
 #[cfg(test)]
 mod ladder_fields_tests;

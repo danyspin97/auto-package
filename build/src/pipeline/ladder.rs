@@ -4,6 +4,7 @@
 use super::*;
 use crate::pipeline::apply_turn::*;
 use crate::pipeline::archive::*;
+use crate::pipeline::ladder_end::*;
 use crate::pipeline::logs::*;
 use crate::pipeline::npm_vendor::*;
 use crate::pipeline::prompt_notes::*;
@@ -249,6 +250,8 @@ pub(super) fn resolve_blocked_with(
     // the package never takes the wheel, the rounds go on without it, and a
     // ladder that then ends unresolved needs a maintainer.
     let mut wheel_refused: Option<String> = None;
+    // What each resolver round said for the user (see `ladder_end`).
+    let mut answers: Vec<RoundAnswer> = Vec::new();
     let result = run_ladder(&first, LADDER_ROUNDS, |round, history| {
         let latest = history.last().map(String::as_str).unwrap_or("");
         // Mechanical: when only a few tests of `%check` fail, skip exactly those
@@ -411,6 +414,13 @@ pub(super) fn resolve_blocked_with(
                 return Rung::Abort(ctx.failed_as(kind, e));
             }
         };
+        if out.user_summary.is_some() || out.user_action.is_some() {
+            answers.push(RoundAnswer {
+                round,
+                summary: out.user_summary.clone(),
+                action: out.user_action.clone(),
+            });
+        }
         if let Some(missing) = missing_deps_from_turn(ctx, step.id, &out) {
             // Not applied, so not validated or journaled: undo it (see
             // `fix_after_build`).
@@ -501,80 +511,14 @@ pub(super) fn resolve_blocked_with(
             Ok(effect)
         }
         Err(LadderEnd::Abort(result)) => Err(result),
-        Err(LadderEnd::Exhausted(history)) => {
-            let text = history
-                .iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    let who = if i == 0 { "turn" } else { "round" };
-                    format!("{who} {i}: {}", brief(r))
-                })
-                .collect::<Vec<_>>()
-                .join(" | ");
-            append_notes(
-                ws.notes(),
-                &format!(
-                    "\n## {} — resolution ladder {}\n{LADDER_FAILED_PREFIX}{}:\n{}\n",
-                    site.apply_label,
-                    if budget_stopped {
-                        "stopped on the budget"
-                    } else {
-                        "spent"
-                    },
-                    if budget_stopped {
-                        "the run's budget was spent before every rung ran"
-                    } else {
-                        "every rung failed"
-                    },
-                    history
-                        .iter()
-                        .enumerate()
-                        .map(|(i, r)| format!("{}. {}", i + 1, brief(r)))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                ),
-            );
-            // Every rung that ran failed and the wheel was refused for a
-            // security patch: the package needs a maintainer, and so does a rerun
-            // of the same spec (the memo keeps the kind and the refusal).
-            let (kind, text) = match wheel_refused {
-                Some(refusal) if !budget_stopped => {
-                    (FailureKind::NeedsMaintainer, format!("{text}; {refusal}"))
-                }
-                _ => (FailureKind::Exhausted, text),
-            };
-            // A patch-driven ladder (the package is a dependency being patched)
-            // writes no memo: the spec it failed on is the dependency's, and
-            // an ordinary run of that package must not find it spent.
-            // `spent_ladder_refusal` likewise skips the check for a patch run.
-            // A ladder the budget stopped did not try its rungs, so nothing is
-            // remembered: a rerun with more budget must run them.
-            if should_remember_ladder(
-                site.task == crate::agent::Task::PatchDependency,
-                budget_stopped,
-            ) {
-                // Keyed on the spec on disk now, which is what
-                // `spent_ladder_refusal` reads: a round that kept spec edits (a
-                // deferred npm route) moved the base on from `site.before`.
-                let spec_now = std::fs::read_to_string(spec_path).unwrap_or_default();
-                let key = ladder_key(config, &spec_now);
-                let memo = text.clone();
-                let needs = kind == FailureKind::NeedsMaintainer;
-                update_state(ws, *reporter, |state| {
-                    state.ladder_spec_hash = Some(key);
-                    state.ladder_reason = Some(memo);
-                    state.ladder_needs_maintainer = needs;
-                });
-            }
-            let why = if budget_stopped {
-                format!(
-                    "stopped on the budget (${:.2} spent of ${:.2}) before every rung ran: {text}",
-                    st.spent_usd, config.budget_usd
-                )
-            } else {
-                text
-            };
-            Err(ctx.failed_as(kind, format!("{LADDER_FAILED_PREFIX}{rpm_name}: {why}")))
-        }
+        Err(LadderEnd::Exhausted(history)) => Err(end_exhausted(
+            ctx,
+            st.spent_usd,
+            &site,
+            &history,
+            &answers,
+            budget_stopped,
+            wheel_refused,
+        )),
     }
 }

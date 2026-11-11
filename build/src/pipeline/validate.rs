@@ -473,9 +473,12 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                         // Budget exhaustion, cancellation and the apply gate's
                         // refusals still fail the package below. Every problem
                         // here is style, so an exhausted ladder is style too.
-                        Err(PipelineResult::Failed { reason, kind, .. })
-                            if style_failure_warns(kind) =>
-                        {
+                        Err(PipelineResult::Failed {
+                            reason, kind, note, ..
+                        }) if style_failure_warns(kind) => {
+                            // The warning keeps the full text of a ladder (the
+                            // note's detail) as it always had.
+                            let reason = note.and_then(|n| n.detail).unwrap_or(reason);
                             // The ladder memo would refuse a later rebuild of
                             // this spec as spent; a style-only failure must not.
                             if kind == FailureKind::Exhausted {

@@ -165,7 +165,9 @@ impl Frontier<'_> {
                 }
                 self.batch_pending.extend(deps);
             }
-            PipelineResult::Failed { reason, kind, .. } => {
+            PipelineResult::Failed {
+                reason, kind, note, ..
+            } => {
                 self.batch_failures.push((rpm_name.clone(), reason.clone()));
                 if kind == FailureKind::Busy {
                     // Another process is building this package, so nothing
@@ -221,7 +223,15 @@ impl Frontier<'_> {
                 // A package whose resolution ladder was spent is not run
                 // again: the same spec would fail the same ladder again. It
                 // is a failure of the tool to investigate, never a `blocked`.
-                let ladder = reason.starts_with(ap_build::pipeline::LADDER_FAILED_PREFIX);
+                // Its full text (the note's detail) starts with the marker; the
+                // reason is the short recap.
+                let ladder = [
+                    Some(reason.as_str()),
+                    note.as_ref().and_then(|n| n.detail.as_deref()),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|t| t.starts_with(ap_build::pipeline::LADDER_FAILED_PREFIX));
                 let count = if rate_limited {
                     self.rate_limited_counts
                         .entry(rpm_name.clone())

@@ -2,6 +2,8 @@ use super::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::logs::*;
 
+mod recap;
+
 #[test]
 fn a_spent_ladder_fails_exhausted_with_every_reason_and_is_remembered() {
     let lookups = std::cell::Cell::new(0);
@@ -22,13 +24,18 @@ fn a_spent_ladder_fails_exhausted_with_every_reason_and_is_remembered() {
     assert_eq!(lookups.get(), 1);
     assert_eq!(case.contexts.len(), 3);
     match case.result {
-        Err(PipelineResult::Failed { reason, kind, .. }) => {
+        Err(PipelineResult::Failed {
+            reason, kind, note, ..
+        }) => {
             assert_eq!(kind, FailureKind::Exhausted);
-            assert!(reason.starts_with(LADDER_FAILED_PREFIX), "{reason}");
+            // The reason is the short recap; the note keeps every round.
+            assert!(reason.starts_with("python-foo could not be resolved: "));
+            let detail = note.and_then(|n| n.detail).unwrap();
+            assert!(detail.starts_with(LADDER_FAILED_PREFIX), "{detail}");
             for r in ["reason zero", "reason one", "reason two", "reason three"] {
                 assert!(
-                    reason.contains(r) && case.notes.contains(r),
-                    "{r}: {reason} {}",
+                    detail.contains(r) && case.notes.contains(r),
+                    "{r}: {detail} {}",
                     case.notes
                 );
             }
@@ -187,11 +194,18 @@ fn a_refused_wheel_rung_is_skipped_and_the_ladder_ends_as_needs_maintainer() {
     assert_eq!(lookups.get(), 1);
     assert_eq!(case.contexts.len(), 3);
     match &case.result {
-        Err(PipelineResult::Failed { reason, kind, .. }) => {
+        Err(PipelineResult::Failed {
+            reason, kind, note, ..
+        }) => {
             assert_eq!(*kind, FailureKind::NeedsMaintainer);
-            assert!(reason.starts_with(LADDER_FAILED_PREFIX), "{reason}");
-            assert!(reason.contains("fix-CVE-2024-1234.patch"), "{reason}");
-            assert!(reason.contains("reason three"), "{reason}");
+            assert!(
+                reason.starts_with("python-foo could not be resolved"),
+                "{reason}"
+            );
+            let detail = note.as_ref().and_then(|n| n.detail.as_deref()).unwrap();
+            assert!(detail.starts_with(LADDER_FAILED_PREFIX), "{detail}");
+            assert!(detail.contains("fix-CVE-2024-1234.patch"), "{detail}");
+            assert!(detail.contains("reason three"), "{detail}");
         }
         other => panic!("{other:?}"),
     }
@@ -254,11 +268,12 @@ fn an_agent_round_refused_the_wheel_blocks_a_second_ask_without_a_lookup() {
     assert_eq!(lookups.get(), 1);
     assert_eq!(case.contexts.len(), 3);
     match &case.result {
-        Err(PipelineResult::Failed { reason, kind, .. }) => {
+        Err(PipelineResult::Failed { kind, note, .. }) => {
             assert_eq!(*kind, FailureKind::NeedsMaintainer);
+            let detail = note.as_ref().and_then(|n| n.detail.as_deref()).unwrap();
             assert!(
-                reason.contains("asked for the upstream wheel again"),
-                "{reason}"
+                detail.contains("asked for the upstream wheel again"),
+                "{detail}"
             );
         }
         other => panic!("{other:?}"),

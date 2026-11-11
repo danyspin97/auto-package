@@ -2,9 +2,6 @@
 //! history is long, repeats its cause round after round and quotes internal
 //! rules; this keeps what a reader needs: what is wrong, and one step to take.
 
-// Read by the ladder end, which a later change wires in.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use ap_core::remedy::{HostDistro, Remedy, install_hint};
 use ap_core::user_text::scrub_internal_refs;
 
@@ -27,6 +24,7 @@ pub(super) struct Recap {
 
 impl Recap {
     /// The headline and the lines on one line, single-spaced.
+    #[cfg(test)]
     pub(super) fn body(&self) -> String {
         self.body_within(usize::MAX, 0)
     }
