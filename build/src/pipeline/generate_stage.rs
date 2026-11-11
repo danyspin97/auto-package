@@ -419,9 +419,7 @@ pub(super) fn osc_service_stage(
                     .map_err(|e| ctx.failed_osc_text(&e))
                 });
 
-            if let Err(failed) = result {
-                return Err(failed);
-            }
+            result?;
             step.finish(StepOutcome::Ok);
         } else {
             // The source pass runs an existing `_service` that makes the source
@@ -523,9 +521,7 @@ pub(super) fn osc_service_stage(
                     .map_err(|e| ctx.failed_osc_text(&e))
                 });
 
-            if let Err(failed) = result {
-                return Err(failed);
-            }
+            result?;
             step.finish(StepOutcome::Ok);
         } else {
             step_attempts.skip(reporter, StepKind::OscService, SkipReason::ServiceUpToDate);
