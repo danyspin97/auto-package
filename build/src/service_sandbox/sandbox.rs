@@ -258,7 +258,7 @@ pub(super) fn changes_identity(checkout: &Path) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-pub(super) fn oscrc_paths() -> Vec<PathBuf> {
+pub(crate) fn oscrc_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(p) = std::env::var_os("OSC_CONFIG") {
         paths.push(PathBuf::from(p));

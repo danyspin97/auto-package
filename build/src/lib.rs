@@ -14,6 +14,7 @@ pub mod depreach;
 pub mod deselect;
 pub mod discovery;
 pub mod distro_bounds;
+pub mod envcheck;
 pub mod explain;
 pub mod fix_flags;
 pub mod flaky;

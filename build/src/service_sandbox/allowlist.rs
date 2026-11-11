@@ -4,7 +4,7 @@ use crate::allowed_hosts::{self, AllowedHosts, Asker, Use};
 pub(crate) const UNSAFE_ENV: &str = "AUTO_PACKAGE_UNSAFE_SERVICE";
 
 /// Where osc finds the service helpers.
-pub(super) const SERVICE_DIR: &str = "/usr/lib/obs/service";
+pub(crate) const SERVICE_DIR: &str = "/usr/lib/obs/service";
 
 /// The interpreter running the loopback bridge; osc itself needs it.
 pub(super) const PYTHON: &str = "/usr/bin/python3";

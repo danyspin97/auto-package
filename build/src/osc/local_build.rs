@@ -272,7 +272,7 @@ fn environment_error(msg: impl Into<String>) -> Error {
 
 /// Check that the build root's filesystem has the free space the settings ask
 /// for. Returns the free bytes and the directory they were read from.
-fn check_build_root_space(settings: &LocalBuild) -> Result<(u64, PathBuf), Error> {
+pub fn check_build_root_space(settings: &LocalBuild) -> Result<(u64, PathBuf), Error> {
     let here = Path::new(".");
     let root = settings
         .root

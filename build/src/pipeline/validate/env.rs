@@ -3,10 +3,7 @@
 //! unlaunchable `rpmspec` stops the package at once: no agent turn can fix it,
 //! and a turn that ends "edit kept, check skipped" would loop.
 
-use std::ffi::OsStr;
-use std::fs;
 use std::io;
-use std::path::Path;
 
 use ap_core::remedy::Remedy;
 
@@ -120,36 +117,12 @@ pub(in crate::pipeline) fn rpmspec_on_path() -> bool {
     tool_on_path("rpmspec")
 }
 
-/// Whether `name` is an executable file in a directory of the host's PATH.
-pub(in crate::pipeline) fn tool_on_path(name: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|path| on_path_in(name, &path))
-}
-
-pub(in crate::pipeline) fn on_path_in(name: &str, path: &OsStr) -> bool {
-    std::env::split_paths(path).any(|dir| is_executable(&dir.join(name)))
-}
-
-fn is_executable(path: &Path) -> bool {
-    let Ok(meta) = fs::metadata(path) else {
-        return false;
-    };
-    if !meta.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
+pub(in crate::pipeline) use crate::envcheck::tool_on_path;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::envcheck::on_path_in;
 
     use crate::osc;
     use crate::proc::ProcessError;

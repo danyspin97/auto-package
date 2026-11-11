@@ -234,7 +234,7 @@ pub fn looks_like_not_logged_in(text: &str) -> bool {
 /// Whether `claude auth status` output says the CLI is logged out: JSON with
 /// `"loggedIn": false`. Anything else (missing field, odd output) is not
 /// treated as logged out, so an unfamiliar CLI version never blocks a run.
-pub(super) fn status_says_logged_out(stdout: &str) -> bool {
+pub fn status_says_logged_out(stdout: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(stdout.trim())
         .ok()
         .and_then(|v| v.get("loggedIn").and_then(serde_json::Value::as_bool))

@@ -168,7 +168,7 @@ pub(crate) fn choice_env(choice: &Choice) -> Vec<(String, String)> {
     }
 }
 
-const CARGO_PATHS: [&str; 2] = ["/usr/bin/cargo", "/bin/cargo"];
+pub(crate) const CARGO_PATHS: [&str; 2] = ["/usr/bin/cargo", "/bin/cargo"];
 const PIN_FILES: [&str; 2] = ["rust-toolchain", "rust-toolchain.toml"];
 const MAX_FILE: u64 = 64 * 1024;
 

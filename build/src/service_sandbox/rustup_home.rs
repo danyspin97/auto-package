@@ -12,7 +12,7 @@ use std::os::unix::fs::MetadataExt;
 
 /// The variables the rustup home is derived from.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct HostVars {
+pub struct HostVars {
     pub rustup_home: Option<OsString>,
     pub home: Option<PathBuf>,
     pub cargo_home: Option<OsString>,
