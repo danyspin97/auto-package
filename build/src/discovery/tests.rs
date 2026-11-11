@@ -311,6 +311,17 @@ fn agent_lookup_is_off_when_disabled() {
 }
 
 #[test]
+fn a_repo_search_without_the_agent_never_asks_it() {
+    // Only an allowed search, with nothing verified or a distro mismatch, asks.
+    assert!(agent_fallback_wanted(true, true, false));
+    assert!(agent_fallback_wanted(true, false, true));
+    assert!(!agent_fallback_wanted(true, false, false));
+    for (none_verified, unconfirmed) in [(true, false), (false, true), (true, true)] {
+        assert!(!agent_fallback_wanted(false, none_verified, unconfirmed));
+    }
+}
+
+#[test]
 fn lookups_for_one_name_share_a_slot_and_different_names_do_not() {
     let a = in_flight_slot("zz-slot-probe-a");
     assert!(Arc::ptr_eq(&a, &in_flight_slot("zz-slot-probe-a")));

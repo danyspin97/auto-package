@@ -18,6 +18,12 @@ pub fn set_agent_enabled(enabled: bool) {
     AGENT_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
+/// Whether a repository search asks the agent: only when its caller allows it
+/// and the deterministic sources left nothing, or contradict the distro record.
+pub fn agent_fallback_wanted(allowed: bool, none_verified: bool, unconfirmed: bool) -> bool {
+    allowed && (none_verified || unconfirmed)
+}
+
 pub(super) fn agent_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)

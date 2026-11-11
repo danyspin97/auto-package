@@ -32,6 +32,15 @@ pub struct RepoCandidates {
 /// `package` is the package the candidates are for (the name the TUI shows it
 /// under): a refused host is recorded for it, see [`crate::allowed_hosts::Asker`].
 pub fn find_source_repo_candidates(pkg_name: &str, package: &str) -> RepoCandidates {
+    search_repo_candidates(pkg_name, package, true)
+}
+
+/// [`find_source_repo_candidates`] with no agent lookup: no model is asked.
+pub fn find_source_repo_candidates_without_agent(pkg_name: &str, package: &str) -> RepoCandidates {
+    search_repo_candidates(pkg_name, package, false)
+}
+
+fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCandidates {
     ap_core::diag!(
         "info: searching for source repository candidates for: {}",
         pkg_name
@@ -313,7 +322,7 @@ pub fn find_source_repo_candidates(pkg_name: &str, package: &str) -> RepoCandida
     let unconfirmed = distro_evidence
         .as_ref()
         .is_some_and(|r| crate::discovery::candidates_unconfirmed(&verified_candidates, r));
-    if verified_candidates.is_empty() || unconfirmed {
+    if crate::discovery::agent_fallback_wanted(agent, verified_candidates.is_empty(), unconfirmed) {
         let hints = crate::discovery::Hints {
             homepages: distro_evidence
                 .as_ref()
