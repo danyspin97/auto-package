@@ -495,6 +495,9 @@ pub fn run_service(
             .filter(|l| !l.starts_with("gpg:") || !l.contains(" aka "))
             .collect::<Vec<_>>()
             .join("\n");
+        if let Some(err) = service_tool_error(&stderr) {
+            return Err(err);
+        }
         return Err(Error::OscFailed {
             cmd: format!("service ra in {}", checkout_dir.display()),
             code: out.code,

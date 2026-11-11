@@ -50,6 +50,11 @@ pub enum Error {
     #[error("{}", missing_tool_text(.tool, .path.as_deref()))]
     ToolMissing { tool: String, path: Option<PathBuf> },
 
+    /// A Rust toolchain has no default to run with, or is not installed, so a
+    /// service that runs `tool` cannot start.
+    #[error("no default toolchain is configured for {tool}")]
+    ToolchainUnset { tool: String },
+
     #[error("nothing to publish in {0}: no spec or archive found")]
     NothingToPublish(PathBuf),
 
@@ -109,6 +114,66 @@ pub enum Error {
 pub fn child_output_says_disk_full(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
     t.contains("no space left on device") || t.contains("[errno 28]")
+}
+
+/// The Rust tools a service can name when the machine lacks them.
+const RUST_TOOLS: &[&str] = &["cargo", "rustc", "rustfmt", "rustup"];
+
+/// The error for a failed service run whose output says the machine lacks a
+/// Rust tool or its toolchain, typed from that output; `None` for other output.
+/// Each line is judged alone, so a phrase split over two lines does not count,
+/// and only by rustup's or the shell's own wording:
+/// - rustup's "could not choose a version of X" (X is cargo, rustc or rustfmt,
+///   cargo when the line names none), and "no default is configured" on a line
+///   that also says rustup: `ToolchainUnset`;
+/// - rustup's "toolchain '<x>' is not installed": `ToolchainUnset{cargo}`, the
+///   tool a service runs through the pinned toolchain;
+/// - a shell's "<tool>: command not found" or "<tool>: not found", or an exec's
+///   "execvp <tool>: No such file or directory", for a tool in `RUST_TOOLS`:
+///   `ToolMissing`.
+/// A line that only mentions rustup (a crate's log, say) gives `None`.
+pub fn service_tool_error(text: &str) -> Option<Error> {
+    text.lines().find_map(line_tool_error)
+}
+
+fn line_tool_error(line: &str) -> Option<Error> {
+    let unset = |tool: &str| Error::ToolchainUnset {
+        tool: tool.to_string(),
+    };
+    if let Some((_, rest)) = line.split_once("rustup could not choose a version of ") {
+        let named = rest.split_whitespace().next().unwrap_or_default();
+        let named = named.trim_end_matches(|c: char| !c.is_alphanumeric());
+        let tool = ["cargo", "rustc", "rustfmt"]
+            .into_iter()
+            .find(|t| *t == named)
+            .unwrap_or("cargo");
+        return Some(unset(tool));
+    }
+    if line.contains("rustup") && line.contains("no default is configured") {
+        return Some(unset("cargo"));
+    }
+    if line.trim_start().starts_with("error: toolchain '") && line.contains("' is not installed") {
+        return Some(unset("cargo"));
+    }
+    RUST_TOOLS
+        .iter()
+        .find(|tool| missing_program(line, tool))
+        .map(|tool| Error::ToolMissing {
+            tool: tool.to_string(),
+            path: None,
+        })
+}
+
+/// Whether `line` is a shell's or an exec's report that `tool` was not found.
+fn missing_program(line: &str, tool: &str) -> bool {
+    [
+        format!(": {tool}: command not found"),
+        format!(": {tool}: not found"),
+        format!("execvp {tool}: No such file or directory"),
+        format!(": {tool}: No such file or directory"),
+    ]
+    .iter()
+    .any(|needle| line.contains(needle.as_str()))
 }
 
 /// Text that marks a failure of the machine or the network rather than of the
@@ -243,13 +308,14 @@ impl Error {
     }
 
     /// What must be done on this machine before a rerun can succeed, when the
-    /// failure is a missing tool.
+    /// failure is a missing tool or an unset toolchain.
     pub fn remedy(&self) -> Option<Remedy> {
         let cause = match self {
             Error::ToolMissing { tool, path } => Cause::MissingTool {
                 tool: tool.clone(),
                 path: path.clone(),
             },
+            Error::ToolchainUnset { tool } => Cause::ToolchainUnset { tool: tool.clone() },
             _ => return None,
         };
         Some(Remedy {
