@@ -8,6 +8,7 @@ mod explain_cmd;
 mod fix_cmd;
 mod keyring;
 mod local_opts;
+mod name_clash;
 mod notes_cmd;
 mod review_cmd;
 mod run_limits;

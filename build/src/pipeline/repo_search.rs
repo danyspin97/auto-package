@@ -3,7 +3,7 @@
 /// Whether a lowercased package name is NVIDIA's, by its name: `nvidia-`,
 /// `nvidia_`, `cuda-`, `cuda_` or the bare `nvidia`. A bare `nv` prefix is not
 /// a signal (`nvim`, `nvector` are unrelated).
-pub(super) fn is_nvidia_package_name(lower: &str) -> bool {
+pub fn is_nvidia_package_name(lower: &str) -> bool {
     ["nvidia-", "nvidia_", "cuda-", "cuda_"]
         .iter()
         .any(|p| lower.starts_with(p))

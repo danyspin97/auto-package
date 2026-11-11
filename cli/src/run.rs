@@ -56,15 +56,22 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             // `build https://github.com/owner/repo` — the URL is the source and
             // the repository name is the package name. `--url` does the same
             // thing but lets the package be named separately.
-            let (name, source_repo) = match (looks_like_url(&name), url) {
-                (true, Some(u)) => {
+            let request =
+                name_clash::parse_request(&name).map_err(|e| color_eyre::eyre::eyre!(e))?;
+            let pypi = request.pypi;
+            let (name, source_repo) = match (request.repo, url) {
+                (Some(_), Some(u)) => {
                     return Err(color_eyre::eyre::eyre!(
                         "the package name is already a URL ({name}); drop --url {u}"
                     ));
                 }
-                (true, None) => (repo_package_name(&name), Some(name)),
-                (false, u) => (name, u),
+                (repo, u) => (request.name, repo.or(u)),
             };
+            if pypi && source_repo.is_some() {
+                return Err(color_eyre::eyre::eyre!(
+                    "`pypi:{name}` is the PyPI project and takes no repository; drop --url"
+                ));
+            }
             validate_package_name(&name).map_err(|e| color_eyre::eyre::eyre!(e))?;
 
             // Both of these are silent-wrong-behaviour traps otherwise: a
@@ -104,6 +111,29 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                 ap_core::run::sanitize_name(&arch),
             );
             let project_dir = work_dir.join(&project_dir_name);
+            // The source overrides as they stand once this command's own
+            // `--source-url` values are in. A source given for the name says
+            // which project it is, so the clash check below does not ask.
+            let mut source_urls = ap_build::sources::SourceMap::load(&project_dir)
+                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+            for arg in &source_url {
+                let (pkg, repo) = ap_build::sources::SourceMap::parse_arg(arg, &name)
+                    .map_err(|e| color_eyre::eyre::eyre!(e))?;
+                source_urls.insert(&pkg, &repo);
+            }
+            // A bare name is PyPI's unless a repository of that name is another
+            // project: the user decides. Checked before anything is created.
+            let nvidia_given = nvidia.is_some() || nvidia_redist;
+            if !pypi
+                && crate::name_clash::applies(
+                    &name,
+                    source_repo.is_some(),
+                    nvidia_given,
+                    source_urls.get(&name).is_some(),
+                )
+            {
+                crate::name_clash::check(&name, &ap_core::sink::NULL_REPORTER)?;
+            }
             const OWNERSHIP_MARKER: &str = ".auto-package";
             reject_symlink_project_dir(&project_dir)?;
             // Only a directory this run creates is ours to mark. Marking one that
@@ -159,16 +189,9 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             std::fs::create_dir_all(&state_root)?;
 
             // Source overrides: whatever is on disk, plus anything given on
-            // this command line, written straight back so the answer is only
-            // ever given once.
-            let mut source_urls = ap_build::sources::SourceMap::load(&project_dir)
-                .map_err(|e| color_eyre::eyre::eyre!(e))?;
+            // this command line (read above), written straight back so the
+            // answer is only ever given once.
             if !source_url.is_empty() {
-                for arg in &source_url {
-                    let (pkg, repo) = ap_build::sources::SourceMap::parse_arg(arg, &name)
-                        .map_err(|e| color_eyre::eyre::eyre!(e))?;
-                    source_urls.insert(&pkg, &repo);
-                }
                 source_urls
                     .save(&project_dir)
                     .map_err(|e| color_eyre::eyre::eyre!(e))?;
