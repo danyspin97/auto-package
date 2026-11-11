@@ -13,6 +13,7 @@ pub mod limits;
 pub mod pgroup;
 pub mod proc_lock;
 pub mod redact;
+pub mod remedy;
 pub mod run;
 pub mod sandbox;
 pub mod sink;
