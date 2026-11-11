@@ -9,6 +9,8 @@ mod fix_cmd;
 mod keyring;
 mod local_opts;
 mod name_clash;
+#[cfg(test)]
+mod name_clash_tests;
 mod notes_cmd;
 mod review_cmd;
 mod run_limits;

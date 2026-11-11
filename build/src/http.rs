@@ -58,6 +58,27 @@ pub fn head(url: &str) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
     agent(HEAD_TIMEOUT, 5).head(url)
 }
 
+/// Whether a source fetch of `url` may contact its host under `policy`. This
+/// only asks: a host that is not allowed is not recorded as refused, so no
+/// prompt is raised for it. A URL with no host is not allowed.
+pub fn source_fetch_allowed(url: &str, policy: &crate::allowed_hosts::AllowedHosts) -> bool {
+    host_of(url).is_some_and(|host| policy.allows(&host, crate::allowed_hosts::Use::Source))
+}
+
+/// The URL a request for `url` ends at once HTTP redirects are followed. A
+/// renamed or transferred repository answers at its new address, so this is
+/// that address. `None` when the host is not allowed for a source fetch (see
+/// [`source_fetch_allowed`]), or when the URL does not answer: the caller then
+/// keeps `url` itself.
+pub fn final_url(url: &str) -> Option<String> {
+    use ureq::ResponseExt;
+    if !source_fetch_allowed(url, &crate::allowed_hosts::shared()) {
+        return None;
+    }
+    let resp = ap_ecosystem::net::call_with_retries(|| head(url)).ok()?;
+    Some(resp.get_uri().to_string())
+}
+
 /// [`get`] sent through [`ap_ecosystem::net::call_with_retries`]: for the
 /// metadata lookups, where a dropped connection or a 5xx should not read as
 /// "not found".
@@ -436,5 +457,19 @@ mod tests {
         assert_eq!(AGENTS.lock().unwrap().len(), built);
         agent(timeout, 0);
         assert_eq!(AGENTS.lock().unwrap().len(), built + 1);
+    }
+
+    #[test]
+    fn a_source_fetch_is_gated_without_recording_a_refusal() {
+        use crate::allowed_hosts::AllowedHosts;
+        let policy = AllowedHosts::empty();
+        assert!(source_fetch_allowed("https://github.com/new/jay", &policy));
+        assert!(!source_fetch_allowed(
+            "https://code.example.org/jay",
+            &policy
+        ));
+        assert!(!source_fetch_allowed("ftp://github.com/new/jay", &policy));
+        // The gate only asks: the refused host is not recorded for a prompt.
+        assert!(policy.refusals().is_empty());
     }
 }
