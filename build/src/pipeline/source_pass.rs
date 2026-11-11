@@ -36,9 +36,13 @@ pub(super) enum SourcePass {
 /// is made by OBS at build time, a redistributed archive is not unpacked, and a
 /// checkout that has its tarball needs no pass.
 pub(super) fn source_pass_needed(service: &str, tarball_present: bool, redist: bool) -> bool {
-    if redist || tarball_present {
-        return false;
-    }
+    !redist && !tarball_present && makes_source_by_service(service)
+}
+
+/// Whether the `_service` text `service` makes the source when it runs: a
+/// `tar_scm` or `cargo_vendor` with a `url` (see `source_service`), or a
+/// `download_files`. An `obs_scm` source is made at build time instead.
+pub(super) fn makes_source_by_service(service: &str) -> bool {
     let masked = mask_xml_comments(service);
     match source_service(&masked) {
         Some((_, SourceService::BuildTime)) => false,
@@ -131,10 +135,37 @@ fn is_environment(e: &osc::Error) -> bool {
         )
 }
 
-/// The FetchSdist warning for a checkout with no tarball after the pass.
-pub(super) fn no_tarball_message(pass: &SourcePass) -> String {
+/// What a checkout with no tarball means, given what the pass did.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum NoTarball {
+    /// The services ran and made no tarball; the service's error when it failed.
+    ServicesRan(Option<String>),
+    /// No service known to make one: the pass did not run.
+    Unmade,
+}
+
+/// The [`NoTarball`] outcome of a checkout after a pass that did `pass`. The
+/// pass runs for every checkout that needs one (see `pass_will_run`), so a
+/// checkout whose pass did not run has no service to wait for.
+pub(super) fn classify_no_tarball(pass: &SourcePass) -> NoTarball {
     match pass {
-        SourcePass::Failed(e) => format!("the _service ran but made no source tarball: {e}"),
-        SourcePass::NotRun | SourcePass::Ran => "no source tarball found in the checkout".into(),
+        SourcePass::NotRun => NoTarball::Unmade,
+        SourcePass::Ran => NoTarball::ServicesRan(None),
+        SourcePass::Failed(e) => NoTarball::ServicesRan(Some(e.clone())),
+    }
+}
+
+impl NoTarball {
+    /// The FetchSdist warning.
+    pub(super) fn warning(&self) -> String {
+        match self {
+            NoTarball::ServicesRan(Some(e)) => {
+                format!("the _service ran but made no source tarball: {e}")
+            }
+            NoTarball::ServicesRan(None) => "the _service ran but made no source tarball".into(),
+            NoTarball::Unmade => {
+                "no source tarball found in the checkout, and no _service known to make one".into()
+            }
+        }
     }
 }

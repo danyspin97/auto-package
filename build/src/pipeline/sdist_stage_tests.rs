@@ -4,7 +4,9 @@ use crate::pipeline::sdist_stage::{
     UNPACKED_SOURCE_MISSING, fetch_sdist_stage, fetch_sdist_stage_with, unpacked_source_missing,
     unpacked_top_level,
 };
-use crate::pipeline::source_pass::source_pass_needed;
+use crate::pipeline::source_pass::{
+    NoTarball, SourcePass, classify_no_tarball, source_pass_needed,
+};
 
 /// Discards every event.
 struct Quiet;
@@ -360,6 +362,7 @@ fn a_pass_that_makes_the_tarball_unpacks_it() {
         assert!(!unpacked_source_missing(ctx));
         assert_eq!(log.outcomes(StepKind::OscService), ["ok"]);
         assert_eq!(log.outcomes(StepKind::FetchSdist), ["ok"]);
+        assert!(log.warnings.lock().unwrap().is_empty(), "no warning");
     });
 }
 
@@ -485,6 +488,70 @@ fn a_bare_tar_beside_the_source_is_not_unpacked() {
                 "the source unpacked"
             );
         },
+    );
+}
+
+#[test]
+fn the_missing_tarball_has_two_outcomes() {
+    // The services ran and made no tarball, with or without an error.
+    assert_eq!(
+        classify_no_tarball(&SourcePass::Ran),
+        NoTarball::ServicesRan(None)
+    );
+    assert_eq!(
+        classify_no_tarball(&SourcePass::Failed("no such tag".into())),
+        NoTarball::ServicesRan(Some("no such tag".into()))
+    );
+    // No service known to make one.
+    assert_eq!(classify_no_tarball(&SourcePass::NotRun), NoTarball::Unmade);
+    assert!(
+        NoTarball::ServicesRan(Some("no such tag".into()))
+            .warning()
+            .contains("no such tag")
+    );
+    assert!(!NoTarball::Unmade.warning().contains("_service ran"));
+}
+
+#[test]
+fn a_single_quoted_service_is_not_claimed_to_make_the_source() {
+    // The pass only sees double-quoted `name="..."`: the warning must not say
+    // that a `_service` makes the source when this one is not recognised.
+    let service = "<services><service name='tar_scm'/></services>\n";
+    let log = Log::default();
+    with_checkout_as(&log, "1.0", None, "AMQPStorm-1.0", service, |ctx, st| {
+        let mut run = |_: &Path, _: Emit<'_>| -> Result<(), osc::Error> {
+            panic!("the pass does not see this service")
+        };
+        fetch_sdist_stage_with(ctx, st, false, &mut run)
+            .unwrap_or_else(|_| panic!("the run goes on"));
+    });
+    assert_eq!(log.outcomes(StepKind::FetchSdist), ["failed"]);
+    let warnings = log.warnings.lock().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("no _service known to make one")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn a_checkout_with_no_source_and_no_service_fails_with_a_warning() {
+    let log = Log::default();
+    with_checkout_as(&log, "1.0", None, "AMQPStorm-1.0", "", |ctx, st| {
+        let mut run = |_: &Path, _: Emit<'_>| -> Result<(), osc::Error> {
+            panic!("no service makes this source")
+        };
+        fetch_sdist_stage_with(ctx, st, false, &mut run)
+            .unwrap_or_else(|_| panic!("the run goes on"));
+    });
+    assert_eq!(log.outcomes(StepKind::FetchSdist), ["failed"]);
+    assert!(
+        log.warnings
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|w| w.contains("no _service known to make one"))
     );
 }
 

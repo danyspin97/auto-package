@@ -64,6 +64,7 @@ pub(super) fn fetch_sdist_stage_with(
 
     // ── Step: FetchSdist (extract for log analysis, if not done) ─────────────
     let tarball = find_tarball(checkout_dir, &ctx.config.version);
+    let missing = tarball.is_none().then(|| classify_no_tarball(&pass));
     // A regenerated spec may come with a different source, so a leftover
     // extraction is not trusted then.
     if need_spec {
@@ -105,9 +106,11 @@ pub(super) fn fetch_sdist_stage_with(
                 );
             }
         } else {
+            // `missing` is set whenever there is no tarball.
+            let message = missing.map_or_else(String::new, |m| m.warning());
             reporter.report(&Event::Warning {
                 step: Some(sdist_step.id),
-                message: no_tarball_message(&pass),
+                message,
             });
             outcome = StepOutcome::Failed;
         }
