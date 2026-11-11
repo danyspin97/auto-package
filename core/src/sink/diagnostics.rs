@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use super::{Event, LogLevel, Reporter, is_quiet, printable};
+use super::{Event, LogLevel, Reporter, eprint_coloured, is_quiet, printable};
 
 static DIAG: Mutex<Option<Diagnostics>> = Mutex::new(None);
 
@@ -148,7 +148,7 @@ pub fn emit(line: &str) {
     let line = printable(line).into_owned();
     let quiet = is_quiet();
     match with(|d| d.offer(&line, quiet)) {
-        Offer::Print(line) => eprintln!("{line}"),
+        Offer::Print(line) => eprint_coloured(&line),
         Offer::Held => {
             let reporter = REPORTER.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(reporter) = reporter {
@@ -181,7 +181,7 @@ pub fn debug_once(key: &str, line: &str) {
     let line = printable(line);
     let quiet = is_quiet();
     if let Offer::Print(line) = with(|d| d.offer_debug(key, &line, quiet)) {
-        eprintln!("{line}");
+        eprint_coloured(&line);
     }
 }
 

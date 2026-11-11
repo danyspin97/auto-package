@@ -16,6 +16,12 @@ pub fn stderr_colour() -> bool {
         .is_empty()
 }
 
+/// Prints `line` to stderr, coloured when stderr takes colour (see
+/// [`colour_diag`]). Used for the terminal copy only.
+pub fn eprint_coloured(line: &str) {
+    eprintln!("{}", colour_diag(line, stderr_colour()));
+}
+
 /// Leading labels and their SGR codes (bold colour on, bold and colour off).
 const LABELS: [(&str, &str); 4] = [
     ("note:", "1;36"),
