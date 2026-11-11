@@ -48,6 +48,9 @@ mod sandbox;
 mod tests;
 #[cfg(test)]
 mod tests_net;
+mod toolchain;
+#[cfg(test)]
+mod toolchain_tests;
 mod tunnel;
 #[cfg(test)]
 mod tunnel_tests;
@@ -57,4 +60,5 @@ pub(crate) use proxy::*;
 pub(crate) use run::*;
 pub(crate) use rustup_home::*;
 pub(crate) use sandbox::*;
+pub(crate) use toolchain::*;
 pub(crate) use tunnel::*;

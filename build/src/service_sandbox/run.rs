@@ -88,6 +88,8 @@ pub(crate) fn run_services(
         }
     }
     let checkout = fs::canonicalize(checkout_dir).map_err(Error::Io)?;
+    // Decided before anything is changed: a refusal leaves the checkout as it was.
+    let setups = cargo_setups(services, &checkout, emit)?;
     remove_generated(&checkout);
     let links_before = top_level_symlinks(&checkout);
     let scratch = tempfile::Builder::new()
@@ -117,12 +119,15 @@ pub(crate) fn run_services(
         let hosts_file = proxy
             .write_hosts(&format!("hosts-{index}"), &map)
             .map_err(Error::Io)?;
+        let setup = &setups[index];
+        let mut extra = identity.clone();
+        extra.extend(setup.env.iter().cloned());
         let profile = Profile {
             checkout: &checkout,
             scratch: scratch.path(),
             proxy_dir: proxy.dir(),
-            extra_env: &identity,
-            ro_binds: &[],
+            extra_env: &extra,
+            ro_binds: &setup.ro_binds,
             hosts_file: &hosts_file,
             tunnels: &map,
         };

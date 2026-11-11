@@ -55,6 +55,11 @@ pub enum Error {
     #[error("no default toolchain is configured for {tool}")]
     ToolchainUnset { tool: String },
 
+    /// The host's rustup home exists but is not safe to show a service, so
+    /// cargo has no toolchains there. Nothing was run.
+    #[error("rustup home {} was not used: {why}", .path.display())]
+    RustupHomeRefused { path: PathBuf, why: String },
+
     #[error("nothing to publish in {0}: no spec or archive found")]
     NothingToPublish(PathBuf),
 
@@ -316,6 +321,9 @@ impl Error {
                 path: path.clone(),
             },
             Error::ToolchainUnset { tool } => Cause::ToolchainUnset { tool: tool.clone() },
+            Error::RustupHomeRefused { path, why } => Cause::SandboxUnavailable {
+                why: format!("rustup home {} was not used: {why}", path.display()),
+            },
             _ => return None,
         };
         Some(Remedy {
