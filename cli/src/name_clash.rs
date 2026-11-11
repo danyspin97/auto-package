@@ -16,9 +16,11 @@ use crate::*;
 /// `parse_request` and does not ask.
 pub(crate) fn applies(name: &str, repo_given: bool, nvidia: bool, source_mapped: bool) -> bool {
     let lower = name.to_lowercase();
-    !(repo_given || nvidia || source_mapped)
-        && !ap_build::pipeline::is_nvidia_package_name(&lower)
-        && !ap_build::pipeline::is_known_mapped_name(&lower)
+    !(repo_given
+        || nvidia
+        || source_mapped
+        || ap_build::pipeline::is_nvidia_package_name(&lower)
+        || ap_build::pipeline::is_known_mapped_name(&lower))
 }
 
 /// A name as typed: the package it builds, the repository URL it names (if
