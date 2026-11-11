@@ -771,6 +771,100 @@ to supersede it (not checked live); the findings of an agent opinion are never
 acted on; a fix that breaks something shows as a new finding and blocks the
 request.
 
+### Environment check (doctor)
+
+`auto-package doctor` checks this machine for what a run needs and tells you
+what to install or set up. It never installs anything: a missing item gets the
+command that would install it, and you run that yourself. It needs no project
+and no work directory.
+
+It makes no network request of its own. It runs these programs: `bwrap`, once,
+to see whether the service sandbox can start; `claude auth status`, when
+`claude` is on the PATH (it reads the login state; whether it makes a network
+request was not checked); `sudo -n -l osc build`, when not root (it asks sudo
+whether `osc build` runs without a password; sudo may log the refused attempt);
+and `df` on the build root, for the `local` rows. Other tools are only looked
+up (on the PATH, or as files). `--online` adds one request, `osc whois`, which asks OBS who
+you are.
+
+```sh
+# Every kind of run (the default).
+auto-package doctor
+
+# Only what a Rust package and the local build need; a comma list also works.
+auto-package doctor --for rust --for local
+
+# Skip the claude login check, and ask OBS who you are (osc whois, a network
+# request).
+auto-package doctor --no-agent --online
+
+# The same rows as JSON, for scripts; never coloured.
+auto-package doctor --json | jq '.checks[] | select(.status == "missing")'
+```
+
+- `--for <rust|python|go|npm|local|all>`: the kinds of work to check for,
+  repeatable or comma-separated (default `all`). `rust` adds the rustup default
+  and sandbox toolchain rows and the `cargo_vendor` service; `local` adds the
+  `osc build` rows (the build script, passwordless sudo, free space for the
+  build root, a C compiler); `python` adds nothing beyond the base rows. `go`
+  and `npm` add the `go_modules` and `node_modules` services as required rows.
+  Under the default `all` those two services are optional rows instead: a
+  missing one is a warning (`not installed; only needed for Go and npm
+  packages`) with its install hint, and it never fails the check.
+- `--no-agent`: leave out the claude login check (a run with `--no-agent` makes
+  no model call).
+- `--online`: also run `osc whois`, a network request that asks OBS who you are
+  with your credentials. Without it, no OBS request is made.
+- The first line of the report gives the mode, `(offline)` (no OBS request) or
+  `(online)`, and the kinds when `--for` was given, as in
+  `(offline, for rust, local)`.
+- `--json`: print the rows (id, name, required, status `ok`, `missing` or
+  `warn`, detail, hint, package), the `zypper` line, `ready`, and `unchecked`:
+  the number of required rows whose probe could not run. Those rows have status
+  `warn` and `ready` stays true.
+
+A required row is missing when its tool or service is absent, or a toolchain
+or the service sandbox is not set up; an optional row is a warning. A required
+probe that could not run (`claude auth status`, `sudo -n -l osc build`) is a
+warning too, and the verdict says so. Sample plain output (abridged) on an
+openSUSE host with `quilt` missing and no GitHub token:
+
+```text
+auto-package doctor: environment check (offline)
+
+  ✓ osc on PATH                             required  osc is on PATH
+  ✓ an oscrc file                           required  oscrc at /home/you/.config/osc/oscrc
+  ✓ rpmspec on PATH                         required  rpmspec is on PATH
+  ✗ quilt on PATH                           required  quilt is not installed
+      sudo zypper install quilt
+  ✓ service sandbox (bubblewrap)            required  bubblewrap, user namespaces, python3 and
+                                                      setpriv are in place
+  ✓ cargo on PATH                           required  cargo is on PATH
+  ⚠ GitHub token                            optional  no GitHub token: unauthenticated GitHub
+                                                      requests are limited to 60 an hour per IP;
+                                                      install the gh CLI and run `gh auth login`, or
+                                                      set GITHUB_TOKEN or GH_TOKEN
+
+Install everything missing with:
+sudo zypper install quilt
+
+1 required item(s) missing.
+```
+
+The columns are the status, the name, whether the row is required, and the
+detail, which wraps to the terminal width. On a terminal narrower than the
+name column plus 30 columns, each row takes two lines instead: the status,
+name and required or optional, then the detail indented under it. Colour is
+used on a terminal and is off with `NO_COLOR` or when the output is piped. The
+`Install everything missing with:` line lists only the missing required items,
+and is printed only on openSUSE, where the package names are; on other hosts
+the hints name the tool and the packages must be found with the local package
+manager.
+
+The last line is `Ready.`; `Ready, but N required check(s) could not be run.`
+when no required item is missing but N required probes could not run; or
+`N required item(s) missing.`.
+
 ### Exit codes
 
 - `0`: success.
@@ -786,6 +880,9 @@ request.
   `update` check `claude auth status` (free) before starting.
 - `130`: interrupted (Ctrl-C or SIGTERM). Packages found but not branched when
   it stops are listed once as not started; they are not counted as failed.
+
+`doctor` uses `0` and `1` only: `0` when no required row is missing (a
+warning never fails), `1` when one is. A usage error is `2`, as for every command.
 
 `fix` also exits `3` (the bug needs no fix here, or none was found) and `4`
 (a maintainer must decide); see "Fixing a bug". No other command uses them.
