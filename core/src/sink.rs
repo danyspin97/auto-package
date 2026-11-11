@@ -44,6 +44,7 @@ mod memory;
 mod memory_tests;
 mod reporter;
 mod style;
+mod summary_colour;
 mod text;
 
 #[cfg(test)]
@@ -57,6 +58,8 @@ mod printable_tests;
 #[cfg(test)]
 mod style_tests;
 #[cfg(test)]
+mod summary_colour_tests;
+#[cfg(test)]
 mod tests;
 
 pub use colour::*;
@@ -66,4 +69,5 @@ pub use jsonl::*;
 pub use memory::*;
 pub use reporter::*;
 pub use style::*;
+pub use summary_colour::*;
 pub use text::*;

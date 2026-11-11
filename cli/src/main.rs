@@ -375,7 +375,10 @@ fn main() -> color_eyre::Result<()> {
     // what was built and what is still queued matters most.
     print_exit_lines(0, false, None);
     if let Some(text) = summary {
-        print!("{text}");
+        print!(
+            "{}",
+            ap_core::sink::colour_summary(&text, ap_core::sink::stdout_colour())
+        );
     }
     // Checked before the interrupt case: an abort also raises the shutdown flag.
     if let Some(reason) = ap_build::proc::abort_reason() {
