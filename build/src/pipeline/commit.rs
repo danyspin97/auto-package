@@ -135,9 +135,9 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     }
     let expanded = match ensure_publishable(ctx, commit_step.id) {
         Ok(expanded) => expanded,
-        Err(reason) => {
+        Err(refused) => {
             commit_step.finish(StepOutcome::Failed);
-            return Err(ctx.failed(reason));
+            return Err(refused);
         }
     };
     // A source the spec names must not be missing from what is published. The
@@ -418,22 +418,29 @@ pub(super) fn missing_license_problem(spec: &str, source: &Path) -> Option<Strin
 /// an unfinished skeleton, it does not parse, or a patch escapes the tree. The
 /// sources the spec names are checked afterwards by [`ensure_sources_present`],
 /// once the commit has restored the ones OBS still tracks.
-fn ensure_publishable(ctx: &RunCtx, step: ap_core::event::StepId) -> Result<String, String> {
-    let spec = std::fs::read_to_string(&ctx.spec_path)
-        .map_err(|_| format!("there is no spec ({}) to commit", ctx.spec_path.display()))?;
+fn ensure_publishable(
+    ctx: &RunCtx,
+    step: ap_core::event::StepId,
+) -> Result<String, PipelineResult> {
+    let spec = std::fs::read_to_string(&ctx.spec_path).map_err(|_| {
+        ctx.failed(format!(
+            "there is no spec ({}) to commit",
+            ctx.spec_path.display()
+        ))
+    })?;
     let todos = crate::spec::todo_placeholders(&spec);
     if !todos.is_empty() {
-        return Err(format!(
+        return Err(ctx.failed(format!(
             "the spec still has placeholders and is not committed: {}",
             todos
                 .iter()
                 .map(|(n, t)| format!("{n}: {t}"))
                 .collect::<Vec<_>>()
                 .join("; ")
-        ));
+        )));
     }
     if let Some(why) = osc::unfinished_spec_reason(&spec) {
-        return Err(format!("the spec is an unfinished skeleton ({why})"));
+        return Err(ctx.failed(format!("the spec is an unfinished skeleton ({why})")));
     }
     // Last line of the patch-escape gate: whatever path kept the agent's
     // edits, a patch that escapes the tree is never committed. Patches OBS
@@ -445,12 +452,21 @@ fn ensure_publishable(ctx: &RunCtx, step: ap_core::event::StepId) -> Result<Stri
     if let Some((_, problem)) =
         patch_escape_offender(&ctx.spec_path, &spec, &published, Some(&publishable))
     {
-        return Err(format!(
+        return Err(ctx.failed(format!(
             "a patch escapes the source tree, so it is not committed: {problem}"
-        ));
+        )));
     }
-    osc::rpmspec_check(&ctx.spec_path, Emit::new(ctx.reporter, step))
-        .map_err(|e| format!("the spec does not parse, so it is not committed: {e}"))
+    // A check that could not run is the host's failure: the same reasons as
+    // the validation round, not a verdict on the spec.
+    osc::rpmspec_check(&ctx.spec_path, Emit::new(ctx.reporter, step)).map_err(|e| {
+        match validate::env::check_failure(&e, validate::env::rpmspec_on_path()) {
+            validate::env::CheckFailure::Environment(reason) => ctx.failed(reason),
+            validate::env::CheckFailure::Transient => ctx.failed_text(true, e.to_string()),
+            validate::env::CheckFailure::Spec => ctx.failed(format!(
+                "the spec does not parse, so it is not committed: {e}"
+            )),
+        }
+    })
 }
 
 /// The sources and patches the expanded spec names that are not in the
