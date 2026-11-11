@@ -338,6 +338,9 @@ mod findings_rounds;
 mod findings_stage;
 mod ladder;
 mod ladder_memo;
+mod ladder_recap;
+#[cfg(test)]
+mod ladder_recap_tests;
 pub use ladder::*;
 use ladder_memo::*;
 mod logs;
