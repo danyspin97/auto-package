@@ -414,12 +414,12 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                                                 .unwrap_or_else(|p| p.into_inner())
                                                 .push(AddFailure {
                                                     label: label.clone(),
-                                                    message: name_clash::tui_failure(&label, &e),
+                                                    message: name_clash::tui_failure(&label, e),
                                                     after: memory.finished().len(),
                                                 });
                                             Event::Warning {
                                                 step: None,
-                                                message: name_clash::tui_failure(&label, &e),
+                                                message: name_clash::tui_failure(&label, e),
                                             }
                                         }
                                     });
