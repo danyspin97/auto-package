@@ -246,7 +246,7 @@ fn a_usable_home_is_bound_and_names_its_toolchain() {
         RustupHome::Usable(home.clone()),
     )
     .unwrap();
-    assert_eq!(setup.ro_binds, [home.clone()]);
+    assert_eq!(setup.ro_binds, std::slice::from_ref(&home));
     let env: BTreeMap<_, _> = setup.env.iter().cloned().collect();
     assert_eq!(env["RUSTUP_HOME"], home.to_str().unwrap());
     assert_eq!(env["RUSTUP_TOOLCHAIN"], STABLE);
