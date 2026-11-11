@@ -132,6 +132,39 @@ pub(crate) fn clash_candidates(found: &ap_build::pipeline::RepoCandidates) -> Ve
         .collect()
 }
 
+/// The warning for a name whose clash check could not read PyPI's answer.
+fn fetch_failed_warning(name: &str, error: &str) -> String {
+    format!("{error}; {name} is not checked for a clash")
+}
+
+/// The warning for a name whose PyPI source is on a host that is not a forge.
+fn non_forge_skip_warning(name: &str) -> String {
+    format!(
+        "PyPI names a source (a Source or Repository link) on a host that is not \
+         a known forge, so it cannot be compared with the repositories found for \
+         {name}; {name} is not checked for a clash"
+    )
+}
+
+/// The reporter of a clash check run before the build has one (`build <name>`):
+/// its warnings go to stderr, so a skipped check is not silent.
+pub(crate) struct WarningsToStderr;
+
+impl Reporter for WarningsToStderr {
+    fn report(&self, event: &Event) {
+        if let Event::Warning { message, .. } = event {
+            ap_core::diag!("warning: {message}");
+        }
+    }
+}
+
+/// Whether the clash check is skipped: PyPI gives no source on a known forge,
+/// but names one under a source key on a host that is not a forge. Its upstream
+/// cannot be compared with a repository, so the name is not refused.
+pub(crate) fn skips_for_non_forge_source(pypi_source: Option<&str>, json: &str) -> bool {
+    pypi_source.is_none() && ap_ecosystem::pypi::names_non_forge_url(json)
+}
+
 /// Refuse `name` when PyPI and a repository search both claim it.
 pub(crate) fn check(name: &str, reporter: &dyn Reporter) -> color_eyre::Result<()> {
     let Some(version) = pypi_latest_version(name, reporter) else {
@@ -151,12 +184,22 @@ pub(crate) fn check(name: &str, reporter: &dyn Reporter) -> color_eyre::Result<(
         Err(e) => {
             reporter.report(&Event::Warning {
                 step: None,
-                message: format!("{e}; {name} is not checked for a clash"),
+                message: fetch_failed_warning(name, &e.to_string()),
             });
             return Ok(());
         }
     };
     let pypi_source = ap_ecosystem::pypi::source_url_from_json(&json);
+    // PyPI names an upstream, but not one on a known forge: nothing here can
+    // say whether it is one of the repositories found, so the name is not
+    // refused on that account.
+    if skips_for_non_forge_source(pypi_source.as_deref(), &json) {
+        reporter.report(&Event::Warning {
+            step: None,
+            message: non_forge_skip_warning(name),
+        });
+        return Ok(());
+    }
     let repos = clashing_repos(name, pypi_source.as_deref(), &repos_found);
     if repos.is_empty() {
         return Ok(());
@@ -238,6 +281,42 @@ mod tests {
     fn a_differently_named_repo_is_not_a_clash() {
         let got = clashing_repos("jay", None, &v(&["https://github.com/x/jay-bindings"]));
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn the_skip_and_failure_warnings_name_the_package_and_the_reason() {
+        let skip = non_forge_skip_warning("jay");
+        assert!(skip.contains("not a known forge") && skip.contains("jay is not checked"));
+        let failed = fetch_failed_warning("jay", "PyPI answered 503");
+        assert_eq!(failed, "PyPI answered 503; jay is not checked for a clash");
+    }
+
+    #[test]
+    fn a_custom_domain_source_skips_the_check() {
+        let json = r#"{"info": {"project_urls": {"Source": "https://code.example.org/jay"}, "home_page": null}}"#;
+        assert!(skips_for_non_forge_source(None, json));
+    }
+
+    #[test]
+    fn a_homepage_only_project_is_still_checked() {
+        let json = r#"{"info": {"project_urls": {"Homepage": "https://jay.example.org/"}, "home_page": "https://jay.example.org/"}}"#;
+        assert!(!skips_for_non_forge_source(None, json));
+        // A clash stays for the same-named repository.
+        let repos = clashing_repos("jay", None, &v(&["https://github.com/mahkoh/jay"]));
+        assert_eq!(repos, v(&["https://github.com/mahkoh/jay"]));
+    }
+
+    #[test]
+    fn a_forge_source_with_a_custom_homepage_is_unaffected() {
+        let json = r#"{"info": {"project_urls": {"Source": "https://github.com/someone/jay-py", "Homepage": "https://jay.example.org/"}, "home_page": null}}"#;
+        let source = ap_ecosystem::pypi::source_url_from_json(json);
+        assert!(!skips_for_non_forge_source(source.as_deref(), json));
+        let repos = clashing_repos(
+            "jay",
+            source.as_deref(),
+            &v(&["https://github.com/mahkoh/jay"]),
+        );
+        assert_eq!(repos, v(&["https://github.com/mahkoh/jay"]));
     }
 
     #[test]

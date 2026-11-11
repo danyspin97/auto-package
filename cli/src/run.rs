@@ -132,7 +132,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                     source_urls.get(&name).is_some(),
                 )
             {
-                crate::name_clash::check(&name, &ap_core::sink::NULL_REPORTER)?;
+                crate::name_clash::check(&name, &crate::name_clash::WarningsToStderr)?;
             }
             const OWNERSHIP_MARKER: &str = ".auto-package";
             reject_symlink_project_dir(&project_dir)?;
