@@ -11,7 +11,8 @@ pub fn is_nvidia_package_name(lower: &str) -> bool {
 }
 
 mod candidates;
-pub use candidates::RepoCandidates;
+use candidates::KNOWN_MAPPINGS;
+pub use candidates::{RepoCandidates, is_known_mapped_name};
 
 /// Find candidate source repositories for a package.
 ///
@@ -45,30 +46,8 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
     let mut search_hits = Vec::new();
     let mut distro_evidence: Option<crate::discovery::DistroInfo> = None;
 
-    // Known package mappings for special cases
-    // NOTE: nvidia-cuda-nvrtc, nvidia-cuda-runtime, nvidia-cuda-cupti and
-    // nvidia-cuda-nvcc are not mapped here: NVIDIA/cuda-python
-    // is the *bindings* monorepo (cuda.bindings/cuda.core/cuda.pathfinder) —
-    // it does not contain the closed-source nvcc compiler, cupti profiler,
-    // nvrtc or cudart binaries those wheels actually redistribute. There is
-    // no public source for them at all; they fall through to the
-    // wheel-binary-repackaging path in `generate_spec` instead.
-    let known_mappings: &[(&str, &str)] = &[
-        // NVIDIA CUDA packages
-        ("cuda-python", "https://github.com/NVIDIA/cuda-python"),
-        ("nvmath-python", "https://github.com/NVIDIA/nvmath-python"),
-        ("nvidia-ml-py", "https://github.com/NVIDIA/nvidia-ml-py"),
-        ("nvidia-nvshmem-cu", "https://github.com/NVIDIA/nvshmem"),
-        ("nvshmem4py", "https://github.com/NVIDIA/nvshmem"),
-        ("nvidia-cuda-cccl", "https://github.com/NVIDIA/cccl"),
-        (
-            "nvidia-nvjitlink",
-            "https://github.com/NVIDIA/nvjitlink-python",
-        ),
-    ];
-
     // Check known mappings first
-    for (pattern, repo_url) in known_mappings {
+    for (pattern, repo_url) in KNOWN_MAPPINGS {
         if lower.starts_with(pattern) {
             ap_core::diag!("  checking known mapping: {}", repo_url);
             if verify_repo_exists(repo_url) == RepoProbe::Exists {
@@ -90,7 +69,7 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
     // org is a search result like any other.
     let mut from_name: Vec<String> = Vec::new();
     let is_nvidia_package = is_nvidia_package_name(&lower)
-        || known_mappings
+        || KNOWN_MAPPINGS
             .iter()
             .any(|(p, u)| lower.starts_with(p) && u.starts_with("https://github.com/NVIDIA/"));
 
@@ -282,7 +261,7 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
     let vouched = |url: &str| {
         is_vouched_for(
             url,
-            known_mappings,
+            KNOWN_MAPPINGS,
             recorded.as_deref(),
             distro_evidence.as_ref(),
             &from_name,

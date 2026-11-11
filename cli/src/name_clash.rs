@@ -10,11 +10,15 @@ use crate::*;
 /// Whether the clash check runs for a bare name. It does not when the name is
 /// a repository (a URL, or `--url`), when an NVIDIA option is given, when
 /// `--source-url` or the saved source map gives the name a source, or when the
-/// name is NVIDIA's by its own spelling. `pypi:<name>` is not checked at all:
-/// the caller reads it with `parse_request` and does not ask.
+/// name is NVIDIA's by its own spelling, or is one the build maps to a
+/// repository itself (`ap_build::pipeline::is_known_mapped_name`).
+/// `pypi:<name>` is not checked at all: the caller reads it with
+/// `parse_request` and does not ask.
 pub(crate) fn applies(name: &str, repo_given: bool, nvidia: bool, source_mapped: bool) -> bool {
+    let lower = name.to_lowercase();
     !(repo_given || nvidia || source_mapped)
-        && !ap_build::pipeline::is_nvidia_package_name(&name.to_lowercase())
+        && !ap_build::pipeline::is_nvidia_package_name(&lower)
+        && !ap_build::pipeline::is_known_mapped_name(&lower)
 }
 
 /// A name as typed: the package it builds, the repository URL it names (if
@@ -261,6 +265,14 @@ mod tests {
             "NVIDIA",
             "nvidia",
         ] {
+            assert!(!applies(name, false, false, false), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_name_with_a_curated_mapping_is_not_checked() {
+        // Mapped to a repository by the build, without an `nvidia-` spelling.
+        for name in ["nvmath-python", "nvshmem4py", "NVSHMEM4PY"] {
             assert!(!applies(name, false, false, false), "{name}");
         }
     }
