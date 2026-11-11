@@ -373,6 +373,7 @@ pub(super) fn outcome(
                 "Failed" => {
                     o.result = "failed".into();
                     o.detail = v["reason"].as_str().map(str::to_string);
+                    o.failure_detail = v["note"]["detail"].as_str().map(str::to_string);
                 }
                 "Blocked" => {
                     o.result = "blocked".into();
@@ -385,6 +386,7 @@ pub(super) fn outcome(
     }
     let shorten = |t: String| t.replace(&dir.display().to_string(), "<work dir>");
     o.detail = o.detail.take().map(shorten);
+    o.failure_detail = o.failure_detail.take().map(shorten);
     o.state_reason = o.state_reason.take().map(shorten);
     if p.finished.is_none() {
         o.detail = Some(

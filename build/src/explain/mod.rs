@@ -15,6 +15,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 mod collect;
+mod detail;
+#[cfg(test)]
+mod detail_tests;
 mod logs;
 mod model;
 mod parse;

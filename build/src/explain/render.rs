@@ -264,6 +264,11 @@ pub fn render(ex: &Explanation, width: usize) -> Vec<Line> {
     if let Some(d) = &oc.detail {
         o.kv("detail", Kind::Plain, d);
     }
+    if let Some(full) = oc.failure_detail.as_deref() {
+        if Some(full) != oc.detail.as_deref() {
+            detail_lines(&mut o, full);
+        }
+    }
     if let Some(s) = &oc.state_outcome {
         let mut t = s.clone();
         if let Some(r) = &oc.state_reason {
@@ -538,6 +543,13 @@ pub fn render(ex: &Explanation, width: usize) -> Vec<Line> {
         o.para(2, "- ", Kind::Dim, u);
     }
     o.lines
+}
+
+/// The full detail of a failure, under its reason, as it was written.
+fn detail_lines(o: &mut Out, full: &str) {
+    for line in super::detail::verbatim_lines(full, o.width) {
+        o.lines.push(vec![span(line, Kind::Plain)]);
+    }
 }
 
 /// Plain text, for tests and pipes.

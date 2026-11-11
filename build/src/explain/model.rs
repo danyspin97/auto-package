@@ -85,6 +85,10 @@ pub struct Outcome {
     /// run's view, not necessarily this run's).
     pub state_outcome: Option<String>,
     pub state_reason: Option<String>,
+    /// The full detail of the failure (its failure note), shown under the
+    /// reason. Not in `--json`, which keeps its shape.
+    #[serde(skip)]
+    pub failure_detail: Option<String>,
     pub log_source: Option<String>,
     pub log_errors: Vec<String>,
     /// The newest changelog entry of the checkout.
