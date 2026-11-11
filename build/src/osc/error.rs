@@ -136,6 +136,7 @@ const RUST_TOOLS: &[&str] = &["cargo", "rustc", "rustfmt", "rustup"];
 /// - a shell's "<tool>: command not found" or "<tool>: not found", or an exec's
 ///   "execvp <tool>: No such file or directory", for a tool in `RUST_TOOLS`:
 ///   `ToolMissing`.
+///
 /// A line that only mentions rustup (a crate's log, say) gives `None`.
 pub fn service_tool_error(text: &str) -> Option<Error> {
     text.lines().find_map(line_tool_error)
