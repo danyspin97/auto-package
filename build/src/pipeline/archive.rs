@@ -40,7 +40,7 @@ pub(crate) fn is_tarball_name(name: &str) -> bool {
 
 /// Whether `name` is the file name of a source archive: a tarball the extractor
 /// reads, a zip or a wheel. The one list of source archive names: `find_tarball`,
-/// the doctor's checks and `source_archives` use it.
+/// the self-check's checks and `source_archives` use it.
 pub(crate) fn is_source_archive_name(name: &str) -> bool {
     is_extractable_tarball(name)
         || (!is_dep_bundle(name) && ZIP_WHEEL_SUFFIXES.iter().any(|s| name.ends_with(s)))

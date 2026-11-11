@@ -1,7 +1,7 @@
 //! Start-up healing of what `state.json`, a package's checkout and OBS say
 //! about each other. A fix the tool can make safely is made here and recorded
 //! in the package's `reconciled.log`; what only a person can settle is left to
-//! the self-check in `doctor`, which says the one thing to do. The decisions
+//! the self-check in `self_check`, which says the one thing to do. The decisions
 //! are pure: the callers read the files and ask OBS, then act on the answer.
 
 use crate::osc::BuildStatus;
@@ -27,7 +27,7 @@ pub fn stale_archive_action(
     named: bool,
     spec_version: &str,
 ) -> ArchiveAction {
-    if is_archive && !tracked && !named && !crate::doctor::names_version(file, spec_version) {
+    if is_archive && !tracked && !named && !crate::self_check::names_version(file, spec_version) {
         ArchiveAction::Delete
     } else {
         ArchiveAction::Keep
@@ -127,7 +127,7 @@ pub fn checkouts(
         let Some(version) = crate::spec::parse_header(&spec).map(|h| h.version) else {
             continue;
         };
-        // A wheel switch keeps its own leftovers (see `doctor`): not touched here.
+        // A wheel switch keeps its own leftovers (see `self_check`): not touched here.
         let wheel = is_wheel_spec(&spec);
         let mut whats = Vec::new();
         if !wheel && checkout.is_dir() {
@@ -170,7 +170,7 @@ fn drop_stale_archives(checkout: &std::path::Path, spec: &str, version: &str) ->
             &file,
             is_archive,
             tracked.contains(&file),
-            crate::doctor::spec_names_archive(spec, &file),
+            crate::self_check::spec_names_archive(spec, &file),
             version,
         );
         if action == ArchiveAction::Delete {
@@ -185,7 +185,7 @@ fn drop_stale_archives(checkout: &std::path::Path, spec: &str, version: &str) ->
 }
 
 /// Whether the spec builds from a wheel (one of its `Source:` lines names a
-/// `.whl`), as `doctor` reads it.
+/// `.whl`), as `self_check` reads it.
 fn is_wheel_spec(spec: &str) -> bool {
     spec.lines().any(|l| {
         crate::spec::parse_source_line(l.trim_start(), &["source"], str::to_string).is_some()

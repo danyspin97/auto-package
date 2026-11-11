@@ -513,7 +513,7 @@ pub(crate) fn init_disk_guard(
     let local_changes = |checkout: &std::path::Path| {
         ap_build::osc::has_user_changes(checkout, ap_build::proc::Emit::quiet())
     };
-    for finding in ap_build::doctor::run(
+    for finding in ap_build::self_check::run(
         &work_dir.join("state"),
         &work_dir.join(project),
         || statuses,

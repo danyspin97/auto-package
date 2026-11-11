@@ -322,7 +322,7 @@ pub fn reconcile_state(state_root: &Path) -> Vec<(String, &'static str)> {
 /// is keyed by lower-case package name. `download` gets the package's OBS name.
 /// Returns `(name, Ok(rpmlint warnings))` for each package fixed and
 /// `(name, Err(problem))` for each that OBS built but could not be fixed; a
-/// package that is declined is not listed (its `doctor` finding says why).
+/// package that is declined is not listed (its `self_check` finding says why).
 pub fn reconcile_with_obs(
     state_root: &Path,
     checkout_root: &Path,

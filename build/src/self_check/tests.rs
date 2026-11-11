@@ -1,4 +1,4 @@
-//! The doctor's tests.
+//! The self-check's tests.
 
 use super::*;
 
@@ -8,7 +8,7 @@ fn write(state_root: &Path, name: &str, f: impl FnOnce(&mut PkgState)) {
 }
 
 #[test]
-fn the_doctor_finds_what_the_parts_disagree_about() {
+fn the_self_check_finds_what_the_parts_disagree_about() {
     let root = tempfile::tempdir().unwrap();
     let state_root = root.path().join("state");
     let checkouts = root.path().join("proj");
@@ -369,7 +369,7 @@ fn an_old_archive_obs_holds_is_no_finding_and_a_tracked_file_the_spec_does_not_n
 }
 
 #[test]
-fn the_doctor_lists_source_archives_by_the_one_list() {
+fn the_self_check_lists_source_archives_by_the_one_list() {
     let dir = tempfile::tempdir().unwrap();
     for name in [
         "foo-1.0.zip",
