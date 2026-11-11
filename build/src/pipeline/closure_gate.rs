@@ -337,6 +337,7 @@ mod tests {
                 reason: "boom".to_string(),
                 kind: FailureKind::Other,
                 remedy: None,
+                note: None,
             },
         );
         assert!(!finished.contains("python-pywayland"));

@@ -36,6 +36,7 @@ fn finished_since_only_looks_past_the_mark() {
                 reason: "x".into(),
                 disk_full: false,
                 remedy: None,
+                note: None,
             },
         ),
     ];
@@ -56,6 +57,7 @@ fn failure_is_withdrawn_when_its_package_is_later_built_as_a_dependency() {
                 reason: "x".into(),
                 disk_full: false,
                 remedy: None,
+                note: None,
             },
         ),
         fin("python-foo", PackageOutcome::Built),
@@ -164,6 +166,7 @@ fn failure_stands_when_the_package_did_not_end_built() {
                 reason: "x".into(),
                 disk_full: false,
                 remedy: None,
+                note: None,
             },
         ),
     ];

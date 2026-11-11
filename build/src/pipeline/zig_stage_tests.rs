@@ -110,6 +110,7 @@ fn run_stage(spec: &str, src0: &[u8], update: bool) -> (tempfile::TempDir, Pipel
             reason: String::new(),
             kind: FailureKind::Other,
             remedy: None,
+            note: None,
         },
         Err(result) => result,
     };

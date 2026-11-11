@@ -21,6 +21,7 @@ fn mixed() -> TuiState {
             reason: "x".into(),
             disk_full: false,
             remedy: None,
+            note: None,
         },
     );
     state

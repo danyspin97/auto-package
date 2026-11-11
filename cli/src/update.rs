@@ -283,11 +283,13 @@ pub(super) fn package_outcome(result: &PipelineResult) -> PackageOutcome {
             reason,
             kind: FailureKind::BrokenOutside,
             remedy,
+            note,
             ..
         } => PackageOutcome::Failed {
             reason: format!("broken outside the tool: {reason}"),
             disk_full: false,
             remedy: remedy.clone(),
+            note: note.clone(),
         },
         PipelineResult::Failed {
             reason,
@@ -300,11 +302,13 @@ pub(super) fn package_outcome(result: &PipelineResult) -> PackageOutcome {
             reason,
             kind,
             remedy,
+            note,
             ..
         } => PackageOutcome::Failed {
             reason: reason.clone(),
             disk_full: *kind == FailureKind::DiskFull,
             remedy: remedy.clone(),
+            note: note.clone(),
         },
     }
 }
@@ -490,6 +494,7 @@ mod tests {
             reason: "excluded".into(),
             kind: FailureKind::Excluded,
             remedy: None,
+            note: None,
         };
         assert!(matches!(
             package_outcome(&result),
@@ -500,6 +505,7 @@ mod tests {
             reason: "boom".into(),
             kind: FailureKind::Other,
             remedy: None,
+            note: None,
         };
         assert!(matches!(
             package_outcome(&failed),
@@ -514,10 +520,48 @@ mod tests {
             reason: "osc is missing".into(),
             kind: FailureKind::Environment,
             remedy: None,
+            note: None,
         };
         assert!(matches!(
             package_outcome(&result),
             PackageOutcome::Failed { reason, disk_full: false, .. } if reason == "osc is missing"
         ));
+    }
+
+    #[test]
+    fn a_failure_carries_its_remedy_and_its_note_to_the_outcome() {
+        use ap_core::failure_note::FailureNote;
+        use ap_core::remedy::{Cause, Remedy, Retry};
+        let remedy = Remedy {
+            cause: Cause::MissingTool {
+                tool: "osc".into(),
+                path: None,
+            },
+            retry: Retry::SameCommand,
+        };
+        let note = FailureNote {
+            detail: Some("round 1: osc is missing".into()),
+            action: Some("install osc".into()),
+        };
+        let result = PipelineResult::Failed {
+            rpm_name: "lsvpd".into(),
+            reason: "osc is missing".into(),
+            kind: FailureKind::Environment,
+            remedy: Some(remedy.clone()),
+            note: Some(note.clone()),
+        };
+        match package_outcome(&result) {
+            PackageOutcome::Failed {
+                reason,
+                remedy: Some(got_remedy),
+                note: Some(got_note),
+                ..
+            } => {
+                assert_eq!(reason, "osc is missing");
+                assert_eq!(got_remedy, remedy);
+                assert_eq!(got_note, note);
+            }
+            other => panic!("expected a failure with its remedy and note: {other:?}"),
+        }
     }
 }

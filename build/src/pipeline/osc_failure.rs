@@ -39,6 +39,7 @@ impl RunCtx<'_> {
             reason,
             kind: FailureKind::Environment,
             remedy: Some(remedy),
+            note: None,
         }
     }
 

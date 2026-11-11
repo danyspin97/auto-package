@@ -32,6 +32,7 @@ fn failed(disk_full: bool) -> PackageOutcome {
         reason: "boom".into(),
         disk_full,
         remedy: None,
+        note: None,
     }
 }
 

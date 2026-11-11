@@ -1,3 +1,4 @@
+use crate::event::PackageOutcome;
 use serde::{Deserialize, Serialize};
 
 /// What a failed package says beyond its short `reason`. The `reason` is the
@@ -12,4 +13,16 @@ pub struct FailureNote {
     /// when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
+}
+
+impl PackageOutcome {
+    /// A failure with only its reason: no disk-full flag, remedy or note.
+    pub fn failed(reason: String) -> Self {
+        PackageOutcome::Failed {
+            reason,
+            disk_full: false,
+            remedy: None,
+            note: None,
+        }
+    }
 }

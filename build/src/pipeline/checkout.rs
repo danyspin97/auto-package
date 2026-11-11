@@ -178,6 +178,7 @@ pub(super) fn preflight<'a>(
             reason,
             kind: FailureKind::Other,
             remedy: None,
+            note: None,
         });
     }
     let ws = match Workspace::open(&config.state_root, &rpm_name) {
@@ -188,6 +189,7 @@ pub(super) fn preflight<'a>(
                 reason: e.to_string(),
                 kind: FailureKind::Other,
                 remedy: None,
+                note: None,
             });
         }
     };
@@ -208,6 +210,7 @@ pub(super) fn preflight<'a>(
                         reason,
                         kind: FailureKind::Other,
                         remedy: None,
+                        note: None,
                     });
                 }
             };
@@ -224,6 +227,7 @@ pub(super) fn preflight<'a>(
             reason,
             kind: FailureKind::Other,
             remedy: None,
+            note: None,
         });
     }
     let (checkout_dir, spec_path) = checkout_paths(&config.work_dir, &config.project, &obs_name);

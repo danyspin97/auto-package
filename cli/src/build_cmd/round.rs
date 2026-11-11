@@ -166,11 +166,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                     reporter.report(&Event::PackageFinished {
                         pkg: rpm,
                         version: t.version.clone(),
-                        outcome: PackageOutcome::Failed {
-                            reason: reason.clone(),
-                            disk_full: false,
-                            remedy: None,
-                        },
+                        outcome: PackageOutcome::failed(reason.clone()),
                     });
                 }
                 drain_in_flight(&rx, in_flight);
@@ -192,23 +188,15 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                 reporter.report(&Event::PackageFinished {
                     pkg: rpm_name.clone(),
                     version: target_info.version.clone(),
-                    outcome: PackageOutcome::Failed {
-                        reason: reason.clone(),
-                        disk_full: false,
-                        remedy: None,
-                    },
+                    outcome: PackageOutcome::failed(reason.clone()),
                 });
                 for (rest, rest_rpm) in unspawned {
                     reporter.report(&Event::PackageFinished {
                         pkg: rest_rpm,
                         version: rest.version.clone(),
-                        outcome: PackageOutcome::Failed {
-                            reason: format!(
-                                "not started because {rpm_name} has no run directory: {e}"
-                            ),
-                            disk_full: false,
-                            remedy: None,
-                        },
+                        outcome: PackageOutcome::failed(format!(
+                            "not started because {rpm_name} has no run directory: {e}"
+                        )),
                     });
                 }
                 // Join the workers already spawned so none is left running
@@ -231,6 +219,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                     reason: format!("build thread panicked: {}", panic_message(p.as_ref())),
                     kind: FailureKind::Other,
                     remedy: None,
+                    note: None,
                 });
                 // Reported as soon as this package is done, not when the
                 // scheduler gets to its result, so a slower sibling never
@@ -266,6 +255,7 @@ pub(super) fn frontier_stream(b: Build<'_>, r: Round<'_>) -> color_eyre::Result<
                     reason: "build thread ended without reporting a result".to_string(),
                     kind: FailureKind::Other,
                     remedy: None,
+                    note: None,
                 };
                 (rpm_name, String::new(), result)
             }

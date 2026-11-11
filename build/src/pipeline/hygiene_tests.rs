@@ -481,6 +481,7 @@ fn a_transient_failure_is_recorded_as_interrupted_and_a_real_one_as_failed() {
         reason: "r".into(),
         kind,
         remedy: None,
+        note: None,
     };
     assert_eq!(
         recorded_outcome(&failed(FailureKind::Transient)).unwrap().0,
@@ -578,6 +579,7 @@ fn an_excluded_build_is_recorded_as_skipped_not_failed() {
         reason: "OBS: build is excluded for x86_64 in project config".into(),
         kind: FailureKind::Excluded,
         remedy: None,
+        note: None,
     };
     let (outcome, reason) = recorded_outcome(&excluded).unwrap();
     assert_eq!(outcome, "skipped");

@@ -86,6 +86,7 @@ fn the_stage_counts_follow_each_row_status() {
                 reason: "x".to_string(),
                 disk_full: false,
                 remedy: None,
+                note: None,
             },
         ),
     ));
@@ -161,6 +162,7 @@ fn a_failed_step_then_failed_package_keeps_the_step_and_reason() {
             reason: "boom".to_string(),
             disk_full: false,
             remedy: None,
+            note: None,
         }),
     });
     let pkg = &state.packages["foo"];
@@ -196,6 +198,7 @@ fn a_new_attempt_clears_the_previous_failure() {
             reason: "boom".to_string(),
             disk_full: false,
             remedy: None,
+            note: None,
         }),
     });
     state.apply(Msg {
@@ -247,6 +250,7 @@ fn a_retry_resets_finished_and_tries() {
             reason: "boom".to_string(),
             disk_full: false,
             remedy: None,
+            note: None,
         }),
     });
     assert!(state.packages["foo"].finished);
@@ -270,6 +274,7 @@ fn disk_full_only_classifies_the_failure_that_hit_it() {
             reason: "boom".to_string(),
             disk_full: false,
             remedy: None,
+            note: None,
         }),
     });
     assert!(state.packages["foo"].status == PkgStatus::Failed);
@@ -321,6 +326,7 @@ fn a_package_time_runs_only_while_it_is_worked_on() {
         reason: "boom".into(),
         disk_full: false,
         remedy: None,
+        note: None,
     };
     pkg.advance(Input::Finished {
         outcome: &outcome,

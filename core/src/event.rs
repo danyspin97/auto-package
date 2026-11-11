@@ -193,6 +193,9 @@ pub enum PackageOutcome {
         /// What must be done before a rerun can succeed, when there is one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remedy: Option<crate::remedy::Remedy>,
+        /// The full detail and the one action beyond `reason`, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<crate::failure_note::FailureNote>,
     },
     /// Stopped for a maintainer's decision (see `FailureKind::NeedsMaintainer`):
     /// nothing was sent to OBS, and it is not a build failure.

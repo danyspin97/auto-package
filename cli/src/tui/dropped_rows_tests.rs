@@ -50,6 +50,7 @@ fn failed() -> PackageOutcome {
         reason: "the branch failed".to_string(),
         disk_full: false,
         remedy: None,
+        note: None,
     }
 }
 

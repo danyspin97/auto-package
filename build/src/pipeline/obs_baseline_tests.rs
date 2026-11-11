@@ -18,6 +18,7 @@ fn failed(reason: &str) -> PipelineResult {
         reason: reason.into(),
         kind: FailureKind::Other,
         remedy: None,
+        note: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn a_failed_restore_keeps_the_remedy_of_the_failure() {
         reason: "build failed".into(),
         kind: FailureKind::Environment,
         remedy: Some(remedy.clone()),
+        note: None,
     };
     let out = restore_obs_baseline(&dir, &NullReporter, result, DISCARD, |_| {
         Err("no saved copy of the baseline".into())

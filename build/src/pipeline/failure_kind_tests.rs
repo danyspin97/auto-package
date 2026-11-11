@@ -9,6 +9,7 @@ fn failed(kind: FailureKind) -> PipelineResult {
         reason: "why".into(),
         kind,
         remedy: None,
+        note: None,
     }
 }
 

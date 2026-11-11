@@ -262,6 +262,7 @@ fn a_failure_remedy_round_trips_and_an_absent_one_is_not_written() {
                 },
                 retry: Retry::SameCommand,
             }),
+            note: None,
         },
     };
     let text = serde_json::to_string(&with).unwrap();
@@ -290,8 +291,69 @@ fn a_failure_remedy_round_trips_and_an_absent_one_is_not_written() {
             reason: "boom".into(),
             disk_full: false,
             remedy: None,
+            note: None,
         },
     };
     let text = serde_json::to_string(&without).unwrap();
     assert!(!text.contains("remedy"), "{text}");
+}
+
+#[test]
+fn a_failure_note_round_trips_and_an_absent_one_is_not_written() {
+    use crate::failure_note::FailureNote;
+    let note = FailureNote {
+        detail: Some("round 1: boom\nround 2: boom".into()),
+        action: Some("free some disk space".into()),
+    };
+    let with = Event::PackageFinished {
+        pkg: "python-foo".into(),
+        version: "1.0".into(),
+        outcome: PackageOutcome::Failed {
+            reason: "boom".into(),
+            disk_full: false,
+            remedy: None,
+            note: Some(note.clone()),
+        },
+    };
+    let text = serde_json::to_string(&with).unwrap();
+    assert!(text.contains(
+        r#""note":{"detail":"round 1: boom\nround 2: boom","action":"free some disk space"}"#
+    ));
+    let back: Event = serde_json::from_str(&text).unwrap();
+    assert!(matches!(
+        back,
+        Event::PackageFinished {
+            outcome: PackageOutcome::Failed {
+                note: Some(ref got),
+                ..
+            },
+            ..
+        } if *got == note
+    ));
+
+    let without = Event::PackageFinished {
+        pkg: "python-foo".into(),
+        version: "1.0".into(),
+        outcome: PackageOutcome::Failed {
+            reason: "boom".into(),
+            disk_full: false,
+            remedy: None,
+            note: None,
+        },
+    };
+    let text = serde_json::to_string(&without).unwrap();
+    assert!(!text.contains("note"), "{text}");
+}
+
+#[test]
+fn a_package_finished_line_without_a_note_still_parses() {
+    let old = r#"{"event":"package_finished","pkg":"python-foo","version":"1.0","outcome":{"Failed":{"reason":"boom","disk_full":false,"remedy":null}}}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        e,
+        Event::PackageFinished {
+            outcome: PackageOutcome::Failed { note: None, .. },
+            ..
+        }
+    ));
 }

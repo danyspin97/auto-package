@@ -53,6 +53,7 @@ fn a_spent_ladder_is_an_ordinary_failure() {
         reason: format!("{}x", ap_build::pipeline::LADDER_FAILED_PREFIX),
         kind: FailureKind::Exhausted,
         remedy: None,
+        note: None,
     };
     assert!(matches!(
         package_outcome(&spent),
@@ -63,6 +64,7 @@ fn a_spent_ladder_is_an_ordinary_failure() {
         reason: "no".into(),
         kind: FailureKind::Other,
         remedy: None,
+        note: None,
     };
     assert!(matches!(
         package_outcome(&failed),
@@ -77,6 +79,7 @@ fn a_url_gone_upstream_is_a_failure_that_says_so() {
         reason: "the zig vendor archive cannot be refreshed: fetching x: HTTP 404".into(),
         kind: FailureKind::BrokenOutside,
         remedy: None,
+        note: None,
     };
     match package_outcome(&gone) {
         PackageOutcome::Failed {

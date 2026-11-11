@@ -195,6 +195,8 @@ pub enum PipelineResult {
         kind: FailureKind,
         /// What must be done before a rerun can succeed, when there is one.
         remedy: Option<ap_core::remedy::Remedy>,
+        /// The full detail and the one action beyond `reason`, when known.
+        note: Option<ap_core::failure_note::FailureNote>,
     },
 }
 mod target;
@@ -309,6 +311,7 @@ macro_rules! begin_or_fail {
                     reason: e.to_string(),
                     kind: FailureKind::Other,
                     remedy: None,
+                    note: None,
                 });
             }
         }

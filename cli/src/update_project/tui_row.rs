@@ -108,11 +108,7 @@ pub(super) fn package_outcome(outcome: &ItemOutcome) -> PackageOutcome {
         ItemOutcome::NotStarted => PackageOutcome::Skipped {
             reason: "not started: the run was interrupted".to_string(),
         },
-        ItemOutcome::Failed(reason) => PackageOutcome::Failed {
-            reason: reason.clone(),
-            disk_full: false,
-            remedy: None,
-        },
+        ItemOutcome::Failed(reason) => PackageOutcome::failed(reason.clone()),
     }
 }
 

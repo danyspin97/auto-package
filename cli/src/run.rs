@@ -449,11 +449,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                                             reporter.report(&Event::PackageFinished {
                                                 pkg: row,
                                                 version: String::new(),
-                                                outcome: PackageOutcome::Failed {
-                                                    reason,
-                                                    disk_full: false,
-                                                    remedy: None,
-                                                },
+                                                outcome: PackageOutcome::failed(reason),
                                             });
                                         }
                                         (Ok(()), Some(row)) if !watch.started() => {
