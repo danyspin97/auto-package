@@ -113,7 +113,7 @@ fn check_rustup_home(
         return Err("the path is not valid UTF-8".to_string());
     }
     let named = real.file_name().is_some_and(|n| n == ".rustup");
-    if !named && !(explicit && real == candidate) {
+    if !(named || explicit && real == candidate) {
         return Err(
             "it is not named .rustup and RUSTUP_HOME does not name it directly".to_string(),
         );
