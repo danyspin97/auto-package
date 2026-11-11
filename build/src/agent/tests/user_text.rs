@@ -1,7 +1,9 @@
 //! The optional `user_summary` and `user_action` of a reply: parsed, normalised,
 //! cut to their caps, and refused when they look like a log paste.
 
+use super::prompt::*;
 use super::*;
+use crate::agent::build_prompt::*;
 use crate::agent::user_text::*;
 
 /// A reply with the required fields, plus `fields` merged in.
@@ -249,4 +251,20 @@ fn the_schema_lists_both_fields_and_requires_neither() {
         let required = schema["required"].as_array().unwrap();
         assert!(!required.iter().any(|r| r == field), "{field} is required");
     }
+}
+
+/// The summary paragraph is in a resolution round's prompt and in no other.
+#[test]
+fn the_summary_paragraph_reaches_a_resolution_round_only() {
+    let ws = std::path::Path::new("/nonexistent-workspace");
+    assert!(!static_system_prompt().contains("user_summary"));
+    for context in [None, Some("## Submodules: three are empty")] {
+        let mut req = request(ws, &[]);
+        req.context = context;
+        let prompt = build_turn_prompt(&req);
+        assert!(!prompt.contains("user_summary"), "{context:?}");
+    }
+    let mut req = request(ws, &[]);
+    req.context = Some(LADDER_SUMMARY_TEXT);
+    assert!(build_turn_prompt(&req).contains(LADDER_SUMMARY_TEXT));
 }

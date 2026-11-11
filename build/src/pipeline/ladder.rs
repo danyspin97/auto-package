@@ -107,6 +107,8 @@ pub(super) fn ladder_context(
              what stopped it.",
         );
     }
+    text.push_str("\n\n");
+    text.push_str(crate::agent::user_text::LADDER_SUMMARY_TEXT);
     text
 }
 

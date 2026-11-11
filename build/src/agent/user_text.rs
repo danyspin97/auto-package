@@ -80,3 +80,7 @@ pub(super) fn summary_field<'de, D: Deserializer<'de>>(d: D) -> Result<Option<St
 pub(super) fn action_field<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     text_field(d, ACTION_CAP)
 }
+
+/// The paragraph a resolution round's context ends with: it asks for the two
+/// fields above. It is given to the rounds only, never to another turn.
+pub(crate) const LADDER_SUMMARY_TEXT: &str = r#"Also reply with "user_summary" (at most two sentences, plain words for the package maintainer: what is wrong) and "user_action" (one concrete step the maintainer can take, such as a command, or an empty string if there is none). Do not mention convention numbers, section numbers or file paths of the tool, and do not paste logs."#;

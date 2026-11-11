@@ -524,6 +524,8 @@ mod settled_tests;
 mod hygiene_tests;
 
 #[cfg(test)]
+mod ladder_summary_tests;
+#[cfg(test)]
 mod ladder_tests;
 
 #[cfg(test)]
