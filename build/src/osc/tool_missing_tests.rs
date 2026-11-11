@@ -86,15 +86,15 @@ fn classified(text: &str) -> Option<String> {
 fn rustups_no_default_names_the_tool_it_could_not_choose() {
     assert_eq!(
         classified(UNSET_RUSTUP).as_deref(),
-        Some("no default toolchain is configured for cargo")
+        Some("no Rust toolchain is available for cargo")
     );
     assert_eq!(
         classified("error: rustup could not choose a version of rustc to run, because"),
-        Some("no default toolchain is configured for rustc".to_string())
+        Some("no Rust toolchain is available for rustc".to_string())
     );
     assert_eq!(
         classified("rustup: no default is configured for this package"),
-        Some("no default toolchain is configured for cargo".to_string())
+        Some("no Rust toolchain is available for cargo".to_string())
     );
 }
 
@@ -128,7 +128,7 @@ fn a_missing_rust_tool_is_a_missing_tool_named_by_the_shell() {
 fn a_pinned_toolchain_that_is_not_installed_is_an_unset_toolchain() {
     assert_eq!(
         classified("error: toolchain 'stable-x86_64-unknown-linux-gnu' is not installed"),
-        Some("no default toolchain is configured for cargo".to_string())
+        Some("no Rust toolchain is available for cargo".to_string())
     );
 }
 
@@ -160,10 +160,7 @@ fn an_unset_toolchain_carries_a_same_command_remedy_and_is_not_transient() {
         })
     );
     assert!(!err.is_transient());
-    assert_eq!(
-        err.to_string(),
-        "no default toolchain is configured for cargo"
-    );
+    assert_eq!(err.to_string(), "no Rust toolchain is available for cargo");
 }
 
 #[test]

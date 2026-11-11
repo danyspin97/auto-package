@@ -21,7 +21,8 @@ pub enum Cause {
     /// An executable (or an OBS source service, by its name) is not installed.
     /// `path` is where it was looked for, when that is known.
     MissingTool { tool: String, path: Option<PathBuf> },
-    /// A toolchain is installed but has no default to run with.
+    /// The tool has no toolchain to run with: none is installed, or none is
+    /// set up for it.
     ToolchainUnset { tool: String },
     /// The build sandbox cannot start on this machine. `why` is the reason
     /// as the sandbox reported it.
@@ -121,7 +122,7 @@ fn printable(text: &str) -> String {
 
 fn toolchain_hint(tool: &str) -> String {
     match tool {
-        "cargo" => "rustup default stable".to_string(),
+        "cargo" => "rustup toolchain install stable".to_string(),
         _ => format!("set a default toolchain for {}", printable(tool)),
     }
 }
@@ -275,14 +276,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unset_cargo_toolchain_is_fixed_by_rustup_on_both_hosts() {
+    fn an_unset_cargo_toolchain_is_fixed_by_installing_stable_on_both_hosts() {
         let cause = Cause::ToolchainUnset {
             tool: "cargo".to_string(),
         };
         for host in [HostDistro::Suse, HostDistro::Other] {
             assert_eq!(
                 install_hint(&cause, &host).as_deref(),
-                Some("rustup default stable")
+                Some("rustup toolchain install stable")
             );
         }
         let other = Cause::ToolchainUnset {
@@ -292,6 +293,9 @@ mod tests {
             install_hint(&other, &HostDistro::Suse).as_deref(),
             Some("set a default toolchain for go")
         );
+        // The hint never sets a default: the sandbox chooses its own.
+        let hint = install_hint(&cause, &HostDistro::Suse).unwrap();
+        assert!(!hint.contains("default"), "{hint}");
     }
 
     #[test]

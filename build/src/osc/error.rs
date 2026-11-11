@@ -52,7 +52,7 @@ pub enum Error {
 
     /// A Rust toolchain has no default to run with, or is not installed, so a
     /// service that runs `tool` cannot start.
-    #[error("no default toolchain is configured for {tool}")]
+    #[error("no Rust toolchain is available for {tool}")]
     ToolchainUnset { tool: String },
 
     /// The host's rustup home exists but is not safe to show a service, so
