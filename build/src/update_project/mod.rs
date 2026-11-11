@@ -16,6 +16,8 @@ mod plan;
 mod report;
 mod requirements;
 #[cfg(test)]
+mod summary_tests;
+#[cfg(test)]
 mod tests;
 
 pub use branch_state::*;

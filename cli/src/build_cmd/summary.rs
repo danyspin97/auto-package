@@ -171,7 +171,9 @@ pub(crate) fn print_run_summary(
         })
         .map(|(pkg, _)| pkg)
         .collect();
-    let _ = writeln!(out, "\nBuilt this run ({}):", built.len());
+    if !built.is_empty() {
+        let _ = writeln!(out, "\nBuilt this run ({}):", built.len());
+    }
     for pkg in &built {
         // A local build is not on OBS: say so beside it, never as a plain build.
         let local = if matches!(latest[*pkg].1, PackageOutcome::BuiltLocally) {
@@ -201,7 +203,9 @@ pub(crate) fn print_run_summary(
         .collect();
     queued.retain(|(pkg, _)| !built.contains(pkg));
     let failed = failed_packages(&latest);
-    let _ = writeln!(out, "\nQueued, waiting on dependencies ({}):", queued.len());
+    if !queued.is_empty() {
+        let _ = writeln!(out, "\nQueued, waiting on dependencies ({}):", queued.len());
+    }
     for (pkg, deps) in queued {
         if deps.is_empty() {
             let _ = writeln!(out, "  {pkg}");
@@ -246,7 +250,9 @@ pub(crate) fn print_run_summary(
     // lines the changelog and the submit request carry.
     let touched = touched_packages(&latest);
     let flagged = fix_flagged(state_root, touched.iter().copied());
-    let _ = writeln!(out, "\nFlagged by the fix loop ({}):", flagged.len());
+    if !flagged.is_empty() {
+        let _ = writeln!(out, "\nFlagged by the fix loop ({}):", flagged.len());
+    }
     for (pkg, lines) in &flagged {
         let _ = writeln!(out, "  {pkg}");
         for line in lines {
@@ -258,7 +264,9 @@ pub(crate) fn print_run_summary(
     let risks = with_lines(touched.iter().copied(), |pkg| {
         ap_build::risk_flags::lines_of_package(state_root, pkg)
     });
-    let _ = writeln!(out, "\nNeeds review ({}):", risks.len());
+    if !risks.is_empty() {
+        let _ = writeln!(out, "\nNeeds review ({}):", risks.len());
+    }
     for (pkg, lines) in &risks {
         let _ = writeln!(out, "  {pkg}");
         for line in lines {
@@ -268,7 +276,7 @@ pub(crate) fn print_run_summary(
 
     let lint = rpmlint_errors_of(state_root, &built);
     if !lint.is_empty() {
-        let _ = writeln!(out, "\nrpmlint errors in the final RPMs ({}):", lint.len());
+        let _ = writeln!(out, "\nRpmlint errors in the final RPMs ({}):", lint.len());
         for line in &lint {
             let _ = writeln!(out, "  {line}");
         }
@@ -305,7 +313,9 @@ pub(crate) fn print_run_summary(
         .map(|(name, _)| name)
         .collect();
     cached.sort();
-    let _ = writeln!(out, "\nAlready built in {project} ({}):", cached.len());
+    if !cached.is_empty() {
+        let _ = writeln!(out, "\nAlready built in {project} ({}):", cached.len());
+    }
     for name in cached {
         let _ = writeln!(out, "  {name}");
     }

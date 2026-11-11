@@ -106,6 +106,7 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
+ "unicode-width 0.2.0",
  "ureq",
  "urlencoding",
  "walkdir",

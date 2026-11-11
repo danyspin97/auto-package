@@ -286,7 +286,7 @@ pub fn requested_lines(requested: &[String]) -> Vec<String> {
     if requested.is_empty() {
         return Vec::new();
     }
-    let mut out = vec![format!("already requested ({}):", requested.len())];
+    let mut out = vec![format!("Already requested ({}):", requested.len())];
     out.extend(requested.iter().map(|r| format!("  {r}")));
     out
 }
@@ -299,7 +299,48 @@ pub fn requested_section(requested: &[String]) -> String {
         .collect()
 }
 
-/// The end-of-run summary.
+/// The rows of the "Updated" section: `pkg old → new`, with the package and
+/// old-version cells padded to the widest row, so the arrows line up. The old
+/// version column is capped so that the row up to the new version fits in
+/// `width` columns (a cell is never cut, only left unpadded).
+fn updated_rows(results: &[ItemResult], width: usize) -> Vec<String> {
+    use ap_core::sink::pad_to;
+    use unicode_width::UnicodeWidthStr;
+    let rows: Vec<&ItemResult> = results
+        .iter()
+        .filter(|r| r.outcome == ItemOutcome::Updated)
+        .collect();
+    let pkg_w = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.item.pkg.as_str()))
+        .max()
+        .unwrap_or(0);
+    let old_max = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.item.old_version.as_str()))
+        .max()
+        .unwrap_or(0);
+    // The two-space indent, the package, a space, and " → " before the new version.
+    let fixed = 2 + pkg_w + 1 + 3;
+    let old_w = old_max.min(width.saturating_sub(fixed));
+    rows.iter()
+        .map(|r| {
+            let requires = match required_names(&r.item).as_str() {
+                "" => String::new(),
+                names => format!(" (requires the update of {names})"),
+            };
+            format!(
+                "{} {} → {}{requires}",
+                pad_to(&r.item.pkg, pkg_w),
+                pad_to(&r.item.old_version, old_w),
+                r.item.new_version
+            )
+        })
+        .collect()
+}
+
+/// The end-of-run summary, `width` columns wide at most for the padding of
+/// its version columns. A section with no entries is left out.
 pub fn summary_text(
     branch_project: &str,
     results: &[ItemResult],
@@ -307,10 +348,14 @@ pub fn summary_text(
     missing: &[MissingRequirement],
     maintainer: &[String],
     submit: bool,
+    width: usize,
 ) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let section = |out: &mut String, title: &str, lines: Vec<String>| {
+        if lines.is_empty() {
+            return;
+        }
         let _ = writeln!(out, "{title} ({}):", lines.len());
         for l in lines {
             let _ = writeln!(out, "  {l}");
@@ -318,27 +363,10 @@ pub fn summary_text(
     };
     let _ = writeln!(out, "\nupdate summary");
     let _ = writeln!(out, "branch project: {branch_project}");
+    section(&mut out, "Updated", updated_rows(results, width));
     section(
         &mut out,
-        "updated",
-        results
-            .iter()
-            .filter(|r| r.outcome == ItemOutcome::Updated)
-            .map(|r| {
-                let requires = match required_names(&r.item).as_str() {
-                    "" => String::new(),
-                    names => format!(" (requires the update of {names})"),
-                };
-                format!(
-                    "{} {} -> {}{requires}",
-                    r.item.pkg, r.item.old_version, r.item.new_version
-                )
-            })
-            .collect(),
-    );
-    section(
-        &mut out,
-        "already updated in the branch (not rebuilt)",
+        "Already updated in the branch (not rebuilt)",
         results
             .iter()
             .filter(|r| r.outcome == ItemOutcome::AlreadyUpdated)
@@ -347,7 +375,7 @@ pub fn summary_text(
     );
     section(
         &mut out,
-        "failed",
+        "Failed",
         results
             .iter()
             .filter_map(|r| match &r.outcome {
@@ -358,7 +386,7 @@ pub fn summary_text(
     );
     section(
         &mut out,
-        "skipped",
+        "Skipped",
         results
             .iter()
             .filter_map(|r| match &r.outcome {
@@ -375,20 +403,20 @@ pub fn summary_text(
     if !not_started.is_empty() {
         section(
             &mut out,
-            "not started (the run was interrupted)",
+            "Not started (the run was interrupted)",
             not_started,
         );
     }
-    section(&mut out, "needs the maintainer", maintainer.to_vec());
+    section(&mut out, "Needs the maintainer", maintainer.to_vec());
     section(
         &mut out,
-        "requirements no provider satisfies",
+        "Requirements no provider satisfies",
         requirement_lines(missing),
     );
     if submit {
         section(
             &mut out,
-            "submit requests",
+            "Submit requests",
             results
                 .iter()
                 .filter_map(|r| {
@@ -404,7 +432,7 @@ pub fn summary_text(
                         SrOutcome::Failed(why) => format!("failed: {why}"),
                         SrOutcome::NotRequested => return None,
                     };
-                    Some(format!("{} -> {}: {what}", r.item.pkg, r.item.origin))
+                    Some(format!("{} → {}: {what}", r.item.pkg, r.item.origin))
                 })
                 .collect(),
         );
@@ -415,7 +443,7 @@ pub fn summary_text(
     }
     section(
         &mut out,
-        "build paths added",
+        "Build paths added",
         paths
             .iter()
             .map(|p| {

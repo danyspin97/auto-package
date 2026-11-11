@@ -225,8 +225,8 @@ fn the_dry_run_has_no_maintainer_heading_when_nothing_needs_one() {
 #[test]
 fn the_summary_lists_the_maintainer_skips_under_their_heading() {
     let maintainer = maintainer_lines();
-    let text = summary_text("b", &[], &[], &[], &maintainer, false);
-    assert!(text.contains("needs the maintainer (2):"), "{text}");
+    let text = summary_text("b", &[], &[], &[], &maintainer, false, 100);
+    assert!(text.contains("Needs the maintainer (2):"), "{text}");
     for why in &maintainer {
         assert!(text.contains(&format!("  {why}")), "{text}");
     }
@@ -384,9 +384,9 @@ fn a_failed_submit_request_fails_the_run() {
     ];
     assert!(any_failed(&failed_sr));
     assert_eq!(failure_lines(&failed_sr), ["2 submit request(s) failed"]);
-    let text = summary_text("home:u:b", &failed_sr, &[], &[], &[], true);
+    let text = summary_text("home:u:b", &failed_sr, &[], &[], &[], true, 100);
     assert!(text.contains("2 submit request(s) failed\n"), "{text}");
-    assert!(text.contains("  a -> Base:System: failed: boom"), "{text}");
+    assert!(text.contains("  a → Base:System: failed: boom"), "{text}");
 
     // A package failure and a submit failure are reported separately.
     let both = vec![
@@ -418,7 +418,7 @@ fn a_failed_submit_request_fails_the_run() {
     ];
     assert!(!any_failed(&quiet));
     assert!(failure_lines(&quiet).is_empty());
-    assert!(!summary_text("home:u:b", &quiet, &[], &[], &[], true).contains("failed\n"));
+    assert!(!summary_text("home:u:b", &quiet, &[], &[], &[], true, 100).contains("failed\n"));
 }
 
 #[test]
@@ -461,25 +461,26 @@ fn the_summary_counts_every_outcome_and_a_failure_fails_the_run() {
         &[],
         &[],
         true,
+        100,
     );
     for needle in [
         "branch project: home:u:b",
-        "updated (2):",
-        "  a 1 -> 2",
-        "failed (1):",
+        "Updated (2):",
+        "  a 1 → 2",
+        "Failed (1):",
         "  b: build",
-        "skipped (1):",
+        "Skipped (1):",
         "  c: name",
-        "submit requests (3):",
-        "  a -> Base:System: created request 42",
-        "  d -> Base:System: request 7 already open",
-        "  b -> Base:System: not submitted: failed",
-        "build paths added (1):",
+        "Submit requests (3):",
+        "  a → Base:System: created request 42",
+        "  d → Base:System: request 7 already open",
+        "  b → Base:System: not submitted: failed",
+        "Build paths added (1):",
         "  devel:x/r to repository r",
     ] {
         assert!(text.contains(needle), "{needle:?} missing from:\n{text}");
     }
-    assert!(!summary_text("b", &results, &[], &[], &[], false).contains("submit requests"));
+    assert!(!summary_text("b", &results, &[], &[], &[], false, 100).contains("submit requests"));
 }
 
 #[test]
@@ -494,12 +495,13 @@ fn a_broken_link_is_listed_under_needs_the_maintainer_and_is_no_failure() {
         &[],
         std::slice::from_ref(&reason),
         false,
+        100,
     );
     assert!(
-        text.contains(&format!("needs the maintainer (1):\n  {reason}\n")),
+        text.contains(&format!("Needs the maintainer (1):\n  {reason}\n")),
         "{text}"
     );
-    assert!(text.contains("failed (0):"), "{text}");
+    assert!(!text.contains("Failed ("), "{text}");
 }
 
 #[test]
@@ -509,7 +511,7 @@ fn the_already_requested_section_is_listed_only_when_there_is_one() {
     let one = ["foo: submit request 7 (new, by u) already brings 2.0 to foo".to_string()];
     assert_eq!(
         requested_section(&one),
-        "already requested (1):\n  foo: submit request 7 (new, by u) already brings 2.0 to foo\n"
+        "Already requested (1):\n  foo: submit request 7 (new, by u) already brings 2.0 to foo\n"
     );
 }
 
@@ -571,9 +573,9 @@ fn the_summary_names_the_dependency_update_a_package_requires() {
         outcome: ItemOutcome::Updated,
         sr: SrOutcome::NotRequested,
     }];
-    let text = summary_text("b", &results, &[], &[], &[], false);
+    let text = summary_text("b", &results, &[], &[], &[], false, 100);
     assert!(
-        text.contains("  libfoo 1 -> 2 (requires the update of libbar)\n"),
+        text.contains("  libfoo 1 → 2 (requires the update of libbar)\n"),
         "{text}"
     );
 }

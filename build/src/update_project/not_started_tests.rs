@@ -48,12 +48,12 @@ fn a_run_stopped_before_branching_lists_the_packages_not_started_and_fails_it() 
             "2 package(s) not started: the run was interrupted"
         ]
     );
-    let text = summary_text("home:u:b", &results, &[], &[], &[], false);
+    let text = summary_text("home:u:b", &results, &[], &[], &[], false, 100);
     assert!(
-        text.contains("not started (the run was interrupted) (2):\n  b\n  c\n"),
+        text.contains("Not started (the run was interrupted) (2):\n  b\n  c\n"),
         "{text}"
     );
-    assert!(text.contains("failed (1):\n  a: build\n"), "{text}");
+    assert!(text.contains("Failed (1):\n  a: build\n"), "{text}");
     // An interrupted run that failed nothing still fails: the exit decision.
     let only_stopped = &results[1..2];
     assert!(any_failed(only_stopped));

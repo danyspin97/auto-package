@@ -218,7 +218,7 @@ is compared with the origin's and with upstream's. A copy at upstream's version
 whose build there succeeded is listed as already updated and not rebuilt (its
 submit request can still be made). A copy at upstream's version whose build did
 not succeed, or an older copy, is continued from and rebuilt. A copy that is
-newer than upstream's is listed under "needs the maintainer" and left as it is,
+newer than upstream's is listed under "Needs the maintainer" and left as it is,
 unless `--to-version` names the target. A copy or a build result that cannot be
 read leaves the package alone, skipped with the cause. The comparison is made
 for an upgrade in a plain `update` only, not for `lint`, `--in-place`,
@@ -240,11 +240,11 @@ or `20240101`) is not compared, since its major and minor numbers mean nothing.
 
 A package of SOURCE whose openSUSE:Factory package names another devel project
 than SOURCE is deprecated for SOURCE: `update` does not branch it, and lists it
-under "needs the maintainer" with the reason. Pass `--deprecated` to include it
+under "Needs the maintainer" with the reason. Pass `--deprecated` to include it
 as any other package. This is the only case it skips. The check is meant for a
 SOURCE that is a devel project of Factory: for another source (Leap, SLFO, a
 branch project, a sibling devel project) Factory names a different project for
-nearly every package, so most of them are listed under "needs the maintainer"
+nearly every package, so most of them are listed under "Needs the maintainer"
 until `--deprecated` is passed. A package that Factory
 does not have, a Factory package whose meta names no devel project, and a failed
 read are not skipped, so a package Factory has dropped is not detected. Only
@@ -258,7 +258,7 @@ and the `Version:` of a request's source at a srcmd5 revision for thirty days (a
 numeric revision is read for the run only). If one brings the planned version or
 a newer one (the `Version:` of its source at the request's revision; a snapshot,
 a git or nightly version, brings no release), the package is not branched: it is
-listed under "already requested" with the request and its creator. The request
+listed under "Already requested" with the request and its creator. The request
 is read again before the skip is made, and only a request still open then skips;
 a failed re-read does not skip. A request that brings an older version is only
 noted in the plan. Declined, revoked and superseded requests and requests that
@@ -269,11 +269,12 @@ upgrade in a plain `update` only: not for `lint`, `--in-place` or
 none.
 
 An origin with a broken `_link` or no spec file is reported with its cause,
-listed under "needs the maintainer", and not branched; an origin whose spec
+listed under "Needs the maintainer", and not branched; an origin whose spec
 read failed is skipped with that cause, since the read may pass on a retry.
 
-The run ends with a summary (updated, failed, skipped, requests, build paths
-added, branch project) and exits non-zero when a package failed.
+The run ends with a summary (Updated, Failed, Skipped, Submit requests, Build
+paths added, branch project) and exits non-zero when a package failed. Each
+section is headed `Title (n):` and a section with no entries is left out.
 
 Carried patches that copy an upstream request are checked on each `update` as
 well, and only when they fail to apply: a failing patch whose open request

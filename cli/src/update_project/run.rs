@@ -263,7 +263,8 @@ pub(super) fn run_on(
                 &report.paths,
                 &report.requirements,
                 &report.maintainer,
-                a.submit
+                a.submit,
+                ap_core::sink::terminal_width(std::io::IsTerminal::is_terminal(&std::io::stdout())),
             ),
             up::requested_section(&report.requested),
             up::arch_section(&report.arch),
@@ -288,7 +289,7 @@ pub(super) fn run_on(
                 && !from_tui.is_empty()
             {
                 text.push_str(&format!(
-                    "submit requests made from the TUI ({}):\n  {}\n",
+                    "Submit requests made from the TUI ({}):\n  {}\n",
                     from_tui.len(),
                     from_tui.join("\n  ")
                 ));
