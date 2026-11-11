@@ -12,6 +12,8 @@ use crate::pipeline::render::*;
 use crate::pipeline::spec_edits::*;
 use crate::pipeline::update_mode::spec_changes::*;
 
+pub(super) mod env;
+
 /// Step: ValidateSpec. A rejected spec runs a fix turn and asks for another
 /// round.
 pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, PipelineResult> {
