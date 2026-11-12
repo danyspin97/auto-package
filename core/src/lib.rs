@@ -24,6 +24,7 @@ pub mod sink;
 pub mod skills;
 pub mod step;
 pub mod sweep_event;
+pub mod unowned_label;
 pub mod user_text;
 #[cfg(test)]
 mod user_text_tests;

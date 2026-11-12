@@ -127,7 +127,8 @@ pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
                     p.attempts[i]
                         .build
                         .get_or_insert_with(BuildInfo::default)
-                        .classification = v["classification"].as_str().map(str::to_string);
+                        .classification =
+                        classification::classification_label(&v["classification"]);
                 }
             }
             "missing_packages" => {

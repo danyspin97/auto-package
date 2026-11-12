@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 
+mod classification;
 mod collect;
 mod detail;
 #[cfg(test)]

@@ -212,8 +212,8 @@ impl HumanSink {
                     crate::event::BuildFailure::BuildFailed => "build failed".to_string(),
                     crate::event::BuildFailure::InstallFailed => "install failed".to_string(),
                     crate::event::BuildFailure::CheckFailed => "check failed".to_string(),
-                    crate::event::BuildFailure::FilesNotOwned { .. } => {
-                        "files not owned".to_string()
+                    crate::event::BuildFailure::FilesNotOwned { paths } => {
+                        crate::unowned_label::files_not_owned(paths)
                     }
                     crate::event::BuildFailure::UnresolvableDeps { packages } => {
                         format!("unresolvable deps: {}", packages.join(", "))
@@ -448,15 +448,8 @@ mod tests {
     use crate::event::RunId;
     use std::path::PathBuf;
 
-    fn banner(build: &str) -> String {
-        let event = Event::RunStarted {
-            run_id: RunId("20261030-101010-abcd-1-0".into()),
-            argv: vec!["auto-package".into()],
-            work_dir: PathBuf::from("/w"),
-            build: build.into(),
-        };
-        // The banner may carry colour codes when stderr is a terminal.
-        let text = HumanSink::new(LogLevel::Info).format(&event).unwrap();
+    /// `text` without its colour codes: they appear when stderr is a terminal.
+    fn unstyled(text: &str) -> String {
         let mut plain = String::new();
         let mut in_code = false;
         for c in text.chars() {
@@ -468,6 +461,40 @@ mod tests {
             }
         }
         plain
+    }
+
+    fn banner(build: &str) -> String {
+        let event = Event::RunStarted {
+            run_id: RunId("20261030-101010-abcd-1-0".into()),
+            argv: vec!["auto-package".into()],
+            work_dir: PathBuf::from("/w"),
+            build: build.into(),
+        };
+        unstyled(&HumanSink::new(LogLevel::Info).format(&event).unwrap())
+    }
+
+    #[test]
+    fn a_files_not_owned_failure_names_its_paths() {
+        let event = Event::BuildFailed {
+            step: crate::event::StepId(2),
+            classification: crate::event::BuildFailure::FilesNotOwned {
+                paths: [
+                    "/usr/share/wayland-sessions",
+                    "/usr/share/xdg-desktop-portal",
+                    "/usr/share/xdg-desktop-portal/portals",
+                ]
+                .map(String::from)
+                .to_vec(),
+            },
+            log: PathBuf::from("/w/log.txt"),
+        };
+        let line = unstyled(&HumanSink::new(LogLevel::Info).format(&event).unwrap());
+        assert!(
+            line.contains(
+                "files not owned: /usr/share/wayland-sessions, /usr/share/xdg-desktop-portal, /usr/share/xdg-desktop-portal/portals"
+            ),
+            "{line}"
+        );
     }
 
     #[test]

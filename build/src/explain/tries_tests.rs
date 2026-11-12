@@ -404,6 +404,28 @@ fn the_users_sample_reads_as_planned() {
 }
 
 #[test]
+fn a_files_not_owned_try_is_the_last_failed_try_in_words() {
+    let unowned = r#"{"FilesNotOwned":{"paths":["/usr/share/wayland-sessions","/usr/share/xdg-desktop-portal","/usr/share/xdg-desktop-portal/portals"]}}"#;
+    let lines = vec![
+        start("jay-compositor", 1, 1, 0),
+        step_end("jay-compositor", 1, "Failed"),
+        build_failed("jay-compositor", 1, r#""PrepFailed""#),
+        start("jay-compositor", 2, 2, 1),
+        step_end("jay-compositor", 2, "Failed"),
+        build_failed("jay-compositor", 2, unowned),
+        start("jay-compositor", 3, 3, 2),
+        step_end("jay-compositor", 3, "Ok"),
+        finished("jay-compositor", BUILT),
+    ];
+    let block = summary_block(&tries(&lines), 100);
+    assert!(
+        block.contains("last failed try: files not owned"),
+        "{block}"
+    );
+    assert!(!block.contains("FilesNotOwned"), "{block}");
+}
+
+#[test]
 fn a_no_result_package_says_it_has_no_result() {
     let lines = vec![start("pkg", 1, 1, 0), step_end("pkg", 1, "Ok")];
     let block = summary_block(&tries(&lines), 100);

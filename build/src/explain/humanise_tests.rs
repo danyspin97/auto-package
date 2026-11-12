@@ -7,6 +7,7 @@ fn camel_case_failure_kinds_read_as_lower_case_words() {
         ("BuildFailed", "build failed"),
         ("PrepFailed", "prep failed"),
         ("CheckFailed", "check failed"),
+        ("FilesNotOwned", "files not owned"),
         ("NoChange", "no change"),
         ("RpmParseError", "rpm parse error"),
         ("UnresolvableDeps", "unresolvable deps"),
