@@ -244,3 +244,59 @@ build-backend = "flit_core.buildapi"
     assert_eq!(bs.requires, ["flit_core>=3.2.0,<4"]);
     assert_eq!(bs.backend.as_deref(), Some("flit_core.buildapi"));
 }
+
+fn bins_of(manifest: &str, extra: &[&str]) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let tarball = dir.path().join("src.tar.gz");
+    let mut entries: Vec<(String, Vec<u8>)> =
+        vec![("thing-1.0/Cargo.toml".into(), manifest.as_bytes().to_vec())];
+    for e in extra {
+        entries.push((format!("thing-1.0/{e}"), b"fn main() {}".to_vec()));
+    }
+    let refs: Vec<(&str, &[u8])> = entries
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    write_tar(&tarball, &refs);
+    inspect(&tarball).unwrap().bin_names
+}
+
+#[test]
+fn a_bin_table_names_the_executable_not_the_crate() {
+    let m =
+        "[package]\nname = \"jay-compositor\"\n[[bin]]\nname = \"jay\"\npath = \"src/main.rs\"\n";
+    assert_eq!(bins_of(m, &["src/main.rs"]), ["jay"]);
+}
+
+#[test]
+fn the_default_binary_is_named_after_the_package() {
+    let m = "[package]\nname = \"thing\"\n";
+    assert_eq!(bins_of(m, &["src/main.rs"]), ["thing"]);
+    assert!(bins_of(m, &["src/lib.rs"]).is_empty());
+}
+
+#[test]
+fn src_bin_files_and_directories_are_executables() {
+    let m = "[package]\nname = \"thing\"\n";
+    let got = bins_of(m, &["src/main.rs", "src/bin/a.rs", "src/bin/b/main.rs"]);
+    assert_eq!(got, ["thing", "a", "b"]);
+}
+
+#[test]
+fn autobins_false_drops_the_implicit_binaries() {
+    let m = "[package]\nname = \"thing\"\nautobins = false\n[[bin]]\nname = \"t\"\npath = \"tools/t.rs\"\n";
+    assert_eq!(bins_of(m, &["src/main.rs", "src/bin/a.rs"]), ["t"]);
+}
+
+#[test]
+fn a_dot_slash_path_still_claims_src_main() {
+    let m =
+        "[package]\nname = \"jay-compositor\"\n[[bin]]\nname = \"jay\"\npath = \"./src/main.rs\"\n";
+    assert_eq!(bins_of(m, &["src/main.rs"]), ["jay"]);
+}
+
+#[test]
+fn a_bin_table_under_src_bin_is_not_counted_twice() {
+    let m = "[package]\nname = \"thing\"\n[[bin]]\nname = \"x\"\npath = \"src/bin/foo.rs\"\n";
+    assert_eq!(bins_of(m, &["src/bin/foo.rs"]), ["x"]);
+}

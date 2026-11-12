@@ -370,6 +370,13 @@ fn inspect_from_entries(
             .filter(|n| is_plain_project_name(n));
     }
 
+    let bin_names = match (&cargo, &top_level_dir) {
+        (Some(((0, _), src)), Some(top)) => toml::from_str::<CargoToml>(src)
+            .map(|d| d.bin_names(&files, top))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
     let python_depth = match (pyproject.as_ref().map(|(d, _, _)| *d), setup_py_depth) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
@@ -453,5 +460,6 @@ fn inspect_from_entries(
         subprojects,
         files,
         console_scripts,
+        bin_names,
     })
 }

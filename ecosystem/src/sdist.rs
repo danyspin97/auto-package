@@ -92,6 +92,10 @@ pub struct SdistInfo {
     /// / `[project.gui-scripts]` (or `[tool.poetry.scripts]`), plain file names
     /// only. pip generates one `/usr/bin/<name>` per flavor for each.
     pub console_scripts: Vec<String>,
+    /// Executables the Cargo manifest at the archive root builds (`[[bin]]`
+    /// names, the default `src/main.rs` binary, `src/bin`). Empty without a
+    /// root manifest.
+    pub bin_names: Vec<String>,
 }
 
 /// One project inside a multi-project archive.

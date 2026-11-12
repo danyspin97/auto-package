@@ -161,6 +161,7 @@ pub(super) fn bare_info() -> ap_ecosystem::sdist::SdistInfo {
         top_level_tests_dir: None,
         files: Vec::new(),
         console_scripts: Vec::new(),
+        bin_names: Vec::new(),
     }
 }
 

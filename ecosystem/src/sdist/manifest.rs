@@ -199,11 +199,92 @@ impl PyprojectToml {
 #[derive(Deserialize)]
 pub(super) struct CargoToml {
     pub(super) package: Option<CargoPackage>,
+    #[serde(default)]
+    bin: Vec<CargoBin>,
 }
 
 #[derive(Deserialize)]
 pub(super) struct CargoPackage {
     pub(super) name: Option<String>,
+    /// `autobins = false` turns off finding binaries from the file layout.
+    autobins: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct CargoBin {
+    name: Option<String>,
+    path: Option<String>,
+}
+
+/// `path` without a leading `./` or empty components, the way cargo compares
+/// target paths.
+fn clean_path(path: &str) -> String {
+    path.split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+impl CargoToml {
+    /// The executables a root crate builds: its `[[bin]]` tables and, unless
+    /// `autobins = false`, the default `src/main.rs` binary (named after the
+    /// package) and the `src/bin` ones. A file a `[[bin]]` names by `path` is
+    /// that target, not one more. `files` are the archive's paths below
+    /// `top`. A name that is not plain is dropped.
+    pub(super) fn bin_names(&self, files: &[String], top: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut add = |n: &str| {
+            if is_plain_project_name(n) && !out.iter().any(|o| o == n) {
+                out.push(n.to_string());
+            }
+        };
+        let claimed: Vec<String> = self
+            .bin
+            .iter()
+            .filter_map(|b| b.path.as_deref().map(clean_path))
+            .collect();
+        for b in &self.bin {
+            if let Some(n) = &b.name {
+                add(n);
+            }
+        }
+        let pkg = self.package.as_ref();
+        if pkg.and_then(|p| p.autobins) == Some(false) {
+            return out;
+        }
+        let rel = |f: &str| {
+            f.strip_prefix(top)
+                .map(|r| r.trim_start_matches('/').to_string())
+        };
+        let free = |path: &str| !claimed.iter().any(|c| c == path);
+        if let Some(p) = pkg.and_then(|p| p.name.as_deref())
+            && free("src/main.rs")
+            && files
+                .iter()
+                .any(|f| rel(f).as_deref() == Some("src/main.rs"))
+        {
+            add(p);
+        }
+        for f in files {
+            let Some(path) = rel(f) else { continue };
+            let Some(rest) = path.strip_prefix("src/bin/") else {
+                continue;
+            };
+            if !free(&path) {
+                continue;
+            }
+            match rest.split('/').collect::<Vec<_>>().as_slice() {
+                [file] => {
+                    if let Some(stem) = file.strip_suffix(".rs") {
+                        add(stem);
+                    }
+                }
+                [dir, "main.rs"] => add(dir),
+                _ => {}
+            }
+        }
+        out
+    }
 }
 
 #[derive(Deserialize)]
