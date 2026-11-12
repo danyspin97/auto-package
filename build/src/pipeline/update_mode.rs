@@ -129,7 +129,8 @@ pub(super) struct UpdateMode {
 ///   `%python_subpackages` lands on the wrong subpackage), `dedupe_changelog_header`
 ///   (a second `%changelog` is not a changelog), `unwrap_python_expand_block` (a
 ///   `#` rpm reads as a comment), `use_version_macro` (a literal version an
-///   update leaves stale).
+///   update leaves stale), `escape_comment_macros` (a macro in a comment, which
+///   rpm expands and rpmlint reports).
 /// - skipped on an update: `collapse_dist_info_license_lines` (the form of the
 ///   `%files` licence lines), `normalize_nvidia_license` (licence spelling, which
 ///   rpmlint reports), `move_check_before_files` (section order),
@@ -216,12 +217,17 @@ pub(super) fn normalize_spec_text(
         )
     };
     let passes = passes.apply("use_version_macro", crate::spec_tidy::use_version_macro);
-    if update {
+    let passes = if update {
         passes
     } else {
         passes.apply(
             "drop_unneeded_wheel_build_requires",
             crate::spec_tidy::drop_unneeded_wheel_build_requires,
         )
-    }
+    };
+    // A macro in a comment is expanded by rpm and reported by rpmlint, whatever
+    // the origin has; the escape is the same on an update.
+    passes.apply("escape_comment_macros", |s| {
+        crate::spec_tidy::comment_macros::escape_comment_macros(s).0
+    })
 }

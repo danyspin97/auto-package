@@ -346,6 +346,23 @@ fn accept_checked(
     judge_removals: bool,
 ) -> Result<(), String> {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
+    // A macro in a comment is escaped before the check: rpm would expand it, and
+    // a later build would need a turn to fix what this pass fixes now.
+    let (escaped, changed) = crate::spec_tidy::comment_macros::escape_comment_macros(&after);
+    let after = if changed.is_empty() {
+        after
+    } else {
+        write_or_warn(spec_path, &escaped);
+        let lines: Vec<String> = changed.iter().map(usize::to_string).collect();
+        reporter.report(&Event::Progress {
+            step: Some(step.id),
+            message: format!(
+                "escaped the macros in the spec comments at line {}; RPM would expand them",
+                lines.join(", ")
+            ),
+        });
+        escaped
+    };
 
     if let Some((line_no, text)) = crate::spec::first_macro_in_comment(&after) {
         reporter.report(&Event::Warning {

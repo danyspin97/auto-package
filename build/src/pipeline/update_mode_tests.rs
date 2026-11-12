@@ -432,6 +432,33 @@ mod tidy_on_update {
             OBSOLETE.replace("foo-2.0.tar.gz", "foo-%{version}.tar.gz")
         );
     }
+
+    #[test]
+    fn a_macro_in_a_comment_is_escaped_for_new_packages_and_updates() {
+        let spec = "Name: foo\nVersion: 2.0\nRelease: 0\nSummary: A tool\n\
+            License: MIT\nSource0: foo-2.0.tar.gz\n\n%description\nA tool.\n\n\
+            %prep\n%setup -q\n\n%build\n\n%install\n\
+            # Installs the crate's binaries into %{_bindir}\nmake install\n\n\
+            %files\n%{_bindir}/foo\n\n%changelog\n";
+        let escaped = "# Installs the crate's binaries into %%{_bindir}\nmake install";
+        for update in [false, true] {
+            let passes = normalize_spec_text(spec, update, None, None);
+            assert!(
+                passes.text.contains(escaped),
+                "update {update}:\n{}",
+                passes.text
+            );
+            let change = passes
+                .changes
+                .iter()
+                .find(|c| c.rule == "escape_comment_macros")
+                .expect("the pass is reported");
+            assert_eq!(
+                change.added,
+                vec!["# Installs the crate's binaries into %%{_bindir}"]
+            );
+        }
+    }
 }
 
 mod failed_build_log {
