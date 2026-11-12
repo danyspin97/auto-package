@@ -113,6 +113,7 @@ fn each_outcome_ends_the_package_in_its_own_status() {
     assert!(finished(failed(false), false) == PkgStatus::Failed);
     let maintainer = PackageOutcome::NeedsMaintainer {
         reason: "gone".into(),
+        note: None,
     };
     assert!(finished(maintainer, false) == PkgStatus::Failed);
     let skipped = PackageOutcome::Skipped {

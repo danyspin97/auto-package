@@ -219,7 +219,7 @@ pub(crate) fn print_run_summary(
     let needs_maintainer: Vec<(&String, &String)> = latest
         .iter()
         .filter_map(|(pkg, (_, outcome))| match outcome {
-            PackageOutcome::NeedsMaintainer { reason } => Some((pkg, reason)),
+            PackageOutcome::NeedsMaintainer { reason, .. } => Some((pkg, reason)),
             _ => None,
         })
         .collect();
@@ -345,6 +345,7 @@ mod tests {
                 "gamma",
                 PackageOutcome::NeedsMaintainer {
                     reason: "key".into(),
+                    note: None,
                 },
             ),
             ("beta", PackageOutcome::Built),
@@ -362,6 +363,7 @@ mod tests {
             "gamma",
             PackageOutcome::NeedsMaintainer {
                 reason: "key".into(),
+                note: None,
             },
         )]);
         assert_eq!(touched_packages(&latest), vec![&"gamma".to_string()]);

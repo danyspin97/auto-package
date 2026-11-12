@@ -274,9 +274,11 @@ pub(super) fn package_outcome(result: &PipelineResult) -> PackageOutcome {
         PipelineResult::Failed {
             reason,
             kind: FailureKind::NeedsMaintainer,
+            note,
             ..
         } => PackageOutcome::NeedsMaintainer {
             reason: reason.clone(),
+            note: note.clone(),
         },
         // Still a failure, but the summary says the URL is gone upstream.
         PipelineResult::Failed {

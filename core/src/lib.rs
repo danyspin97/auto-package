@@ -13,6 +13,7 @@ pub mod fix_event;
 pub mod fsx;
 pub mod ledger;
 pub mod limits;
+pub mod package_outcome;
 pub mod pgroup;
 pub mod proc_lock;
 pub mod redact;

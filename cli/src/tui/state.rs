@@ -355,7 +355,7 @@ impl TuiState {
                 state.advance(Input::Finished { outcome, disk_full });
                 match outcome {
                     PackageOutcome::Failed { reason, .. }
-                    | PackageOutcome::NeedsMaintainer { reason } => {
+                    | PackageOutcome::NeedsMaintainer { reason, .. } => {
                         // Keep the failed step so the Step column can name it.
                         // A worker that died mid-step never sent `StepFinished`,
                         // so close the step here.
@@ -386,7 +386,7 @@ impl TuiState {
                         format!("needs: {}", deps.join(", "))
                     }
                     PackageOutcome::Failed { reason, .. } => format!("failed: {reason}"),
-                    PackageOutcome::NeedsMaintainer { reason } => {
+                    PackageOutcome::NeedsMaintainer { reason, .. } => {
                         format!("needs a maintainer: {reason}")
                     }
                     PackageOutcome::Skipped { reason } => format!("skipped: {reason}"),

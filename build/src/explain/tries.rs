@@ -190,9 +190,9 @@ fn finish(pkg: String, mut acc: Acc) -> Option<PkgTries> {
             Some(format!("waiting for: {}", deps.join(", "))),
             acc.shape(),
         ),
-        Some(PackageOutcome::NeedsMaintainer { reason } | PackageOutcome::Skipped { reason }) => {
-            (TriesOutcome::NotBuilt, Some(reason.clone()), acc.shape())
-        }
+        Some(
+            PackageOutcome::NeedsMaintainer { reason, .. } | PackageOutcome::Skipped { reason },
+        ) => (TriesOutcome::NotBuilt, Some(reason.clone()), acc.shape()),
         None if tries > 0 => (
             TriesOutcome::NoResult,
             Some("no package_finished: the run was interrupted or is still going".into()),
