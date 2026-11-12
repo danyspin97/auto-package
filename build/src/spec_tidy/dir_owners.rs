@@ -58,17 +58,18 @@ const MACROS: &[(&str, &str)] = &[
     ("_sysusersdir", "/usr/lib/sysusers.d"),
     ("_tmpfilesdir", "/usr/lib/tmpfiles.d"),
     ("_udevrulesdir", "/usr/lib/udev/rules.d"),
+    ("_udevdir", "/usr/lib/udev"),
     ("_libdir", "/usr/lib64"),
 ];
 
 /// The `Name` and `Version` of the preamble, `None` when it is not a plain
 /// value.
-struct Facts {
+pub(crate) struct Facts {
     name: Option<String>,
     version: Option<String>,
 }
 
-fn facts(lines: &[&str]) -> Facts {
+pub(crate) fn facts(lines: &[&str]) -> Facts {
     let mut facts = Facts {
         name: None,
         version: None,
@@ -91,7 +92,7 @@ fn facts(lines: &[&str]) -> Facts {
 }
 
 /// `text` with its macros expanded; `None` when one is not known.
-fn expand(text: &str, facts: &Facts) -> Option<String> {
+pub(crate) fn expand(text: &str, facts: &Facts) -> Option<String> {
     if text.contains(['$', '"', '\'']) {
         return None;
     }
@@ -125,9 +126,12 @@ fn expand(text: &str, facts: &Facts) -> Option<String> {
 /// One `%files` section: the package it builds, and whether it lists `%doc`
 /// or `%license` files. Those files own the package's doc and license
 /// directories, so the section needs no `%dir` line for them.
-struct Section {
+pub(crate) struct Section {
     package: Option<String>,
     docs: bool,
+    /// The 0-based number of the last entry line of the section outside any conditional, its
+    /// `%files` header when it has no other.
+    pub(crate) last: usize,
 }
 
 /// The package a `%files` header builds: the main package, `-n <name>` or
@@ -154,19 +158,19 @@ fn implicit_owner(section: &Section, dir: &str) -> bool {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     Dir,
     File,
     Tree,
     Glob,
 }
 
-struct Entry {
-    line: usize,
-    text: String,
-    path: String,
-    kind: Kind,
-    section: usize,
+pub(crate) struct Entry {
+    pub(crate) line: usize,
+    pub(crate) text: String,
+    pub(crate) path: String,
+    pub(crate) kind: Kind,
+    pub(crate) section: usize,
 }
 
 /// The `%files` entries of one line: the directives before the path
@@ -304,7 +308,7 @@ fn segment_matches(pattern: &str, text: &str) -> bool {
 }
 
 /// The directories above `text`, nearest first, each as written.
-fn parents_of(text: &str) -> Vec<&str> {
+pub(crate) fn parents_of(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut cur = text;
     while let Some(i) = cur.rfind('/') {
@@ -317,14 +321,24 @@ fn parents_of(text: &str) -> Vec<&str> {
     out
 }
 
-/// The directories the `%files` sections of `spec` list files in and do not
-/// own, in the order of the entries, outermost first for one entry.
-pub fn missing_dirs(spec: &str) -> Vec<MissingDir> {
+/// What the `%files` sections of a spec list.
+pub(crate) struct Listing {
+    pub(crate) facts: Facts,
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) sections: Vec<Section>,
+    /// A `%files -f <list>` section: the list may own directories.
+    pub(crate) has_list: bool,
+}
+
+/// Reads every `%files` section of `spec`.
+pub(crate) fn list_files(spec: &str) -> Listing {
     let lines: Vec<&str> = spec.split('\n').map(|l| l.trim_end_matches('\r')).collect();
     let facts = facts(&lines);
     let mut entries = Vec::new();
     let mut sections: Vec<Section> = Vec::new();
     let mut current: Option<usize> = None;
+    let mut has_list = false;
+    let mut depth = 0usize;
     let mut number = 0;
     while number < lines.len() {
         let start = number;
@@ -332,13 +346,13 @@ pub fn missing_dirs(spec: &str) -> Vec<MissingDir> {
         number += 1;
         if is_section(line) {
             current = None;
+            depth = 0;
             if first_word(line) == "%files" {
-                if line.split_whitespace().skip(1).any(|w| w.starts_with("-f")) {
-                    return Vec::new();
-                }
+                has_list |= line.split_whitespace().skip(1).any(|w| w.starts_with("-f"));
                 sections.push(Section {
                     package: section_package(line, &facts),
                     docs: false,
+                    last: start,
                 });
                 current = Some(sections.len() - 1);
             }
@@ -348,12 +362,23 @@ pub fn missing_dirs(spec: &str) -> Vec<MissingDir> {
         let Some(section) = current else {
             continue;
         };
-        if word.starts_with('#')
+        if word.starts_with("%if") {
+            depth += 1;
+        } else if word == "%endif" {
+            depth = depth.saturating_sub(1);
+        }
+        if word.is_empty()
+            || word.starts_with('#')
             || word.starts_with("%if")
             || word.starts_with("%el")
             || word == "%endif"
         {
             continue;
+        }
+        // Only an entry outside every conditional is a place to add a line
+        // that must hold for every build.
+        if depth == 0 {
+            sections[section].last = start;
         }
         // A line ending in a backslash continues on the next line. The two
         // are read as one line, which starts at `start`, and the backslash
@@ -365,12 +390,35 @@ pub fn missing_dirs(spec: &str) -> Vec<MissingDir> {
                 Some(next) if !is_section(next) => {
                     text.push(' ');
                     text.push_str(next);
+                    if depth == 0 {
+                        sections[section].last = number;
+                    }
                     number += 1;
                 }
                 _ => break,
             }
         }
         entries.extend(entries_of(&text, start, section, &facts, &mut sections));
+    }
+    Listing {
+        facts,
+        entries,
+        sections,
+        has_list,
+    }
+}
+
+/// The directories the `%files` sections of `spec` list files in and do not
+/// own, in the order of the entries, outermost first for one entry.
+pub fn missing_dirs(spec: &str) -> Vec<MissingDir> {
+    let Listing {
+        facts,
+        entries,
+        sections,
+        has_list,
+    } = list_files(spec);
+    if has_list {
+        return Vec::new();
     }
     let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
     let owns_tree = |e: &Entry| {

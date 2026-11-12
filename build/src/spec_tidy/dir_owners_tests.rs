@@ -1,4 +1,4 @@
-use super::dir_owners::{MissingDir, missing_dirs, own_new_dirs};
+use super::dir_owners::{MissingDir, expand, facts, list_files, missing_dirs, own_new_dirs};
 use super::standard_dirs::{STANDARD_DIRS, is_standard_dir};
 
 /// A spec with `files` after the `%install` of the jay package.
@@ -308,4 +308,23 @@ fn nothing_is_removed_or_reordered() {
         }
         assert_eq!(rest.next(), Some(line));
     }
+}
+
+#[test]
+fn a_trailing_conditional_is_not_the_last_line_of_a_section() {
+    let spec = "Name: x\n\n%files\n%{_bindir}/x\n%if 0%{?y}\n%{_bindir}/y\n%endif\n\n\
+                %package -n z\nSummary: z\n";
+    let listing = list_files(spec);
+    assert_eq!(listing.sections[0].last, 3);
+    let spec = "Name: x\n\n%files\n%{_bindir}/x \\\n  %{_bindir}/w\n%if 1\n%{_bindir}/y\n%endif\n";
+    assert_eq!(list_files(spec).sections[0].last, 4);
+}
+
+#[test]
+fn the_udev_directory_macro_is_expanded() {
+    let facts = facts(&[]);
+    assert_eq!(
+        expand("%{_udevdir}/x", &facts).as_deref(),
+        Some("/usr/lib/udev/x")
+    );
 }
