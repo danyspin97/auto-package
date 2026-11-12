@@ -20,6 +20,8 @@ mod notes_cmd;
 mod review_cmd;
 mod run_limits;
 mod tui;
+mod unconfirmed;
+mod unconfirmed_offer;
 mod update_project;
 
 use std::path::{Path, PathBuf};

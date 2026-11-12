@@ -208,18 +208,25 @@ impl std::error::Error for Refusal {}
 /// The warning or failure line of a request the TUI could not add: the one
 /// line of a refusal, and any other error as it always was.
 pub(crate) fn tui_failure(label: &str, e: &color_eyre::Report) -> String {
-    match e.downcast_ref::<Refusal>() {
-        Some(refusal) => format!("{label}: {}", refusal.tui_line()),
-        None => format!("{label}: {e:#}"),
+    if let Some(refusal) = e.downcast_ref::<Refusal>() {
+        format!("{label}: {}", refusal.tui_line())
+    } else if let Some(found) = e.downcast_ref::<crate::unconfirmed::Unconfirmed>() {
+        format!("{label}: {}", found.tui_line())
+    } else {
+        format!("{label}: {e:#}")
     }
 }
 
-/// The text `main` prints after `error:`: the table of a refusal, and any
+/// The text `main` prints after `error:`: the table of a refusal (a clash, or
+/// unconfirmed repositories), and any
 /// other error as it always was.
 pub(crate) fn error_text(e: &color_eyre::Report, colour: bool) -> String {
-    match e.downcast_ref::<Refusal>() {
-        Some(refusal) => refusal.table(colour),
-        None => format!("{e:#}"),
+    if let Some(refusal) = e.downcast_ref::<Refusal>() {
+        refusal.table(colour)
+    } else if let Some(found) = e.downcast_ref::<crate::unconfirmed::Unconfirmed>() {
+        found.table(ap_core::sink::terminal_width(colour), colour)
+    } else {
+        format!("{e:#}")
     }
 }
 

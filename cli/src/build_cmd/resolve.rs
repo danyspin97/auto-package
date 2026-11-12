@@ -42,16 +42,8 @@ pub(super) fn resolve_version(
                 if let Some(v) = pypi_version {
                     v
                 } else {
-                    let repos = ap_build::pipeline::find_source_repo_candidates(name, name);
-                    let Some(repo_url) = repos.verified.first() else {
-                        return Err(color_eyre::eyre::eyre!(
-                            "{name} has no usable PyPI release and no \
-                             discoverable public source repository. Pass \
-                             --url, --source-url, or a repository URL as \
-                             the positional argument to point it at the \
-                             source."
-                        ));
-                    };
+                    let repo_url = crate::unconfirmed_offer::discover(name)?;
+                    let repo_url = &repo_url;
                     let v = ap_build::sources::latest_release(repo_url)
                         .map_err(|e| color_eyre::eyre::eyre!(e))?;
                     reporter.report(&Event::Progress {
