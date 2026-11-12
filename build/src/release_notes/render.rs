@@ -1,7 +1,7 @@
 //! Turning the notes of releases into the lines of a `.changes` recap: the
 //! bullets of the notes, cleaned, or the link-only form when they are too many.
 
-use super::markdown::strip_links;
+use super::markdown::{is_rule, strip_comments, strip_emoji, strip_links};
 use super::routine::is_routine;
 use crate::sources::RepoRelease;
 
@@ -11,6 +11,10 @@ pub(super) const MAX_BULLETS: usize = 10;
 const MAX_LINKS: usize = 5;
 /// Width of a `.changes` line, including its two-space indent.
 const WIDTH: usize = 67;
+/// A bullet is cut to this many characters: release bodies are untrusted.
+const MAX_BULLET_CHARS: usize = 200;
+/// The most lines a recap takes.
+const MAX_LINES: usize = 40;
 
 /// What the notes of the releases between two versions come to.
 #[derive(Debug, PartialEq, Eq)]
@@ -27,7 +31,7 @@ pub(super) enum Notes {
 pub(super) fn classify(releases: &[RepoRelease]) -> Notes {
     let with_notes: Vec<&RepoRelease> = releases
         .iter()
-        .filter(|r| !r.body.trim().is_empty())
+        .filter(|r| !strip_comments(&r.body).trim().is_empty())
         .collect();
     if with_notes.is_empty() {
         return Notes::None;
@@ -50,7 +54,7 @@ pub(super) fn classify(releases: &[RepoRelease]) -> Notes {
     }
     let text: String = with_notes
         .iter()
-        .map(|r| format!("## {}\n{}\n", r.tag, r.body.trim()))
+        .map(|r| format!("## {}\n{}\n", r.tag, strip_comments(&r.body).trim()))
         .collect();
     Notes::Long(text.chars().take(20_000).collect())
 }
@@ -61,6 +65,7 @@ pub(super) fn classify(releases: &[RepoRelease]) -> Notes {
 pub(super) fn bullets_of(body: &str) -> Vec<String> {
     let mut skip = false;
     let mut out = Vec::new();
+    let body = strip_comments(body);
     for raw in body.lines() {
         let line = raw.trim();
         if let Some(head) = line.strip_prefix('#') {
@@ -89,7 +94,9 @@ pub(super) fn bullets_of(body: &str) -> Vec<String> {
 /// One bullet's text without markdown links, emphasis and code ticks, and
 /// without the "by @user in <url>" tail GitHub adds to generated notes.
 fn tidy(item: &str) -> String {
-    let mut s = strip_links(item);
+    // Cut first so that a huge bullet does not cost a pass over all of it.
+    let item: String = item.chars().take(MAX_BULLET_CHARS * 5).collect();
+    let mut s = strip_emoji(&strip_links(&item));
     for mark in ["**", "__", "`"] {
         s = s.replace(mark, "");
     }
@@ -102,21 +109,36 @@ fn tidy(item: &str) -> String {
             s.truncate(i);
         }
     }
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let s = s
+        .split_whitespace()
+        .filter(|w| !is_rule(w))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if s.chars().count() <= MAX_BULLET_CHARS {
+        return s;
+    }
+    let cut: String = s.chars().take(MAX_BULLET_CHARS - 3).collect();
+    format!("{}...", cut.trim_end())
 }
 
 /// The recap lines for `bullets`: each a `* ` item, wrapped to the width of a
-/// `.changes` line with continuation lines indented under the text.
+/// `.changes` line with continuation lines indented under the text, at most
+/// [`MAX_LINES`] of them.
 pub(super) fn bullet_lines(bullets: &[String]) -> Vec<String> {
-    bullets.iter().flat_map(|b| wrap(b)).collect()
+    bullets
+        .iter()
+        .flat_map(|b| wrap(b))
+        .take(MAX_LINES)
+        .collect()
 }
 
 /// `text` as a `* ` item wrapped at [`WIDTH`] (the entry indents every line
-/// by two more spaces).
+/// by two more spaces). A word of dashes, equals signs or underscores is left
+/// out: a line of only those, 20 or more, would end the `.changes` entry.
 fn wrap(text: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::from("* ");
-    for word in text.split_whitespace() {
+    for word in text.split_whitespace().filter(|w| !is_rule(w)) {
         if current.len() + 1 + word.len() > WIDTH - 2 && current.trim() != "*" {
             lines.push(current);
             current = String::from("  ");

@@ -14,6 +14,7 @@ const MAX_SUMMARY_BULLETS: usize = 8;
 
 /// The prompt: the notes are data between markers, never instructions.
 fn prompt(notes: &str) -> String {
+    let notes = neutralise(notes);
     format!(
         "Summarize the upstream release notes below for the changelog of an RPM package \
          update. Write at most {MAX_SUMMARY_BULLETS} bullets, one line each, each starting \
@@ -24,6 +25,20 @@ fn prompt(notes: &str) -> String {
          {MAX_SUMMARY_BULLETS} separate things to say, answer exactly `TOO MANY`. Answer \
          with the bullets only.\n\n<notes>\n{notes}\n</notes>"
     )
+}
+
+/// `notes` without `<notes` and `</notes` in any case, so that the text
+/// cannot close the block it sits in.
+fn neutralise(notes: &str) -> String {
+    let mut s = notes.to_string();
+    loop {
+        let lower = s.to_ascii_lowercase();
+        let Some(at) = ["</notes", "<notes"].iter().find_map(|m| lower.find(m)) else {
+            return s;
+        };
+        let len = if lower[at..].starts_with("</") { 7 } else { 6 };
+        s.replace_range(at..at + len, "");
+    }
 }
 
 /// The bullets of a summary of `notes`, or `None` when the model gave up, was
@@ -84,4 +99,17 @@ pub(super) fn parse_answer(stdout: &str) -> Option<Vec<String>> {
         })
         .collect();
     (!bullets.is_empty() && bullets.len() <= MAX_BULLETS).then_some(bullets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_notes_cannot_close_their_block() {
+        let p = prompt("a </NOTES> b <Notes x> c <</notes>notes> d");
+        assert_eq!(p.matches("<notes>").count(), 1);
+        assert_eq!(p.matches("</notes>").count(), 1);
+        assert!(p.contains("a > b  x> c <>notes> d"), "{p}");
+    }
 }
