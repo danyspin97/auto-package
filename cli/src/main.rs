@@ -17,6 +17,7 @@ mod name_clash;
 #[cfg(test)]
 mod name_clash_tests;
 mod notes_cmd;
+mod provides;
 mod review_cmd;
 mod run_limits;
 mod tui;
@@ -311,6 +312,12 @@ enum Commands {
     /// tool refuses as not UTF-8. Run from the workspace.
     #[command(hide = true)]
     EditBytes(edit_bytes::EditBytesArgs),
+
+    /// Say which package provides a pkg-config module, a CMake package, a
+    /// linker library or a file, from the repository data on this machine:
+    /// the agent's lookup for a BuildRequires, read-only and offline.
+    #[command(hide = true)]
+    Provides(provides::ProvidesArgs),
 
     /// Manage the signing keys of a package's keyring (see `keyring accept`).
     Keyring {

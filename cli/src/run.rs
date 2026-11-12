@@ -583,6 +583,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
         Commands::Review(_) | Commands::Doctor(_) => unreachable!("handled in main"),
         Commands::Baseline { command } => baseline_command(command)?,
         Commands::EditBytes(args) => edit_bytes::run(&args)?,
+        Commands::Provides(args) => provides::run(&args)?,
         Commands::Update(mut args) => {
             args.allow_host.apply()?;
             update_project::run(args, summary)?

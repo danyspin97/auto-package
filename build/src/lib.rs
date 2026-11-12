@@ -32,6 +32,7 @@ pub mod patch_check;
 pub mod patch_provenance;
 pub mod pipeline;
 pub mod proc;
+pub mod provides;
 pub mod quality;
 pub mod redist;
 pub mod release_notes;
