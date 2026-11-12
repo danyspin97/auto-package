@@ -64,3 +64,22 @@ fn a_rust_crate_review_prompt_names_the_skill() {
     let prompt = build_turn_prompt(&req);
     assert!(prompt.contains("`rust-cargo-packaging`"), "{prompt}");
 }
+
+#[test]
+fn the_skill_maps_system_library_needs_to_buildrequires_before_the_first_build() {
+    let s = section(SKILL, "R1a. System libraries.", "R2.");
+    for want in [
+        "unable to find library -l<x>",
+        "`-sys`",
+        "`#[link(name`",
+        "`pkg_config::`",
+        "`provides pkgconfig",
+        "`provides lib <name>`",
+        "can differ from the project's targets",
+        "reliable only for tools in package metadata",
+        "`unverified`",
+        "before the first",
+    ] {
+        assert!(s.contains(want), "R1a lacks {want:?}");
+    }
+}

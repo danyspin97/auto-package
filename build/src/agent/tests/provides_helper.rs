@@ -120,3 +120,17 @@ fn the_lookup_is_granted_only_to_turns_that_have_it() {
         edit_bytes_command().is_some()
     );
 }
+
+#[test]
+fn the_workflow_lookup_rule_is_conditional_and_softened() {
+    let w = STATIC_WORKFLOW.replace('\n', " ");
+    for want in [
+        "when the task text gives a lookup call",
+        "reliable only for tools and files in package metadata",
+        "can differ from the project's targets",
+        "unverified",
+    ] {
+        assert!(w.contains(want), "workflow lacks {want}");
+    }
+    assert!(!w.contains("never add a"), "{w}");
+}

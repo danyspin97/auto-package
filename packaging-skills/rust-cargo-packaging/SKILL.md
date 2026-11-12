@@ -19,6 +19,35 @@ R1. Rust packages use `cargo-packaging` macros; it sets the distro's Rust
    Add `BuildRequires: pkgconfig(<lib>)` for every C library the crate links
    against (e.g. `pkgconfig(libpcre2-posix)` for pcre2).
 
+R1a. System libraries. A crate that links a C library fails at the first build
+   with `Package <x> was not found` (a `build.rs` using pkg-config) or
+   `unable to find library -l<x>` (a `#[link(name = "<x>")]`, a `-sys` crate or
+   a `build.rs` printing `cargo:rustc-link-lib`). Find these before the first
+   build, in the review turn:
+
+   - Grep `Cargo.lock` for `^name = ".*-sys"` and for crates named after a
+     library (`pam`, `xkbcommon`, `wayland-*`, `udev`, `openssl`, `libsqlite3`,
+     `alsa`, `dbus`, `libpulse`, `x11`, `gtk`, `fontconfig`, `freetype`).
+   - Grep `src/` and `build.rs` for `#[link(name`, `rustc-link-lib`,
+     `pkg_config::` and `pkg-config`.
+   - Take only the crates that are built (a crate behind a feature the spec
+     does not enable, or for another target OS, links nothing here).
+   - For each library, ask the lookup call of the prompt, if it gives one
+     (`provides pkgconfig <module>`, or `provides lib <name>` for a bare
+     `-l<name>`, which asks for `pkgconfig(<name>)` only; `provides file` is
+     reliable only for tools in package metadata, never for headers or
+     libraries). The answer is a hint from the machine's repository data, which
+     can differ from the project's targets. Write the package it returns as a
+     BuildRequires, with a comment naming the crate or file. Prefer a looked-up
+     name; when the lookup finds nothing, keep a plausible name only with a
+     comment naming the source file and line that needs it, and say
+     `unverified` in `reasoning`, instead of dropping it or guessing silently.
+   - A `-sys` crate that vendors its C source (it builds with `cc`) needs the
+     compiler (`gcc`, `gcc-c++`), not a `-devel` package.
+
+   After a failed build the same list is the checklist: one missing library
+   usually has siblings that stop the next build.
+
 R2. Vendored dependencies are distributed as a second source tarball:
 
      Source1:        vendor.tar.zst

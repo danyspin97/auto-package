@@ -30,6 +30,12 @@ pub(super) fn fix_after_build_task() -> &'static str {
              stale, and return `no_change` rather than reverting a plausible fix on the \
              strength of a stale log.",
         "\n\n",
+        "A link or pkg-config failure (`unable to find library -l<name>`, `cannot find -l<name>`, ",
+        "`Package <module> was not found`, `Could not find ... cmake`) is a missing BuildRequires: ",
+        "ask the lookup call of this prompt (if it gives one) for the package, add it with a comment naming the ",
+        "file or crate that needs it, and look in the same log and the sources for the next ",
+        "library the same build would stop at, so one build does not cost one library.",
+        "\n\n",
         "Fix every `%files` error of the log in one edit. A failure that lists several ",
         "`Installed (but unpackaged) file(s)`, `File listed twice`, `File not found` or `directories not owned by a package` (every `- /path` line under it) entries ",
         "is one set of paths, not one error: add each unpackaged path to `%files`, drop each ",

@@ -359,7 +359,7 @@ fn system_prompt_file_holds_the_static_prompt() {
 fn static_system_prompt_states_the_bash_grants() {
     assert!(static_system_prompt().contains(BASH_RULES.trim()));
     assert!(
-        BASH_RULES.len() < 700,
+        BASH_RULES.len() < 900,
         "Bash rules are {} bytes",
         BASH_RULES.len()
     );
@@ -369,6 +369,9 @@ fn static_system_prompt_states_the_bash_grants() {
         "`rpm -qlp <rpms",
         "`;`",
         "globs",
+        "stays refused",
+        "Only when the task text gives a lookup call",
+        "gives none",
     ] {
         assert!(BASH_RULES.contains(want), "Bash rules lack {want}");
     }

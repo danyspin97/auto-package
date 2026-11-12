@@ -36,7 +36,8 @@ pub(super) fn review_prompt_non_python() -> &'static str {
        was true; load this one only if the Cargo-based build has no Python \
        surface at all, otherwise it's a Python package after all).\n\
      - **`rust-cargo-packaging`** — bare `Cargo.toml` at the root with no \
-       Python wrapper. Uses `_service` + cargo-vendor + `%cargo_build`/`%cargo_install`.\n\
+       Python wrapper. Uses `_service` + cargo-vendor + `%cargo_build`/`%cargo_install`. \
+       Check its system-library rule (R1a) against BuildRequires before the first build.\n\
      \n\
      ## Review Checklist\n\
      \n\

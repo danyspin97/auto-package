@@ -55,7 +55,10 @@ dir>/<file>.rpm` (only when the workspace map shows an `rpms/` line), and, with
 && ` may prefix only those two). Anything else is refused, including `;`, `&&`,
 `|`, `>`, `$`, backticks, globs (`*`, `?`, `[`), `..`, `~`, an absolute path given
 to `ls`, and `cat`, `cp`, `grep`, `find`. Read a file with Read, search with Grep,
-and edit with Edit or quilt.
+and edit with Edit or quilt. A refused command stays refused: do not retry it in
+another spelling. Only when the task text gives a lookup call, use it to find the
+package for a name (`pkgconfig(x)`, `-lx`); a turn whose task text gives none has no
+lookup, so do not look for one.
 "#;
 
 /// Workflow/header/cleanup boilerplate that, like [`CONVENTIONS`], is
@@ -74,9 +77,18 @@ remain present. Deleting it will break the build system.
 When a build fails with "fatal error: <header.h>: No such file or directory" or
 linker errors about missing libraries:
 
-1. **Search for the providing package**: Use `zypper search --provides --match-exact "/usr/include/<header.h>"`
-or `zypper what-provides '<library>.so*'` to find which package provides the missing file.
-(Only these read-only zypper queries are available in this turn.)
+1. **Search for the providing package**: when the task text gives a lookup call,
+use it, not a guess: `provides lib <name>` for `unable to find library -l<name>` or
+`cannot find -l<name>`, `provides pkgconfig <module>` for `Package <module> was not
+found` (pkg-config), `provides cmake <Package>`, `provides file <path without the
+leading />` for a tool. `file` is reliable only for tools and files in package
+metadata: ask headers and libraries through `pkgconfig`, `cmake` or `lib`. The answer
+is a hint from this machine's repository data, which can differ from the project's
+targets. `zypper search --provides --match-exact "/usr/include/<header.h>"` and
+`zypper what-provides '<library>.so*'` also work for names without parentheses.
+Prefer a name a lookup returned. When the lookup finds nothing, keep a plausible
+name only with a comment naming the source file and line that needs it, and mark
+it unverified in `reasoning`; do not drop it and do not guess silently.
 
 2. **Add the -devel package**: C headers are typically in -devel packages.
 For example, if openssl headers are missing, add `BuildRequires: openssl-devel`.
