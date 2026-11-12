@@ -12,6 +12,7 @@ pub mod failure;
 pub mod line;
 pub mod paths;
 pub mod phase;
+pub mod unowned;
 
 use std::sync::LazyLock;
 
