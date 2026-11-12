@@ -8,6 +8,7 @@ use crate::pipeline::build_round::*;
 use crate::pipeline::checkout::*;
 use crate::pipeline::commit::*;
 use crate::pipeline::deps_turn::*;
+use crate::pipeline::generate_service::*;
 use crate::pipeline::generate_stage::*;
 use crate::pipeline::notes_step::*;
 use crate::pipeline::patch_provenance::*;

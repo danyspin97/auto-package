@@ -232,6 +232,7 @@ mod checkout;
 use checkout::*;
 use update_mode::*;
 mod carried_origin;
+mod generate_service;
 mod generate_stage;
 #[cfg(test)]
 mod no_agent_fix_tests;
