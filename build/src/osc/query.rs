@@ -110,15 +110,27 @@ pub fn http_status(stderr: &str) -> Option<u16> {
         })
 }
 
+/// The `osc` arguments of an `api` read, against `apiurl` when given.
+pub(super) fn api_args<'a>(apiurl: Option<&'a str>, path: &'a str) -> Vec<&'a str> {
+    let mut args: Vec<&str> = Vec::new();
+    if let Some(url) = apiurl {
+        args.extend(["-A", url]);
+    }
+    args.extend(["api", path]);
+    args
+}
+
 /// `osc api <path>` stdout, or why there is none.
 pub(super) fn osc_api_checked(path: &str) -> Result<String, ApiFailure> {
-    let out = capture_query(
-        &["api", path],
-        &anywhere(),
-        Emit::quiet(),
-        OSC_QUERY_TIMEOUT,
-    )
-    .map_err(|e| ApiFailure::Other(format!("osc api {path}: {e}")))?;
+    osc_api_checked_at(None, path)
+}
+
+/// [`osc_api_checked`] against the API server `apiurl` (`osc -A`) instead of
+/// osc's default one.
+pub(super) fn osc_api_checked_at(apiurl: Option<&str>, path: &str) -> Result<String, ApiFailure> {
+    let args = api_args(apiurl, path);
+    let out = capture_query(&args, &anywhere(), Emit::quiet(), OSC_QUERY_TIMEOUT)
+        .map_err(|e| ApiFailure::Other(format!("osc api {path}: {e}")))?;
     if !out.success() {
         let msg = format!("osc api {path}: exit {}: {}", out.code, out.stderr.trim());
         return Err(match http_status(&out.stderr) {

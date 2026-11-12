@@ -62,6 +62,8 @@ mod tracked_stray_tests;
 #[cfg(test)]
 mod pending_changes_tests;
 
+mod factory_name;
+pub use factory_name::*;
 mod project_packages;
 #[cfg(test)]
 mod published_binary_tests;
