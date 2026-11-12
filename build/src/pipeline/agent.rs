@@ -4,7 +4,6 @@ use super::*;
 use crate::pipeline::archive::*;
 use crate::pipeline::licence::*;
 use crate::pipeline::prompt_notes::*;
-use crate::pipeline::render::*;
 use crate::pipeline::sibling::*;
 use crate::pipeline::spec_edits::*;
 use crate::pipeline::turn_spend::*;
@@ -550,18 +549,16 @@ pub(super) fn agent_turn(
     if !outcome.denied_commands.is_empty() {
         reporter.report(&Event::Warning {
             step: Some(step.id),
-            message: format!(
-                "{}: the sandbox refused {} command(s) in this turn: {}",
-                config.rpm_name,
-                outcome.denied_commands.len(),
-                outcome
-                    .denied_commands
-                    .iter()
-                    .map(|c| format!("`{}`", brief(c)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+            message: super::denied_note::denied_commands_message(
+                &config.rpm_name,
+                &outcome.denied_commands,
+                crate::agent::lookup_granted(ctx.task),
             ),
         });
+        write_or_warn(
+            step.file("denied-commands.txt"),
+            &(outcome.denied_commands.join("\n") + "\n"),
+        );
     }
 
     let prompt_path = step.file("prompt.md");

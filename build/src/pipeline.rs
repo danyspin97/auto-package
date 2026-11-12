@@ -218,6 +218,7 @@ pub use select::*;
 mod closure_gate;
 use closure_gate::*;
 mod blocked;
+mod denied_note;
 pub use blocked::*;
 mod slots;
 use slots::*;

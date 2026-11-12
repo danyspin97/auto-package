@@ -52,6 +52,7 @@ cache of upstream versions). Inside one (call it `$P`):
   - `<pkg>/NNN-<kind>/` the artifacts of step `NNN-1` (steps count from 0,
     directories from 1): `prompt.md` (what the agent was told),
     `response.json` (its structured reply), `output.md` (its tool calls),
+    `denied-commands.txt` (commands its sandbox refused, one per line),
     `spec.diff`, `build.log`, `rpmspec.stdout`, `extract.json`.
 - `$P/<OBS project>/<pkg>/` the checkout: `<pkg>.spec`, `<pkg>.changes`.
 - `$P/rpms/` RPMs built so far (used to satisfy dependencies).

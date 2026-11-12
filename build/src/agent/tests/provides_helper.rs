@@ -109,3 +109,14 @@ fn the_text_names_each_call_and_the_refused_zypper_form() {
     assert_eq!(provides_text(Task::FixAfterBuild, None), "");
     assert_eq!(provides_text(Task::RequestReview, Some(CMD)), "");
 }
+
+#[test]
+fn the_lookup_is_granted_only_to_turns_that_have_it() {
+    for task in [Task::TranslateUnresolvableDeps, Task::RequestReview] {
+        assert!(!lookup_granted(task), "{task:?}");
+    }
+    assert_eq!(
+        lookup_granted(Task::FixAfterBuild),
+        edit_bytes_command().is_some()
+    );
+}

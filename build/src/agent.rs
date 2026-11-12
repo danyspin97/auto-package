@@ -29,6 +29,7 @@ use review_tools::*;
 mod edit_bytes;
 use edit_bytes::*;
 mod provides_helper;
+pub(crate) use provides_helper::lookup_granted;
 use provides_helper::*;
 mod integrity;
 mod links;

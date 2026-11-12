@@ -15,6 +15,12 @@ fn has_helper(task: Task) -> bool {
     !matches!(task, Task::TranslateUnresolvableDeps | Task::RequestReview)
 }
 
+/// Whether a turn of `task` is granted the lookup call: it has the lookup and
+/// this binary's path can be spelled in a permission rule.
+pub(crate) fn lookup_granted(task: Task) -> bool {
+    edit_bytes_command().is_some() && has_helper(task)
+}
+
 /// The grant of the lookup: the one command shape, for a turn that edits.
 pub(super) fn provides_grant(task: Task, command: Option<&str>) -> String {
     match command {
