@@ -21,13 +21,23 @@ use super::*;
 pub(super) fn classify_failure(
     extracted: &crate::log::ExtractedLog,
 ) -> ap_core::event::BuildFailure {
-    use crate::log::{Genre, Phase};
+    use crate::log::{Genre, Phase, unowned::unowned_dirs};
     let Some(failure) = &extracted.failure else {
         return ap_core::event::BuildFailure::Unclassified {
             raw: unclassified_raw(extracted),
         };
     };
+    // The excerpt keeps every `- /path` bullet under rpm's `directories not
+    // owned by a package:` header. Only a post-build check can carry one, and
+    // it wins over the phase: the check runs after the last section, so its
+    // phase is whichever section ran last.
+    let unowned = if failure.genre == Genre::PostBuildCheck {
+        unowned_dirs(&failure.excerpt)
+    } else {
+        Vec::new()
+    };
     match &failure.phase {
+        _ if !unowned.is_empty() => ap_core::event::BuildFailure::FilesNotOwned { paths: unowned },
         Phase::Section(s) if s == "%prep" => ap_core::event::BuildFailure::PrepFailed,
         Phase::Section(s) if s == "%build" => ap_core::event::BuildFailure::BuildFailed,
         Phase::Section(s) if s == "%install" => ap_core::event::BuildFailure::InstallFailed,
