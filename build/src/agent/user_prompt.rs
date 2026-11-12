@@ -77,10 +77,12 @@ pub(super) fn review_prompt_non_python() -> &'static str {
         `%{name}-devel` carrying headers + `.pc` + the unversioned `.so`. \
         See the `plain-c-cpp-packaging` skill for the exact layout and the \
         ldconfig scriptlets a target without file triggers needs. Every \
-        package-private install directory (e.g. `%{_libdir}/<name>-X.Y/`) must \
-        be owned exactly once — `%dir` it, or list the whole directory; listing \
-        only files inside it fails `check-filelist` ('directories not owned by a \
-        package'), and listing it twice warns 'File listed twice'.\n\
+        package-private install directory and every new directory the spec installs \
+        into (e.g. `%{_libdir}/<name>-X.Y/`, `%{_datadir}/wayland-sessions/`, \
+        `%{_datadir}/xdg-desktop-portal/portals/`) must be owned exactly once — `%dir` \
+        it, or list the whole directory; listing only files inside it fails \
+        `check-filelist` ('directories not owned by a package'), and listing it twice \
+        warns 'File listed twice'. Fix EVERY path the post-build check lists in one turn.\n\
      \n\
      5. **Sibling projects**, if the archive holds more than one — decide the \
         subpackage layout now, before the first build, because it changes \
