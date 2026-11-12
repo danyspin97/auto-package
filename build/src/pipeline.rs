@@ -372,6 +372,10 @@ mod spec_edits;
 use spec_edits::*;
 mod snapshot;
 use snapshot::*;
+mod comment_only;
+use comment_only::*;
+#[cfg(test)]
+mod comment_only_tests;
 mod turn_changes;
 use turn_changes::*;
 mod turn_error;

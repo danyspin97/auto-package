@@ -141,6 +141,36 @@ impl CheckoutSnapshot {
         )
     }
 
+    /// Whether a top-level file that `skip` does not name is not as the
+    /// snapshot has it: changed, deleted or new. A file whose contents were not
+    /// kept is judged by its size and time, as a rollback judges it.
+    pub(super) fn differs_except(&self, skip: impl Fn(&std::ffi::OsStr) -> bool) -> bool {
+        for (name, entry) in &self.files {
+            if skip(name) {
+                continue;
+            }
+            let path = self.checkout_dir.join(name);
+            let same = match &entry.content {
+                Some(bytes) => std::fs::read(&path).is_ok_and(|now| now == *bytes),
+                None => std::fs::symlink_metadata(&path).is_ok_and(|m| {
+                    m.is_file() && m.len() == entry.len && m.modified().ok() == entry.modified
+                }),
+            };
+            if !same {
+                return true;
+            }
+        }
+        let Ok(iter) = std::fs::read_dir(&self.checkout_dir) else {
+            return true;
+        };
+        iter.filter_map(|e| e.ok()).any(|e| {
+            let name = e.file_name();
+            !skip(&name)
+                && e.file_type().is_ok_and(|t| t.is_file())
+                && !self.files.contains_key(&name)
+        })
+    }
+
     /// Put every top-level `.changes` file back to its snapshot state, and
     /// delete one the turn added. An accepted turn keeps its spec edit but not
     /// its `.changes` text: that flows into the commit message and the request

@@ -424,6 +424,21 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
         }
         other => other,
     };
+    // An edit of the comments alone would be built again for nothing: it is
+    // discarded and the spec that built stands, with no rebuild.
+    if matches!(effect, Ok(TurnEffect::Edited)) && is_comment_only_edit(&snapshot, spec_path, &good)
+    {
+        discard_comment_only_edit(
+            &snapshot,
+            spec_path,
+            &good,
+            Some(&agent_step),
+            ws.notes(),
+            REVIEW_COMMENT_ONLY,
+            reporter,
+        );
+        return None;
+    }
     match &effect {
         Ok(TurnEffect::Edited) => {
             st.post_review_revert = Some(PostReviewRevert {
