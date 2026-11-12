@@ -203,19 +203,39 @@ pub fn distro_info(pkg: &str) -> DistroInfo {
     parse_spec_upstream(&out.stdout, &name)
 }
 
-pub(super) fn get_json(url: &str) -> Option<Value> {
+pub(super) fn get_json(label: &str, url: &str) -> Option<Value> {
     crate::sources::get_json_for_search(url)
-        .inspect_err(|e| ap_core::diag!("  search request failed: {e}"))
+        .inspect_err(|e| ap_core::diag!("  {}", search_failure_line(label, e)))
         .ok()
+}
+
+/// One short line for a failed forge search: a refusal says to try later; any
+/// other error is cut to its first line.
+fn search_failure_line(label: &str, err: &str) -> String {
+    // `http status: 429` rather than a bare "429": the URL is part of the text
+    // and a query such as `foo429` must not read as a refusal.
+    if err.contains("http status: 429") || err.contains("rate-limited") {
+        return format!("{label} search rate-limited; try again later");
+    }
+    // Same rule as `repo_search::failure::one_line`: the first non-blank line.
+    let first = err
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("unknown error");
+    format!("{label} search failed: {first}")
 }
 
 pub fn search_gitlab(pkg: &str) -> Vec<String> {
     let name = normalize(pkg);
     ap_core::diag!("  searching GitLab for: {name}");
-    get_json(&format!(
+    get_json(
+        "GitLab",
+        &format!(
         "https://gitlab.com/api/v4/projects?search={}&order_by=star_count&sort=desc&per_page=10",
         urlencoding::encode(&name)
-    ))
+    ),
+    )
     .map(|j| parse_gitlab_search(&j, pkg))
     .unwrap_or_default()
 }
@@ -223,10 +243,13 @@ pub fn search_gitlab(pkg: &str) -> Vec<String> {
 pub fn search_codeberg(pkg: &str) -> Vec<String> {
     let name = normalize(pkg);
     ap_core::diag!("  searching Codeberg for: {name}");
-    get_json(&format!(
-        "https://codeberg.org/api/v1/repos/search?q={}&sort=stars&order=desc&limit=10",
-        urlencoding::encode(&name)
-    ))
+    get_json(
+        "Codeberg",
+        &format!(
+            "https://codeberg.org/api/v1/repos/search?q={}&sort=stars&order=desc&limit=10",
+            urlencoding::encode(&name)
+        ),
+    )
     .map(|j| parse_codeberg_search(&j, pkg))
     .unwrap_or_default()
 }
@@ -286,5 +309,53 @@ pub(super) fn same_repo(a: &str, b: &str) -> bool {
                 && x.project_path.eq_ignore_ascii_case(&y.project_path)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod search_failure_tests {
+    use super::search_failure_line;
+
+    #[test]
+    fn rate_limit_is_one_short_line() {
+        let e = "https://codeberg.org/api/v1/repos/search?q=x&sort=stars: http status: 429 \
+                 (rate-limited; this host takes no token, so try again later)";
+        assert_eq!(
+            search_failure_line("Codeberg", e),
+            "Codeberg search rate-limited; try again later"
+        );
+    }
+
+    #[test]
+    fn a_429_inside_the_url_is_not_a_refusal() {
+        let e = "https://gitlab.com/api/v4/projects?search=foo429: http status: 500";
+        assert_eq!(
+            search_failure_line("GitLab", e),
+            "GitLab search failed: https://gitlab.com/api/v4/projects?search=foo429: http status: 500"
+        );
+    }
+
+    #[test]
+    fn other_errors_keep_their_first_line() {
+        assert_eq!(
+            search_failure_line("GitLab", "boom\nsecond"),
+            "GitLab search failed: boom"
+        );
+    }
+
+    #[test]
+    fn blank_leading_lines_are_skipped() {
+        assert_eq!(
+            search_failure_line("GitLab", "\n   \nsecond"),
+            "GitLab search failed: second"
+        );
+    }
+
+    #[test]
+    fn empty_error_says_unknown() {
+        assert_eq!(
+            search_failure_line("Codeberg", ""),
+            "Codeberg search failed: unknown error"
+        );
     }
 }
