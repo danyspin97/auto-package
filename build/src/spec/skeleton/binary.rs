@@ -204,24 +204,7 @@ pub fn wheel_binary_skeleton_shared(
         });
 
     let spec = format!(
-        "#\n\
-         # spec file for package python-{name}\n\
-         #\n\
-         # Copyright (c) 2026 SUSE LLC\n\
-         #\n\
-         # All modifications and additions to the file contributed by third parties\n\
-         # remain the property of their copyright owners, unless otherwise agreed\n\
-         # upon. The license for this file, and modifications and additions to the\n\
-         # file, is the same license as for the pristine package itself (unless the\n\
-         # license for the pristine package is not an Open Source License, in which\n\
-         # case the license is the MIT License). An \"Open Source License\" is a\n\
-         # license that conforms to the Open Source Definition (Version 1.9)\n\
-         # published by the Open Source Initiative.\n\
-         \n\
-         # Please submit bugfixes or comments via https://bugs.opensuse.org/\n\
-         \n\
-         \n\
-         %{{?sle15_python_module_pythons}}\n\
+        "{header}%{{?sle15_python_module_pythons}}\n\
          Name:           python-{name}\n\
          Version:        {version}\n\
          Release:        0\n\
@@ -263,6 +246,7 @@ pub fn wheel_binary_skeleton_shared(
          {alt_files}\
          \n\
          %changelog\n",
+        header = spec_header(&format!("python-{name}"), current_year()),
         name = name,
         version = version,
         summary_tag = summary_tag,

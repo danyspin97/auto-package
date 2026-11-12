@@ -7,6 +7,7 @@ use crate::spec::requires_exclude::*;
 use crate::spec::rpmlintrc::*;
 use crate::spec::siblings::*;
 use crate::spec::wheel::*;
+use crate::spec_tidy::header::{current_year, spec_header};
 
 /// [`wheel_binary_skeleton`] for a release whose wheels are each locked to one
 /// CPython (convention 32 (section 49)'s Triton shape): one `SourceN:` per flavor and one
@@ -139,24 +140,7 @@ pub fn monorepo_skeleton(
         .collect();
 
     format!(
-        "#\n\
-         # spec file for package python-{name}\n\
-         #\n\
-         # Copyright (c) 2026 SUSE LLC\n\
-         #\n\
-         # All modifications and additions to the file contributed by third parties\n\
-         # remain the property of their copyright owners, unless otherwise agreed\n\
-         # upon. The license for this file, and modifications and additions to the\n\
-         # file, is the same license as for the pristine package itself (unless the\n\
-         # license for the pristine package is not an Open Source License, in which\n\
-         # case the license is the MIT License). An \"Open Source License\" is a\n\
-         # license that conforms to the Open Source Definition (Version 1.9)\n\
-         # published by the Open Source Initiative.\n\
-         \n\
-         # Please submit bugfixes or comments via https://bugs.opensuse.org/\n\
-         \n\
-         \n\
-         %{{?sle15_python_module_pythons}}\n\
+        "{header}%{{?sle15_python_module_pythons}}\n\
          Name:           python-{name}\n\
          Version:        {version}\n\
          Release:        0\n\
@@ -191,6 +175,7 @@ pub fn monorepo_skeleton(
          %license LICENSE\n\
          \n\
          %changelog\n",
+        header = spec_header(&format!("python-{name}"), current_year()),
         name = name,
         version = version,
         summary = summary,
@@ -284,24 +269,7 @@ pub fn c_project_skeleton(
     };
 
     format!(
-        "#\n\
-         # spec file for package {name}\n\
-         #\n\
-         # Copyright (c) 2026 SUSE LLC\n\
-         #\n\
-         # All modifications and additions to the file contributed by third parties\n\
-         # remain the property of their copyright owners, unless otherwise agreed\n\
-         # upon. The license for this file, and modifications and additions to the\n\
-         # file, is the same license as for the pristine package itself (unless the\n\
-         # license for the pristine package is not an Open Source License, in which\n\
-         # case the license is the MIT License). An \"Open Source License\" is a\n\
-         # license that conforms to the Open Source Definition (Version 1.9)\n\
-         # published by the Open Source Initiative.\n\
-         \n\
-         # Please submit bugfixes or comments via https://bugs.opensuse.org/\n\
-         \n\
-         \n\
-         Name:           {name}\n\
+        "{header}Name:           {name}\n\
          Version:        {version}\n\
          Release:        0\n\
          Summary:        TODO: fill in summary\n\
@@ -337,6 +305,7 @@ pub fn c_project_skeleton(
          %license TODO\n\
          \n\
          %changelog\n",
+        header = spec_header(&name, current_year()),
         name = name,
         version = version,
         url = url,

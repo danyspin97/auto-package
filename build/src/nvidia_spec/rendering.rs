@@ -1,4 +1,5 @@
 use super::*;
+use crate::spec_tidy::header::{current_year, spec_header};
 
 /// What [`redist_component_spec`] and [`redist_rpmlintrc`] need to know about
 /// one component of one CUDA release.
@@ -115,24 +116,7 @@ pub fn redist_filesystem_spec(release: &str, version: &str) -> String {
     let name = filesystem_package(release);
     let (maj, min) = major_minor(release);
     format!(
-        "#\n\
-         # spec file for package {name}\n\
-         #\n\
-         # Copyright (c) 2026 SUSE LLC\n\
-         #\n\
-         # All modifications and additions to the file contributed by third parties\n\
-         # remain the property of their copyright owners, unless otherwise agreed\n\
-         # upon. The license for this file, and modifications and additions to the\n\
-         # file, is the same license as for the pristine package itself (unless the\n\
-         # license for the pristine package is not an Open Source License, in which\n\
-         # case the license is the MIT License). An \"Open Source License\" is a\n\
-         # license that conforms to the Open Source Definition (Version 1.9)\n\
-         # published by the Open Source Initiative.\n\
-         \n\
-         # Please submit bugfixes or comments via https://bugs.opensuse.org/\n\
-         \n\
-         \n\
-         %global cuda_mm {maj}.{min}\n\
+        "{header}%global cuda_mm {maj}.{min}\n\
          %global cuda_prefix /usr/local/cuda-%{{cuda_mm}}\n\
          \n\
          Name:           {name}\n\
@@ -162,6 +146,7 @@ pub fn redist_filesystem_spec(release: &str, version: &str) -> String {
          %config(noreplace) %{{_sysconfdir}}/ld.so.conf.d/{conf}\n\
          \n\
          %changelog\n",
+        header = spec_header(&name, current_year()),
         conf = ld_conf_name(release),
     )
 }
@@ -246,25 +231,7 @@ pub fn redist_component_spec(input: &RedistSpecInput) -> String {
     });
 
     let mut s = String::new();
-    s.push_str(&format!(
-        "#\n\
-         # spec file for package {name}\n\
-         #\n\
-         # Copyright (c) 2026 SUSE LLC\n\
-         #\n\
-         # All modifications and additions to the file contributed by third parties\n\
-         # remain the property of their copyright owners, unless otherwise agreed\n\
-         # upon. The license for this file, and modifications and additions to the\n\
-         # file, is the same license as for the pristine package itself (unless the\n\
-         # license for the pristine package is not an Open Source License, in which\n\
-         # case the license is the MIT License). An \"Open Source License\" is a\n\
-         # license that conforms to the Open Source Definition (Version 1.9)\n\
-         # published by the Open Source Initiative.\n\
-         \n\
-         # Please submit bugfixes or comments via https://bugs.opensuse.org/\n\
-         \n\
-         \n"
-    ));
+    s.push_str(&spec_header(&name, current_year()));
     s.push_str(&format!(
         "# NVIDIA's CUDA {rel} tree: nvcc and its tools locate each other relative to\n\
          # it, so every component installs there and one CUDA_HOME serves them all.\n\

@@ -10,6 +10,7 @@ pub mod comment_macros;
 pub mod dir_owners;
 #[cfg(test)]
 mod dir_owners_tests;
+pub mod header;
 pub mod hygiene;
 pub mod standard_dirs;
 

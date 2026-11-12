@@ -348,3 +348,16 @@ fn devel_packages_require_the_devel_of_the_headers_they_include() {
 fn rpmlintrc_filters_the_snapshot_check() {
     assert!(redist_rpmlintrc(&cudart()).contains("addFilter(\"dir-or-file-outside-snapshot\")"));
 }
+
+#[test]
+fn a_component_spec_starts_with_the_header_of_the_clock_year() {
+    let spec = crate::spec_tidy::header::with_year(2041, || {
+        redist_component_spec(&input("cuda_nvcc", "13.4.48", NVCC))
+    });
+    assert!(
+        spec.starts_with(
+            "#\n# spec file for package cuda-nvcc\n#\n# Copyright (c) 2041 SUSE LLC and contributors\n"
+        ),
+        "{spec}"
+    );
+}
