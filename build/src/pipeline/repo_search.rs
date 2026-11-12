@@ -12,7 +12,9 @@ pub fn is_nvidia_package_name(lower: &str) -> bool {
 
 mod candidates;
 use candidates::KNOWN_MAPPINGS;
+mod listing;
 pub use candidates::{RepoCandidates, is_known_mapped_name};
+pub use listing::*;
 
 /// Find candidate source repositories for a package.
 ///
@@ -302,6 +304,7 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
     let unconfirmed = distro_evidence
         .as_ref()
         .is_some_and(|r| crate::discovery::candidates_unconfirmed(&verified_candidates, r));
+    let mut agent_pick = None;
     if crate::discovery::agent_fallback_wanted(agent, verified_candidates.is_empty(), unconfirmed) {
         let hints = crate::discovery::Hints {
             homepages: distro_evidence
@@ -326,7 +329,8 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
                      not used automatically"
                 );
                 candidates.retain(|c| c != &url);
-                candidates.insert(0, url);
+                candidates.insert(0, url.clone());
+                agent_pick = Some(url);
             }
         }
     }
@@ -340,6 +344,7 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
         verified: verified_candidates,
         guessed: candidates,
         unvouched_search_hits,
+        agent_pick,
     }
 }
 

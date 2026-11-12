@@ -1,5 +1,6 @@
 /// Source repository candidates for a package with no (or no usable) PyPI
 /// entry.
+#[derive(Default)]
 pub struct RepoCandidates {
     /// Confirmed to exist via `verify_repo_exists` — safe to build from
     /// automatically without a human/agent confirming it first.
@@ -8,6 +9,8 @@ pub struct RepoCandidates {
     pub guessed: Vec<String>,
     /// Name search hits that exist but that nothing vouches for (not used automatically).
     pub unvouched_search_hits: Vec<String>,
+    /// The repository the agent fallback picked when nothing vouches for it.
+    pub agent_pick: Option<String>,
 }
 
 /// Curated mappings for names with a repository the project itself names:

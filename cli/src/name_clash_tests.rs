@@ -264,12 +264,14 @@ fn a_generated_guess_is_not_a_clash_but_an_exact_search_hit_is() {
             "https://github.com/jay/jay",
         ]),
         unvouched_search_hits: vec![],
+        agent_pick: None,
     };
     assert!(clashing_repos("jay", None, &clash_candidates(&guess)).is_empty());
     let hit = RepoCandidates {
         verified: vec![],
         guessed: vec![],
         unvouched_search_hits: v(&["https://github.com/x/jay"]),
+        agent_pick: None,
     };
     assert_eq!(
         clashing_repos("jay", None, &clash_candidates(&hit)),
@@ -340,6 +342,7 @@ fn vouched_repos_come_first_then_search_hits_in_search_order() {
             "https://github.com/sxcool1024/Jay",
             "https://github.com/mahkoh/jay",
         ]),
+        agent_pick: None,
     };
     let want = v(&[
         "https://github.com/zz/jay",
