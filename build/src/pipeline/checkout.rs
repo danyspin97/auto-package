@@ -240,6 +240,12 @@ pub(super) fn preflight<'a>(
     if !config.force && prior.is_built(&config.version) && !unfinished {
         return Err(PipelineResult::AlreadyBuilt { rpm_name });
     }
+    super::author_gate::require_author(
+        &rpm_name,
+        osc::local_build().is_some(),
+        &checkout_dir,
+        &super::author_gate::host_author,
+    )?;
     Ok(RunCtx {
         config,
         pkg_run,
