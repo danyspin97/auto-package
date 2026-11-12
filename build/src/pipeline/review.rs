@@ -359,8 +359,7 @@ pub(super) fn review_stage(
             update_state(ws, reporter, |state| {
                 state.reviewed_version = Some(config.version.clone());
                 state.reviewed_spec_hash = Some(spec_hash);
-                state.ladder_spec_hash = None;
-                state.ladder_reason = None;
+                crate::pipeline::ladder_fields::clear_ladder_memo(state);
                 if let Some(h) = patched
                     && !state.patched_problems.contains(&h)
                 {

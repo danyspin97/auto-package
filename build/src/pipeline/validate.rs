@@ -483,8 +483,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                             // this spec as spent; a style-only failure must not.
                             if kind == FailureKind::Exhausted {
                                 update_state(ws, reporter, |state| {
-                                    state.ladder_spec_hash = None;
-                                    state.ladder_reason = None;
+                                    crate::pipeline::ladder_fields::clear_ladder_memo(state);
                                 });
                             }
                             // Style is not worth failing a package that builds:

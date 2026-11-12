@@ -505,8 +505,7 @@ pub(super) fn resolve_blocked_with(
     match result {
         Ok(effect) => {
             update_state(ws, *reporter, |state| {
-                state.ladder_spec_hash = None;
-                state.ladder_reason = None;
+                crate::pipeline::ladder_fields::clear_ladder_memo(state);
             });
             Ok(effect)
         }

@@ -46,6 +46,25 @@ fn a_recorded_build_clears_the_recap_with_the_memo() {
 }
 
 #[test]
+fn clearing_the_memo_removes_the_recap_with_it() {
+    let mut st = PkgState {
+        ladder_spec_hash: Some(7),
+        ladder_reason: Some("turn 0: x".into()),
+        ladder_needs_maintainer: true,
+        ladder_recap: LadderRecapFields {
+            ladder_summary: Some("short".into()),
+            ladder_action: Some("do this".into()),
+        },
+        ..Default::default()
+    };
+    ladder_fields::clear_ladder_memo(&mut st);
+    assert_eq!(st.ladder_spec_hash, None);
+    assert_eq!(st.ladder_reason, None);
+    assert!(!st.ladder_needs_maintainer);
+    assert_eq!(st.ladder_recap, LadderRecapFields::default());
+}
+
+#[test]
 fn a_failure_can_carry_a_note() {
     let root = tempfile::tempdir().unwrap();
     let state_root = root.path().join("state");

@@ -533,9 +533,7 @@ impl PkgState {
         self.last_failure_reason = None;
         // A ladder spent on an earlier spec no longer holds back this build,
         // and a later rebuild of the same spec must not be refused for it.
-        self.ladder_spec_hash = None;
-        self.ladder_reason = None;
-        self.ladder_recap = Default::default();
+        crate::pipeline::ladder_fields::clear_ladder_memo(self);
     }
 
     /// The ladder history of a failed resolution of exactly this spec content,

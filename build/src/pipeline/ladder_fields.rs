@@ -15,3 +15,13 @@ pub struct LadderRecapFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ladder_action: Option<String>,
 }
+
+/// Clears the ladder memo of `state` together: the spec it is keyed on, its
+/// history, the maintainer flag and the recap. The recap is read only with the
+/// memo it was written for, so every site that clears the memo calls this.
+pub(super) fn clear_ladder_memo(state: &mut super::PkgState) {
+    state.ladder_spec_hash = None;
+    state.ladder_reason = None;
+    state.ladder_needs_maintainer = false;
+    state.ladder_recap = LadderRecapFields::default();
+}
