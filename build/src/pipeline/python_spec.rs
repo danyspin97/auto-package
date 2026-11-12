@@ -3,17 +3,12 @@
 
 use super::*;
 use crate::pipeline::wheel_spec::*;
+use crate::spec_tidy::header::{current_year, spec_header};
 
-pub(super) fn generate_rust_spec(
-    config: &PipelineConfig,
-    github_url: &str,
-    spec_path: &Path,
-    step: &StepDir,
-) -> Result<GenSpecResult, GenSpecError> {
-    let name = &config.pkg_name;
-    let version = &config.version;
-    let spec_text = format!(
-        "%global rustflags '-Clink-arg=-Wl,-z,relro,-z,now'\n\
+/// The skeleton spec of a Rust crate, which the review turn completes.
+pub(super) fn rust_spec_text(name: &str, version: &str, github_url: &str) -> String {
+    format!(
+        "{header}%global rustflags '-Clink-arg=-Wl,-z,relro,-z,now'\n\
          Name:           {name}\n\
          Version:        {version}\n\
          Release:        0\n\
@@ -45,8 +40,20 @@ pub(super) fn generate_rust_spec(
          %license LICENSE\n\
          %{{_bindir}}/{name}\n\
          \n\
-         %changelog\n"
-    );
+         %changelog\n",
+        header = spec_header(name, current_year()),
+    )
+}
+
+pub(super) fn generate_rust_spec(
+    config: &PipelineConfig,
+    github_url: &str,
+    spec_path: &Path,
+    step: &StepDir,
+) -> Result<GenSpecResult, GenSpecError> {
+    let name = &config.pkg_name;
+    let version = &config.version;
+    let spec_text = rust_spec_text(name, version, github_url);
 
     ap_core::fsx::write_atomic(spec_path, &spec_text)
         .map_err(|e| GenSpecError::Other(format!("writing spec failed: {e}")))?;
@@ -300,4 +307,23 @@ pub(super) fn try_wheel_fallback_with(
             .into(),
     })?;
     Ok(wheel)
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    fn the_rust_skeleton_starts_with_the_header_of_the_clock_year() {
+        let spec = crate::spec_tidy::header::with_year(2041, || {
+            rust_spec_text("pleamar", "1.0", "https://example.org/pleamar")
+        });
+        assert!(
+            spec.starts_with(
+                "#\n# spec file for package pleamar\n#\n# Copyright (c) 2041 SUSE LLC and contributors\n#\n"
+            ),
+            "{spec}"
+        );
+        assert!(spec.contains("\n\n\n%global rustflags"), "{spec}");
+    }
 }
