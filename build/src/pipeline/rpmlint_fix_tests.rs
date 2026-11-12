@@ -1,8 +1,8 @@
 use super::build_round::{record_rpmlint_logs, revert_warning};
 use super::rpmlint_fix::{
     RpmlintAsk, RpmlintGate, RpmlintTurn, errors_not_in_origin, load_rpmlint_shown,
-    persist_rpmlint_shown, rpmlint_after_turn, rpmlint_ask, rpmlint_key, split_origin_errors,
-    turn_failure,
+    persist_rpmlint_shown, rpmlint_after_turn, rpmlint_ask, rpmlint_comment_only_warning,
+    rpmlint_key, split_origin_errors, turn_failure,
 };
 use super::*;
 use crate::pipeline::apply_turn::TurnEffect;
@@ -124,6 +124,30 @@ fn the_turn_effect_decides_rebuild_or_keep() {
     };
     assert!(text.contains("changed nothing"), "{text}");
     assert!(text.contains(ZERO), "{text}");
+}
+
+#[test]
+fn a_discarded_comment_only_fix_says_the_errors_remain() {
+    let errors = lines(&[ZERO]);
+    let text = rpmlint_comment_only_warning("python-pywayland", &errors);
+    assert_eq!(
+        text,
+        format!(
+            "python-pywayland: rpmlint warnings remain: the only fix the agent made was in \
+             comments, which would not change the package: {ZERO}"
+        )
+    );
+    assert!(!text.contains("changed nothing"), "{text}");
+    // A real no-change turn keeps its own wording.
+    let RpmlintTurn::Keep(nothing) =
+        rpmlint_after_turn(Ok(TurnEffect::NoChange), "python-pywayland", &errors)
+    else {
+        panic!("a turn that changed nothing keeps the built spec");
+    };
+    assert!(
+        nothing.contains("the fix turn changed nothing"),
+        "{nothing}"
+    );
 }
 
 #[test]

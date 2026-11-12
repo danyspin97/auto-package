@@ -82,6 +82,16 @@ pub(super) enum RpmlintTurn {
     Rebuild,
 }
 
+/// The warning for a fix whose only edit was to comments, which was discarded:
+/// the errors are still in the package, and the reason is said.
+pub(super) fn rpmlint_comment_only_warning(rpm_name: &str, errors: &[String]) -> String {
+    format!(
+        "{rpm_name}: rpmlint warnings remain: the only fix the agent made was in comments, \
+         which would not change the package: {}",
+        errors.join("; ")
+    )
+}
+
 /// Decide what a fix turn's result means for the green build. `effect` is the
 /// turn's effect, or why it could not be used (its edit was then rolled back).
 pub(super) fn rpmlint_after_turn(
@@ -328,8 +338,32 @@ pub(super) fn rpmlint_fix_round(
     );
     // A turn that could not be applied, a wheel switch refused for a security
     // patch included, only warns: the package already built.
+    // A comment-only edit is discarded, and the spec that built is kept and is
+    // not built again. Its warning says the errors remain.
+    let mut comment_only = false;
+    let effect = match effect {
+        Ok(TurnEffect::Edited) if is_comment_only_edit(&snapshot, spec_path, &good) => {
+            discard_comment_only_edit(
+                &snapshot,
+                spec_path,
+                &good,
+                Some(build_step),
+                ws.notes(),
+                RPMLINT_COMMENT_ONLY,
+                reporter,
+            );
+            comment_only = true;
+            Ok(TurnEffect::NoChange)
+        }
+        other => other,
+    };
     let effect = effect.map_err(|e| turn_failure(&e));
-    match rpmlint_after_turn(effect, rpm_name, errors) {
+    let turn = if comment_only {
+        RpmlintTurn::Keep(rpmlint_comment_only_warning(rpm_name, errors))
+    } else {
+        rpmlint_after_turn(effect, rpm_name, errors)
+    };
+    match turn {
         RpmlintTurn::Keep(warning) => {
             snapshot.restore(reporter, Some(build_step));
             restore_spec(spec_path, &good, Some(build_step), reporter);
