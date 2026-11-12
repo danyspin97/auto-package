@@ -195,6 +195,9 @@ mod sourceinfo_version_tests;
 pub(crate) use poll::*;
 mod build_once;
 mod local_build;
+mod wait_view;
+#[cfg(test)]
+mod wait_view_tests;
 pub use local_build::*;
 #[cfg(test)]
 mod local_build_tests;

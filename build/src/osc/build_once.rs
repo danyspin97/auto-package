@@ -1,6 +1,7 @@
 //! One attempt at a build on OBS: the request, the wait and the result it
 //! returns.
 
+use super::wait_view::{self, Output, Shown, WaitCount};
 use super::*;
 
 pub(super) fn obs_build_once(
@@ -48,7 +49,6 @@ pub(super) fn obs_build_once(
     // build for up to the full `MAX_WAIT`. Reported live: the TUI sat on an
     // unchanging "building" for 1000+ seconds while OBS itself showed
     // nothing in progress.
-    const NO_PROGRESS_WARNING: Duration = Duration::from_secs(120);
     let mut last_change = Instant::now();
     let mut last_warning = Instant::now();
     let mut last_recheck: Option<Instant> = None;
@@ -70,6 +70,11 @@ pub(super) fn obs_build_once(
     let mut last_tick = Instant::now();
     let mut last_block_change = Instant::now();
     let mut was_blocked = false;
+    // The minutes a progress line was given for, when there is no live line.
+    let mut logged_minutes: u64 = 0;
+    let waiting = WaitCount::enter();
+    // Polls made so far, for the first-poll rule in `wait_view`.
+    let mut polls: u32 = 0;
 
     let status = loop {
         if crate::proc::shutting_down() {
@@ -214,7 +219,7 @@ pub(super) fn obs_build_once(
         } else if !status.is_terminal() {
             // Non-terminal and unchanged: make sure the user can always
             // tell this is still alive and polling, not silently wedged.
-            if last_warning.elapsed() >= NO_PROGRESS_WARNING {
+            if wait_view::warning_due(&status, last_warning.elapsed()) {
                 reporter.report(&Event::Warning {
                     step,
                     message: format!(
@@ -287,6 +292,32 @@ pub(super) fn obs_build_once(
             }
         }
 
+        // While the build is still going, the terminal shows its state and the
+        // time waited, rewritten on each poll; otherwise a line goes to the
+        // log once a minute (see `wait_view`).
+        if !status.is_terminal() {
+            let first_poll = polls == 0;
+            polls = polls.saturating_add(1);
+            let output = Output {
+                terminal: ap_core::sink::live_capable(),
+                quiet: ap_core::sink::is_quiet(),
+                width: ap_core::sink::live_width(ap_core::sink::terminal_columns()),
+                colour: ap_core::sink::stderr_colour(),
+                alone: waiting.alone(),
+                first_poll,
+            };
+            match wait_view::shown_while_waiting(
+                &prev_status,
+                start.elapsed(),
+                output,
+                &mut logged_minutes,
+            ) {
+                Some(Shown::Live(line)) => ap_core::sink::show_live(&line),
+                Some(Shown::Log(message)) => reporter.report(&Event::Progress { step, message }),
+                None => {}
+            }
+        }
+
         // `unresolvable` is only the scheduler's current view: a dependency
         // published a moment later turns it back into `scheduled`. Accept it
         // as the answer only once a later poll agrees (UNRESOLVABLE_CONFIRM is
@@ -314,6 +345,9 @@ pub(super) fn obs_build_once(
             jitter(),
         ));
     };
+    // The wait is over: its live line goes now, not when the function returns
+    // (the failure and log steps that follow print lines of their own).
+    drop(waiting);
 
     // Fetch the log regardless of outcome — partial logs help diagnose failures.
     // A missing or stale log leaves the failure without its cause, so say so.
