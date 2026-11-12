@@ -281,6 +281,48 @@ fn quoted_output_in_parentheses_is_left_out_of_the_sentence() {
 }
 
 #[test]
+fn a_headline_cut_to_a_limit_is_exactly_that_long() {
+    let got = Recap {
+        headline: "abcdefghij".into(),
+        lines: Vec::new(),
+        action: None,
+    };
+    for (limit, want) in [
+        (0, ""),
+        (1, "…"),
+        (2, "a…"),
+        (5, "abcd…"),
+        (9, "abcdefgh…"),
+        (10, "abcdefghij"),
+        (11, "abcdefghij"),
+    ] {
+        let body = got.body_within(limit, 0);
+        assert_eq!(body, want, "limit {limit}");
+        assert_eq!(body.chars().count(), limit.min(10), "limit {limit}");
+    }
+}
+
+#[test]
+fn a_pinned_line_leaves_the_headline_the_room_it_does_not_take() {
+    let got = Recap {
+        headline: "abcdefghij".into(),
+        lines: vec!["Two.".into()],
+        action: None,
+    };
+    // `Two.` (pinned) and its separator take five characters.
+    for (limit, want) in [(14, "abcdefgh… Two."), (9, "abc… Two."), (6, "… Two.")] {
+        let body = got.body_within(limit, 1);
+        assert_eq!(body, want, "limit {limit}");
+        assert_eq!(body.chars().count(), limit, "limit {limit}");
+    }
+    // No room for the headline: the pinned line stays whole, by design.
+    assert_eq!(got.body_within(5, 1), "Two.");
+    assert_eq!(got.body_within(3, 1), "Two.");
+    // Unpinned, a line that does not fit is dropped whole instead.
+    assert_eq!(got.body_within(9, 0), "abcdefgh…");
+}
+
+#[test]
 fn a_body_over_its_limit_drops_whole_trailing_lines_and_keeps_pinned_ones() {
     let got = Recap {
         headline: "Head.".into(),

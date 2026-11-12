@@ -31,7 +31,11 @@ impl Recap {
 
     /// [`Self::body`] within `limit` characters: trailing lines are dropped
     /// whole (the first `pinned` lines never are), then the headline is cut
-    /// with a trailing `…` if it still does not fit.
+    /// with a trailing `…` to the room the kept lines leave, so the body is
+    /// exactly `limit` characters. Two cases overflow by design: the `pinned`
+    /// lines alone are longer than `limit` (they are kept whole), and they
+    /// leave no room for the headline, which is then dropped (the body may be
+    /// one character short of `limit`).
     pub(super) fn body_within(&self, limit: usize, pinned: usize) -> String {
         let mut lines: Vec<&str> = self.lines.iter().map(String::as_str).collect();
         let joined = |headline: &str, lines: &[&str]| {
@@ -44,12 +48,17 @@ impl Recap {
         while lines.len() > pinned && joined(&self.headline, &lines).chars().count() > limit {
             lines.pop();
         }
-        let fixed = joined("", &lines).chars().count() + 1;
-        if joined(&self.headline, &lines).chars().count() > limit {
-            let room = limit.saturating_sub(fixed).max(1);
-            return joined(&cap(&self.headline, room), &lines);
+        let body = joined(&self.headline, &lines);
+        if body.chars().count() <= limit {
+            return body;
         }
-        joined(&self.headline, &lines)
+        let tail = joined("", &lines);
+        if tail.is_empty() {
+            return cap(&self.headline, limit);
+        }
+        // The headline gets what is left after the lines and their separator.
+        let room = limit.saturating_sub(tail.chars().count() + 1);
+        joined(&cap(&self.headline, room), &lines)
     }
 }
 
@@ -116,6 +125,9 @@ fn clean(text: &str, limit: usize) -> String {
 pub(super) fn cap(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_string();
+    }
+    if limit == 0 {
+        return String::new();
     }
     let mut out: String = text.chars().take(limit - 1).collect();
     out.push('…');
