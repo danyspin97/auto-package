@@ -375,6 +375,11 @@ pub(super) fn outcome(
                     o.detail = v["reason"].as_str().map(str::to_string);
                     o.failure_detail = v["note"]["detail"].as_str().map(str::to_string);
                 }
+                "NeedsMaintainer" => {
+                    o.result = "needs a maintainer".into();
+                    o.detail = v["reason"].as_str().map(str::to_string);
+                    o.failure_detail = v["note"]["detail"].as_str().map(str::to_string);
+                }
                 "Blocked" => {
                     o.result = "blocked".into();
                     o.detail = v["reason"].as_str().map(str::to_string);

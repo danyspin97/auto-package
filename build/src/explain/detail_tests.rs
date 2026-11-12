@@ -151,3 +151,54 @@ fn a_failed_package_finished_event_carries_its_detail_to_the_outcome() {
     let o = outcome(&p, None, Path::new("/work"), "foo", "foo", None);
     assert_eq!(o.failure_detail, None);
 }
+
+#[test]
+fn a_needs_maintainer_ladder_shows_its_reason_and_its_full_history() {
+    let run = serde_json::json!({
+        "event": "package_finished",
+        "pkg": "foo",
+        "version": "2.0",
+        "outcome": {"NeedsMaintainer": {
+            "reason": "foo could not be resolved: a security patch would be dropped.",
+            "note": {"detail": "UNRESOLVED after the resolution ladder: foo: turn 0: a | round 1: b"}
+        }}
+    });
+    // The memo is written for this kind too, but the report does not rely on it.
+    let state = r#"{"last_outcome":"failed","obs_name":"foo"}"#;
+    let text = report_of(&run, state);
+    assert!(text.contains("needs a maintainer"), "{text}");
+    assert!(text.contains("a security patch would be dropped"), "{text}");
+    assert!(text.contains("turn 0: a | round 1: b"), "{text}");
+}
+
+#[test]
+fn a_ladder_that_wrote_no_memo_still_shows_its_history_from_the_note() {
+    // A patch-driven or budget-stopped ladder leaves no `ladder_reason`.
+    let run = serde_json::json!({
+        "event": "package_finished",
+        "pkg": "foo",
+        "version": "2.0",
+        "outcome": {"Failed": {
+            "reason": "foo could not be resolved: stopped on the budget.",
+            "disk_full": false,
+            "note": {"detail": "UNRESOLVED after the resolution ladder: foo: turn 0: a | round 1 not run"}
+        }}
+    });
+    let state = r#"{"last_outcome":"failed","obs_name":"foo"}"#;
+    let text = report_of(&run, state);
+    assert!(!text.contains("Flaky tests and ladder"), "{text}");
+    assert!(text.contains("turn 0: a | round 1 not run"), "{text}");
+}
+
+#[test]
+fn a_needs_maintainer_event_carries_its_detail_to_the_outcome() {
+    let mut p = Parsed::default();
+    p.finished = Some(serde_json::json!({
+        "event": "package_finished",
+        "outcome": {"NeedsMaintainer": {"reason": "stop", "note": {"detail": "all of it"}}}
+    }));
+    let o = outcome(&p, None, Path::new("/work"), "foo", "foo", None);
+    assert_eq!(o.result, "needs a maintainer");
+    assert_eq!(o.detail.as_deref(), Some("stop"));
+    assert_eq!(o.failure_detail.as_deref(), Some("all of it"));
+}
