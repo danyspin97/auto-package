@@ -188,13 +188,7 @@ pub(super) fn update_in_place(
     });
     // Built as text now and printed by `main`, once the TUI has
     // restored the terminal; printed here it would be wiped.
-    *summary = Some(print_run_summary(
-        &memory,
-        &project,
-        &distro,
-        &arch,
-        &state_root,
-    ));
+    *summary = Some(print_run_summary(&memory, &state_root));
 
     match &tui_ctrl {
         Some(t) => {

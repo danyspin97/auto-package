@@ -250,13 +250,7 @@ pub(super) fn run_on(
     if !a.dry_run {
         *summary = Some(format!(
             "{}{}{}{}",
-            print_run_summary(
-                &memory,
-                &branch_project,
-                &osc::choose_repository(&branch_project, a.distro.as_deref(), &a.arch).0,
-                &a.arch,
-                &ctx.state_root
-            ),
+            print_run_summary(&memory, &ctx.state_root),
             up::summary_text(
                 &branch_project,
                 &report.results,

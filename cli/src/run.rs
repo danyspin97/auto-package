@@ -555,13 +555,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             let added_failures: Vec<String> = failures.into_iter().map(|f| f.message).collect();
             // Built as text now and printed by `main`, once the TUI has
             // restored the terminal; printed here it would be wiped.
-            *summary = Some(print_run_summary(
-                &memory,
-                &project,
-                &distro,
-                &arch,
-                &state_root,
-            ));
+            *summary = Some(print_run_summary(&memory, &state_root));
 
             // Only the TUI takes add requests, so without it there are no
             // added failures to report.

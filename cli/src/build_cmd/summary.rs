@@ -137,13 +137,7 @@ pub(crate) fn with_lines<'a>(
     .collect()
 }
 
-pub(crate) fn print_run_summary(
-    memory: &MemorySink,
-    project: &str,
-    distro: &str,
-    arch: &str,
-    state_root: &Path,
-) -> String {
+pub(crate) fn print_run_summary(memory: &MemorySink, state_root: &Path) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     // Latest outcome per package, so a package that later built is not also
@@ -297,28 +291,6 @@ pub(crate) fn print_run_summary(
         }
     }
 
-    // OBS reports names in lower case, and this run's packages are already in
-    // the built list above, so they are not repeated here.
-    let statuses = ap_build::osc::get_project_build_statuses(project, distro, arch)
-        // Only the "already built" extras come from this listing; without it the
-        // summary still lists everything this run built.
-        .unwrap_or_default();
-    let built_lower: Vec<String> = built.iter().map(|p| p.to_lowercase()).collect();
-    let mut cached: Vec<&String> = statuses
-        .iter()
-        .filter(|(name, s)| {
-            matches!(s, ap_build::osc::BuildStatus::Succeeded)
-                && !built_lower.contains(&name.to_lowercase())
-        })
-        .map(|(name, _)| name)
-        .collect();
-    cached.sort();
-    if !cached.is_empty() {
-        let _ = writeln!(out, "\nAlready built in {project} ({}):", cached.len());
-    }
-    for name in cached {
-        let _ = writeln!(out, "  {name}");
-    }
     out.push_str(&crate::allow_host::refused_section(
         &ap_build::allowed_hosts::shared(),
     ));
@@ -367,6 +339,35 @@ mod tests {
             },
         )]);
         assert_eq!(touched_packages(&latest), vec![&"gamma".to_string()]);
+    }
+
+    #[test]
+    fn the_run_summary_does_not_list_the_packages_already_built_in_the_project() {
+        use ap_core::sink::Reporter;
+        let sink = MemorySink::new();
+        let finished = |pkg: &str, outcome: PackageOutcome| Event::PackageFinished {
+            pkg: pkg.into(),
+            version: "1.0".into(),
+            outcome,
+        };
+        sink.report(&finished("osutil", PackageOutcome::Built));
+        sink.report(&finished(
+            "foo",
+            PackageOutcome::MissingDeps {
+                deps: vec!["bar".into()],
+            },
+        ));
+        let root = tempfile::tempdir().unwrap();
+        let text = print_run_summary(&sink, root.path());
+        assert!(!text.contains("Already built in"), "{text}");
+        assert!(
+            text.starts_with("\nBuilt this run (1):\n  osutil 1.0\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\nQueued, waiting on dependencies (1):\n  foo <- bar\n"),
+            "{text}"
+        );
     }
 
     #[test]
