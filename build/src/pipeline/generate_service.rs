@@ -52,7 +52,20 @@ pub(super) fn osc_service_stage(
                 rpm_name.clone()
             );
 
-            let service_xml = render_service_file(repo_url, &config.version, &config.pkg_name);
+            // tar_scm writes the changelog entry with this author, so one that
+            // cannot be resolved stops a run that commits before anything is
+            // written; a local build commits nothing and writes no entry.
+            let author = super::author_gate::service_author(
+                osc::local_build().is_some(),
+                super::author_gate::host_author(Some(checkout_dir)),
+            )
+            .map_err(|why| ctx.failed_as(FailureKind::Environment, why))?;
+            let service_xml = render_service_file(
+                repo_url,
+                &config.version,
+                &config.pkg_name,
+                author.map(|a| a.to_string()).as_deref(),
+            );
             let result = ap_core::fsx::write_atomic(&checkout_dir.join("_service"), &service_xml)
                 .map_err(|e| {
                     ctx.failed(format!(

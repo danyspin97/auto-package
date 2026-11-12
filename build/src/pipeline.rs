@@ -231,6 +231,7 @@ use obs_names::*;
 mod checkout;
 use checkout::*;
 use update_mode::*;
+mod author_gate;
 mod carried_origin;
 mod generate_service;
 mod generate_stage;

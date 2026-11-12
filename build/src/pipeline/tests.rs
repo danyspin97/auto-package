@@ -444,8 +444,23 @@ fn service_files_escape_values_taken_from_upstream() {
     );
     assert!(!xml.contains("<evil/>"), "{xml}");
     assert!(xml.contains("a&amp;b&lt;/param&gt;"), "{xml}");
-    let xml = render_service_file("https://example.org/o/r?a=1&b=2", "1.0", "r");
+    let xml = render_service_file(
+        "https://example.org/o/r?a=1&b=2",
+        "1.0",
+        "r",
+        Some("A & B <a@example.org>"),
+    );
     assert!(xml.contains("a=1&amp;b=2.git"), "{xml}");
+    assert!(
+        xml.contains("<param name=\"changesauthor\">A &amp; B &lt;a@example.org&gt;</param>"),
+        "{xml}"
+    );
+    assert!(!xml.contains("YOUR EMAIL"), "{xml}");
+    let xml = render_service_file("https://example.org/o/r", "1.0", "r", None);
+    assert!(
+        !xml.contains("changesgenerate") && !xml.contains("changesauthor"),
+        "{xml}"
+    );
 }
 
 #[test]

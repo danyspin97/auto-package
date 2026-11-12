@@ -6,8 +6,15 @@ use super::*;
 ///
 /// `github_url` is the project URL (without `.git`), `version` is the crate
 /// version, and `pkg_name` is used as the `cargo_vendor` `src` directory name
-/// (the directory `tar_scm` creates matches the repo name).
-pub(super) fn render_service_file(github_url: &str, version: &str, pkg_name: &str) -> String {
+/// (the directory `tar_scm` creates matches the repo name). `author` is the
+/// `Name <email>` `tar_scm` puts on the changelog entry it writes; with
+/// `None` it writes no entry (a local build, which commits nothing).
+pub(super) fn render_service_file(
+    github_url: &str,
+    version: &str,
+    pkg_name: &str,
+    author: Option<&str>,
+) -> String {
     let git_url = if github_url.ends_with(".git") {
         github_url.to_string()
     } else {
@@ -26,6 +33,13 @@ pub(super) fn render_service_file(github_url: &str, version: &str, pkg_name: &st
         crate::obs_xml::escape(repo_name),
         crate::obs_xml::escape(version),
     );
+    let changes = author.map_or_else(String::new, |a| {
+        format!(
+            "\x20   <param name=\"changesgenerate\">enable</param>\n\
+             \x20   <param name=\"changesauthor\">{}</param>\n",
+            crate::obs_xml::escape(a)
+        )
+    });
     format!(
         "<services>\n\
            <service mode=\"manual\" name=\"tar_scm\">\n\
@@ -36,8 +50,7 @@ pub(super) fn render_service_file(github_url: &str, version: &str, pkg_name: &st
          \x20   <param name=\"match-tag\">*</param>\n\
          \x20   <param name=\"versionrewrite-pattern\">v(\\d+\\.\\d+\\.\\d+)</param>\n\
          \x20   <param name=\"versionrewrite-replacement\">\\1</param>\n\
-         \x20   <param name=\"changesgenerate\">enable</param>\n\
-         \x20   <param name=\"changesauthor\"> YOUR EMAIL HERE </param>\n\
+         {changes}\
          \x20 </service>\n\
          \x20 <service mode=\"manual\" name=\"recompress\">\n\
          \x20   <param name=\"file\">*.tar</param>\n\
