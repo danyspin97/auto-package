@@ -166,6 +166,30 @@ fn save_flaky_probe(
     }
 }
 
+/// Reads the failure out of `build_log`, classifies it and reports it.
+fn classify_and_report(
+    ctx: &RunCtx,
+    st: &mut RunState,
+    build_step: &StepDir,
+    build_log: &Path,
+) -> (crate::log::ExtractedLog, ap_core::event::BuildFailure) {
+    let extract = extract_failure_step(
+        ctx.pkg_run,
+        ctx.reporter,
+        &mut st.step_attempts,
+        build_log,
+        &st.sdist_top_level,
+        build_step.id,
+    );
+    let classification = classify_failure(&extract);
+    ctx.reporter.report(&Event::BuildFailed {
+        step: build_step.id,
+        classification: classification.clone(),
+        log: build_log.to_path_buf(),
+    });
+    (extract, classification)
+}
+
 pub(super) fn fix_after_build(
     ctx: &RunCtx,
     st: &mut RunState,
@@ -175,7 +199,6 @@ pub(super) fn fix_after_build(
 ) -> Result<RoundEnd, PipelineResult> {
     let RunCtx {
         config,
-        pkg_run,
         reporter,
         ws,
         obs_name,
@@ -184,6 +207,11 @@ pub(super) fn fix_after_build(
     let reporter = *reporter;
 
     if config.no_agent {
+        // The one fix that needs no agent: directories no package owns.
+        let (_, classification) = classify_and_report(ctx, st, build_step, build_log);
+        if crate::pipeline::unowned_fix_apply::fix_unowned_dirs(ctx, build_step, &classification) {
+            return Ok(RoundEnd::Retry);
+        }
         skip_agent(
             reporter,
             &mut st.step_attempts,
@@ -402,19 +430,12 @@ pub(super) fn fix_after_build(
 
     link_build_log(ws, build_log);
 
-    let extract = extract_failure_step(
-        pkg_run,
-        reporter,
-        &mut st.step_attempts,
-        build_log,
-        &st.sdist_top_level,
-        build_step.id,
-    );
-    reporter.report(&Event::BuildFailed {
-        step: build_step.id,
-        classification: classify_failure(&extract),
-        log: build_log.to_path_buf(),
-    });
+    let (extract, classification) = classify_and_report(ctx, st, build_step, build_log);
+
+    // Unowned directories are fixed from the log, without a turn.
+    if crate::pipeline::unowned_fix_apply::fix_unowned_dirs(ctx, build_step, &classification) {
+        return Ok(RoundEnd::Retry);
+    }
 
     // A failure that comes back in the same shape with only a name changed
     // (pcp: four builds in a row, each `cd` into one more PMDA directory 7.2.2

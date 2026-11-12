@@ -233,8 +233,14 @@ use checkout::*;
 use update_mode::*;
 mod carried_origin;
 mod generate_stage;
+#[cfg(test)]
+mod no_agent_fix_tests;
 mod recap_entry;
 mod unknown_build;
+mod unowned_fix;
+mod unowned_fix_apply;
+#[cfg(test)]
+mod unowned_fix_tests;
 
 mod update_mode;
 
