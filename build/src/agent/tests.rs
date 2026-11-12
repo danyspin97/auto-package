@@ -13,6 +13,7 @@ mod packaged_twice;
 mod patch_removal_text;
 mod post_build_lead;
 mod prompt;
+mod provides_helper;
 mod pytest_line;
 mod python_expand_block;
 mod request_review;

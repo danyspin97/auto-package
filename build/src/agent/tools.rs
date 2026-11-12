@@ -150,6 +150,7 @@ pub(super) fn turn_allowed_tools(
         tools.push_str(&format!(",Edit({p}/**),Write({p}/**),Read({p}/**)"));
     }
     tools.push_str(&edit_bytes_grant(task, edit_bytes_command().as_deref()));
+    tools.push_str(&provides_grant(task, edit_bytes_command().as_deref()));
     tools
 }
 

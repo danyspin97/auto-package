@@ -28,6 +28,8 @@ pub(crate) use review_tools::safe_review_patch_name;
 use review_tools::*;
 mod edit_bytes;
 use edit_bytes::*;
+mod provides_helper;
+use provides_helper::*;
 mod integrity;
 mod links;
 mod owned_files;
