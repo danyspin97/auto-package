@@ -291,7 +291,7 @@ pub(super) fn commit_message(checkout_dir: &Path, baseline: &Path) -> String {
         .file_name()
         .map(|n| osc::run_start_copy(checkout_dir, Some(baseline), n))
         .unwrap_or_default();
-    match changes_summary(&working, &pristine) {
+    match super::commit_summary::changes_summary(&working, &pristine) {
         Some(summary) => one_line(&format!("{BASE}: {summary}")),
         None => BASE.to_string(),
     }
@@ -304,45 +304,6 @@ pub(super) fn one_line(text: &str) -> String {
         .filter(|w| !w.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// The bullets of the newest entry of `working` joined on one line and cut at
-/// 100 characters, or `None` when that entry is empty or already in `pristine`.
-pub(super) fn changes_summary(working: &str, pristine: &str) -> Option<String> {
-    let is_separator = |l: &str| l.len() >= 20 && l.bytes().all(|b| b == b'-');
-    let lines: Vec<&str> = working.lines().collect();
-    let first = lines.iter().position(|l| is_separator(l.trim()))?;
-    let end = lines[first + 1..]
-        .iter()
-        .position(|l| is_separator(l.trim()))
-        .map_or(lines.len(), |i| first + 1 + i);
-    if pristine.contains(lines[first..end].join("\n").trim_end()) {
-        return None;
-    }
-    let mut bullets: Vec<String> = Vec::new();
-    for l in &lines[(first + 2).min(end)..end] {
-        if let Some(b) = l.strip_prefix("- ") {
-            bullets.push(b.trim().to_string());
-        } else if l.starts_with("  ")
-            && !l.trim().is_empty()
-            && let Some(last) = bullets.last_mut()
-        {
-            last.push(' ');
-            last.push_str(l.trim());
-        }
-    }
-    let joined = one_line(&bullets.join("; "));
-    if joined.is_empty() {
-        return None;
-    }
-    let mut out: String = joined.chars().take(100).collect();
-    if joined.chars().count() > 100 {
-        out = out
-            .rsplit_once(' ')
-            .map_or(out.clone(), |(h, _)| h.to_string());
-        out = out.trim_end_matches([',', ';', ':', ' ']).to_string();
-    }
-    Some(out)
 }
 
 /// Whether the unpacked source has a Python package (an `__init__.py`) within a

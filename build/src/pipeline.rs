@@ -295,8 +295,11 @@ mod check_paths;
 #[cfg(test)]
 mod check_paths_tests;
 mod commit;
+mod commit_summary;
 mod validate;
 use commit::*;
+#[cfg(test)]
+use commit_summary::*;
 mod build_round;
 mod unresolvable;
 pub use unresolvable::note_built;
@@ -444,6 +447,8 @@ mod carry_fallback;
 mod commit_gate_tests;
 #[cfg(test)]
 mod commit_message_tests;
+#[cfg(test)]
+mod commit_summary_tests;
 pub mod keyring_accept;
 #[cfg(test)]
 mod keyring_accept_tests;

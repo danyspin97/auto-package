@@ -1,6 +1,7 @@
 //! The `osc ci -m` message: one line, free of control characters, and bounded.
 
 use super::commit::*;
+use super::commit_summary::*;
 
 fn changes(bullets: &str) -> String {
     let sep = "-".repeat(67);
