@@ -60,6 +60,11 @@ pub fn probe(
         // flip the user's request to that name anyway, defeating the
         // whole point of picking PlainC here. Suppress it so the caller
         // keeps the user-supplied name.
+        let bin_names = if ecosystem == Ecosystem::Rust {
+            info.bin_names
+        } else {
+            Vec::new()
+        };
         let project_name = if python_hijack {
             None
         } else {
@@ -69,6 +74,7 @@ pub fn probe(
             ecosystem,
             project_name,
             project_dir: info.project_dir,
+            bin_names,
             subprojects: info
                 .subprojects
                 .iter()

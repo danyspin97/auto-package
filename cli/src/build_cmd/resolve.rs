@@ -215,6 +215,7 @@ mod tests {
             ecosystem,
             project_name: project_name.map(str::to_string),
             project_dir: None,
+            bin_names: Vec::new(),
             subprojects: (0..subprojects)
                 .map(|i| (format!("dir{i}"), format!("sub{i}")))
                 .collect(),

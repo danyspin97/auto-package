@@ -201,6 +201,8 @@ pub struct RepoProbe {
     /// Sibling projects when the archive holds more than one, as
     /// `(directory, declared name)`.
     pub subprojects: Vec<(String, String)>,
+    /// Executables a Rust crate at the archive root builds; empty otherwise.
+    pub bin_names: Vec<String>,
     /// The archive that answered.
     pub archive_url: String,
 }
