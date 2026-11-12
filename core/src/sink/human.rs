@@ -434,7 +434,7 @@ impl Reporter for HumanSink {
             return;
         }
         if let Some(msg) = self.format(event) {
-            let _ = writeln!(std::io::stderr(), "{}", strip_controls(&msg, true));
+            print_line(&strip_controls(&msg, true));
         }
     }
 }

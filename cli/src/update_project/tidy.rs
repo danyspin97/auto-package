@@ -275,6 +275,9 @@ pub(super) fn ask_line(prompt: &str, warn: &dyn Fn(&str)) -> Option<String> {
         warn("cannot ask for confirmation without a terminal; pass --yes to submit unasked");
         return None;
     }
+    // A build wait in this process may be drawing its live line: hold it off
+    // the row until the answer is read.
+    let _prompt = ap_core::sink::PromptGuard::open();
     eprint!("{prompt}");
     let _ = std::io::stderr().flush();
     let mut answer = String::new();

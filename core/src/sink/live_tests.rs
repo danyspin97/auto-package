@@ -1,6 +1,15 @@
 use super::*;
 use unicode_width::UnicodeWidthStr;
 
+#[test]
+fn the_live_line_needs_a_terminal_with_a_usable_term() {
+    assert!(can_draw_live(true, Some("xterm-256color")));
+    assert!(!can_draw_live(false, Some("xterm-256color")));
+    assert!(!can_draw_live(true, Some("dumb")));
+    assert!(!can_draw_live(true, Some("")));
+    assert!(!can_draw_live(true, None));
+}
+
 /// `text` without its SGR escape sequences.
 fn plain(text: &str) -> String {
     let mut out = String::new();

@@ -73,7 +73,7 @@ pub(super) fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     }
     let writing = ap_build::proc::obs_writes_in_flight();
     if writing > 0 {
-        eprintln!("{}", obs_wait_line(RESTORE_WAIT.as_secs(), writing));
+        ap_core::sink::print_line(&obs_wait_line(RESTORE_WAIT.as_secs(), writing));
     }
     let timed_out = writing > 0 && !ap_build::proc::wait_for_obs_writes(RESTORE_WAIT);
     ap_build::proc::remove_private_dir();

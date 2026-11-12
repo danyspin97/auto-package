@@ -8,6 +8,7 @@
 
 use owo_colors::{OwoColorize, Stream::Stderr};
 
+use super::live::print_line;
 use super::style::{Role, paint};
 
 /// Whether stderr takes colour: a terminal, `NO_COLOR` unset, and
@@ -21,7 +22,7 @@ pub fn stderr_colour() -> bool {
 /// Prints `line` to stderr, coloured when stderr takes colour (see
 /// [`colour_diag`]). Used for the terminal copy only.
 pub fn eprint_coloured(line: &str) {
-    eprintln!("{}", colour_diag(line, stderr_colour()));
+    print_line(&colour_diag(line, stderr_colour()));
 }
 
 /// Leading labels and their SGR codes (bold colour on, bold and colour off).
