@@ -46,6 +46,10 @@ R4. Install with `%{cargo_install}` (from `cargo-packaging`), which puts the
 
      install -D -m 0755 target/release/<extra-binary> %{buildroot}%{_bindir}/<extra-binary>
 
+   Each extra file installed by hand (session `.desktop`, portal, `.conf`, completions)
+   needs a %files line, and a %dir for any new parent directory (see the
+   directory-ownership rule in convention 109).
+
 R4a. `%check` runs the crate's tests:
 
      %check

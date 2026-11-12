@@ -69,7 +69,7 @@ made (convention 86).
   its own header, not the tag): list `%{buildroot}` after `%install` and use
   `%{_includedir}/<name>-*/` globs in `%files devel` rather than
   `%{version}`.
-- **Package-private directories must be owned, exactly once.** The build
+- **Any new directory the package creates must be owned, exactly once.** The build
   fails late (after `%install`, in `50-check-filelist`) with
   `<pkg>.rpm: directories not owned by a package: - /usr/lib64/<name>-X.Y`
   when `%files` lists files *inside* a directory that nothing owns — a
@@ -77,7 +77,12 @@ made (convention 86).
   `lib<name>.so` under `%{_libdir}/<name>-1.3.0/` and listing only
   `%{_libdir}/<name>-*/lib<name>.so` leaves the directory orphaned. Fix: add
   `%dir %{_libdir}/<name>-*` to the package that owns the files in it (or
-  list the whole directory `%{_libdir}/<name>-*/` with no `%dir`). The
+  list the whole directory `%{_libdir}/<name>-*/` with no `%dir`). The same
+  holds for a new directory under `%{_datadir}`, `%{_sysconfdir}` or
+  `%{_libexecdir}`, e.g. `%{_datadir}/wayland-sessions/` for a session
+  `.desktop` file or `%{_datadir}/xdg-desktop-portal/portals/`: add `%dir` for
+  each new directory, parents first, and never `%dir` a standard directory
+  such as `%{_datadir}`. The
   opposite mistake is `RPM build warnings: File listed twice: <dir>` — a
   directory listed as a whole (`%{_includedir}/foo-*/`) plus an extra
   `%dir` line for it, or the same path in two `%files` sections. Pick one
