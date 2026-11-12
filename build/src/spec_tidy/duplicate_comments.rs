@@ -1,4 +1,5 @@
-//! A spec comment that says what another comment of the same spec says.
+//! Spec comments that add nothing: one that says what another comment of the
+//! same spec says, and one that restates its line or the packaging tool.
 //!
 //! The agent explains a fact where it applies, once: a dependency on its
 //! `BuildRequires`, a skip on the skipped test. A second comment of the same
@@ -8,6 +9,7 @@
 use super::comment_compare::is_directive_comment;
 use super::comment_macros::comment_lines;
 use super::{first_word, is_section};
+use crate::quality::{Finding, Kind};
 use std::collections::BTreeSet;
 
 /// Words that carry no fact: left out when a `%check` comment is compared
@@ -272,6 +274,79 @@ fn check_restates_dependency(lines: &[&str], real: &[bool], scope: &[Scope]) -> 
     out
 }
 
+/// Comment openings that narrate the packaging tool.
+const TRIVIAL_STARTS: &[&str] = &["tar_scm names", "obs_scm names"];
+/// Phrases that say where the agent found a fact.
+const TRIVIAL_PHRASES: &[&str] = &[
+    "listed in the upstream installation guide",
+    "listed in the readme",
+];
+/// Restatements of what a BuildRequires is for: trivial when the comment is short.
+const RESTATEMENTS: &[&str] = &[
+    "needed for building",
+    "required for building",
+    "build dependency",
+    "build-dependency",
+];
+/// Words from which a restatement says something more.
+const SHORT: usize = 8;
+/// Most words of a comment a pattern applies to: longer ones carry a reason.
+const TRIVIAL_MAX: usize = 12;
+
+/// Whether comment `line` says nothing a maintainer needs: it names where the
+/// agent found a fact, narrates the packaging tool, or restates a dependency.
+/// A comment with a digit, a version or a comparison is evidence: never trivial.
+fn is_trivial(line: &str) -> bool {
+    let text = line
+        .trim_start()
+        .trim_start_matches('#')
+        .trim()
+        .to_lowercase();
+    let n = text.split_whitespace().count();
+    if n > TRIVIAL_MAX
+        || text
+            .chars()
+            .any(|c| c.is_ascii_digit() || matches!(c, '<' | '>' | '='))
+    {
+        return false;
+    }
+    let tokens: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .collect();
+    TRIVIAL_STARTS.iter().any(|p| text.starts_with(p))
+        || TRIVIAL_PHRASES.iter().any(|p| text.contains(p))
+        || (tokens.contains(&"cc") && text.contains("build scripts compile"))
+        || (n < SHORT && RESTATEMENTS.iter().any(|p| text.contains(p)))
+}
+
+/// 1-based lines of the trivial comments of `spec`.
+pub fn trivial(spec: &str) -> Vec<usize> {
+    let lines: Vec<&str> = spec.lines().collect();
+    let real = comment_lines(&lines);
+    (0..lines.len())
+        .filter(|&i| real[i] && !is_directive_comment(lines[i]) && is_trivial(lines[i]))
+        .map(|i| i + 1)
+        .collect()
+}
+
+/// The findings of the comments of `spec`: repeats and trivial ones.
+pub fn findings(spec: &str) -> Vec<Finding> {
+    let repeats = duplicates(spec).into_iter().map(|d| Finding {
+        kind: Kind::DuplicateComment,
+        detail: format!(
+            "line {}: this comment repeats the one on line {}; keep the one where the fact applies",
+            d.line, d.of
+        ),
+    });
+    let trivial = trivial(spec).into_iter().map(|line| Finding {
+        kind: Kind::TrivialComment,
+        detail: format!(
+            "line {line}: this comment restates its line or the packaging tool; remove it unless a maintainer would be surprised without it"
+        ),
+    });
+    repeats.chain(trivial).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +423,28 @@ mod tests {
             let p = e.unwrap().path();
             let spec = std::fs::read_to_string(&p).unwrap();
             assert!(duplicates(&spec).is_empty(), "{}", p.display());
+        }
+    }
+
+    #[test]
+    fn the_generated_trivial_comments_are_flagged() {
+        let spec = "# Libraries listed in the upstream installation guide\nBuildRequires: a\n# the cc build-dependency and the build scripts compile C code\nBuildRequires: gcc\n# tar_scm names the archive after the repository (jay), not the package\nSource: x\n# needed for building\nBuildRequires: b\n";
+        assert_eq!(trivial(spec), vec![1, 3, 5, 7]);
+    }
+
+    #[test]
+    fn evidence_and_reason_comments_are_not_trivial() {
+        let spec = "# build scripts compile bundled zstd, so we need gcc and make\n# Libraries listed in the manifest are vendored\n# listed in the README as a runtime requirement, needs gtk4 >= 4.10\n# unverified: src/lib.rs:12 includes zlib.h\n# skipped: needs a display, upstream issue 42\n";
+        assert_eq!(trivial(spec), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn the_sample_specs_have_no_trivial_comment() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/spec");
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let spec = std::fs::read_to_string(&p).unwrap();
+            assert!(trivial(&spec).is_empty(), "{}", p.display());
         }
     }
 }

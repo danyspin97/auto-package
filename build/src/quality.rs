@@ -25,6 +25,8 @@ pub enum Kind {
     SpecHygiene,
     /// A comment that repeats an earlier comment of the spec. Only reported.
     DuplicateComment,
+    /// A comment that restates its line or the packaging tool.
+    TrivialComment,
     /// The spec has no `%check`.
     NoCheck,
     /// Tests were dropped from `%check` to get the package to build.
@@ -72,6 +74,7 @@ impl Kind {
             Kind::SpecStyle => "style",
             Kind::SpecHygiene => "hygiene",
             Kind::DuplicateComment => "duplicate-comment",
+            Kind::TrivialComment => "trivial-comment",
             Kind::NoCheck => "no-check",
             Kind::DroppedTests => "dropped-tests",
             Kind::RpmlintrcStyle => "rpmlintrc-style",
@@ -115,6 +118,7 @@ impl Kind {
         matches!(
             self,
             Kind::DuplicateComment
+                | Kind::TrivialComment
                 | Kind::RpmlintrcName
                 | Kind::RpmlintrcUnnamed
                 | Kind::PatchUpstreamMoved
@@ -210,15 +214,7 @@ pub fn audit_spec(spec: &str, ldconfig_macro: bool) -> Vec<Finding> {
             detail: format!("line {}: {}; fix: {}", c.line, c.what, c.fix),
         });
     }
-    for d in spec_tidy::duplicate_comments::duplicates(spec) {
-        out.push(Finding {
-            kind: Kind::DuplicateComment,
-            detail: format!(
-                "line {}: this comment repeats the one on line {}; keep the one where the fact applies",
-                d.line, d.of
-            ),
-        });
-    }
+    out.extend(spec_tidy::duplicate_comments::findings(spec));
     if !spec.lines().any(|l| l.trim_end() == "%check") {
         out.push(Finding {
             kind: Kind::NoCheck,
