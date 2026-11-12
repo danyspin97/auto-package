@@ -184,6 +184,10 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     }
     settle_fix_flags(ctx, &baseline, commit_step.id);
     settle_risk_flags(ctx, &baseline);
+    if let Err(stop) = super::author_gate::settle_authors(ctx, &baseline, commit_step.id) {
+        commit_step.finish(StepOutcome::Failed);
+        return Err(stop);
+    }
     // The entry is rewritten once every turn has added its bullets, so it
     // reads as the net change against what OBS holds (no model call).
     osc::rewrite_unpublished_entry(&ctx.checkout_dir, &baseline);

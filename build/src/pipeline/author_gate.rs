@@ -1,5 +1,7 @@
 //! The author of the `.changes` entries (see `osc::changes_author`) as the
-//! pipeline asks for it.
+//! pipeline asks for it: a run that commits stops before any work when none
+//! can be resolved, and an unpublished entry written with a placeholder author
+//! is repaired before the commit.
 
 use super::*;
 
@@ -65,6 +67,26 @@ pub(super) fn require_author(
         return Ok(());
     }
     author_or_stop(rpm_name, resolve(Some(checkout))).map(|_| ())
+}
+
+/// Before the commit: an unpublished entry whose author line is a placeholder
+/// or has no name or address gets the resolved author, and a warning says so.
+pub(super) fn settle_authors(
+    ctx: &RunCtx,
+    baseline: &Path,
+    step: ap_core::event::StepId,
+) -> Result<(), PipelineResult> {
+    let author = author_or_stop(&ctx.rpm_name, host_author(Some(&ctx.checkout_dir)))?;
+    for file in osc::repair_unpublished_authors(&ctx.checkout_dir, Some(baseline), &author) {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(step),
+            message: format!(
+                "{}: the author of the new entry in {file} was not a name and an address; set to {author}",
+                ctx.rpm_name
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
