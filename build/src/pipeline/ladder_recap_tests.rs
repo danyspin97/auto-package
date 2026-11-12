@@ -281,6 +281,38 @@ fn quoted_output_in_parentheses_is_left_out_of_the_sentence() {
 }
 
 #[test]
+fn a_round_is_counted_unless_its_label_says_not_run() {
+    // A ` not run:` in the round's own words is not its label.
+    let got = plain(&[
+        "t0.".into(),
+        "round 1: the tool said \"a not run: b\"".into(),
+    ]);
+    assert_eq!(got.lines, ["1 resolution round did not fix it."]);
+    // A label stored twice still says it did not run.
+    let got = plain(&["t0.".into(), "round 1: round 1 not run: budget".into()]);
+    assert!(got.lines.is_empty(), "{:?}", got.lines);
+}
+
+#[test]
+fn a_legacy_history_splits_only_at_round_labels_outside_quotes() {
+    use crate::pipeline::ladder_memo::legacy_history;
+    assert_eq!(
+        legacy_history("turn 0: a | round 1: b | round 2 not run: c"),
+        ["turn 0: a", "round 1: b", "round 2 not run: c"]
+    );
+    // A quoted message that contains a round label is one entry.
+    assert_eq!(
+        legacy_history("turn 0: the tool said \"x | round 3: y\" | round 1: z"),
+        ["turn 0: the tool said \"x | round 3: y\"", "round 1: z"]
+    );
+    // A separator that is not followed by a number is no round.
+    assert_eq!(
+        legacy_history("turn 0: a | round x: b"),
+        ["turn 0: a | round x: b"]
+    );
+}
+
+#[test]
 fn a_headline_cut_to_a_limit_is_exactly_that_long() {
     let got = Recap {
         headline: "abcdefghij".into(),

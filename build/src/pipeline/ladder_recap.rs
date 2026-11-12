@@ -104,7 +104,7 @@ fn from_history(history: &[String]) -> (String, Vec<String>) {
     };
     let ran = history[1..]
         .iter()
-        .filter(|r| !strip_label(r).is_empty() && !r.contains(" not run:"))
+        .filter(|r| !strip_label(r).is_empty() && !did_not_run(r))
         .count();
     let lines = match ran {
         0 => Vec::new(),
@@ -295,6 +295,20 @@ fn strip_label(text: &str) -> String {
         text = body;
     }
     text.to_string()
+}
+
+/// Whether `text` is a round that did not run (`round 2 not run: budget`, also
+/// labelled twice). A ` not run:` inside the round's own words does not count.
+fn did_not_run(text: &str) -> bool {
+    let mut text = text.trim();
+    while let Some(body) = strip_one_label(text) {
+        let label = &text[..text.len() - body.len()];
+        if label.trim_end().ends_with("not run:") {
+            return true;
+        }
+        text = body;
+    }
+    false
 }
 
 fn strip_one_label(text: &str) -> Option<&str> {

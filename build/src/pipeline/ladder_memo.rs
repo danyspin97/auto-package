@@ -41,7 +41,7 @@ fn recap_of(history: &[String]) -> crate::pipeline::ladder_recap::Recap {
 /// The history a memo written before the recap was kept stands for: its
 /// `turn 0: … | round 1: … | round 2: …` text, without the wrapper of the
 /// refusal it was once shown in, one entry per turn and round.
-fn legacy_history(full: &str) -> Vec<String> {
+pub(super) fn legacy_history(full: &str) -> Vec<String> {
     const WRAPPER: &str = "neither it nor the packages it depends on changed (";
     const TAIL: &str = "; not trying again without --force";
     let mut text = full.trim();
@@ -54,10 +54,36 @@ fn legacy_history(full: &str) -> Vec<String> {
             text = text.strip_suffix(')').unwrap_or(text);
         }
     }
-    let mut parts = text.split(" | round ");
-    let mut history: Vec<String> = parts.next().map(str::to_string).into_iter().collect();
-    history.extend(parts.map(|p| format!("round {p}")));
+    let mut history = Vec::new();
+    let mut start = 0;
+    for cut in round_cuts(text) {
+        history.push(text[start..cut].to_string());
+        // Past the ` | `, the next entry starts with its `round N` label.
+        start = cut + " | ".len();
+    }
+    history.push(text[start..].to_string());
     history
+}
+
+/// Where each ` | round N` separator of a stored history starts (`N` a
+/// number). One inside a quoted message is not a separator.
+fn round_cuts(text: &str) -> Vec<usize> {
+    const SEP: &str = " | round ";
+    let mut cuts = Vec::new();
+    let mut from = 0;
+    while let Some(found) = text[from..].find(SEP) {
+        let at = from + found;
+        let digits = text[at + SEP.len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .count();
+        let quoted = text[..at].matches('"').count() % 2 == 1;
+        if digits > 0 && !quoted {
+            cuts.push(at);
+        }
+        from = at + SEP.len();
+    }
+    cuts
 }
 
 /// The `reason` and the `action` of the refusal to run a spent ladder again:
