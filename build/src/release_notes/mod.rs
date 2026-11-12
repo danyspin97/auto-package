@@ -9,6 +9,8 @@ mod changelog;
 #[cfg(test)]
 mod clean_tests;
 mod markdown;
+#[cfg(test)]
+mod new_package_tests;
 mod render;
 mod routine;
 mod summarize;
@@ -22,20 +24,31 @@ use crate::version;
 
 use render::Notes;
 
-/// Writes the recap of updating from `old` to `new` under the `Update to`
-/// bullet of the newest `.changes` entry in `checkout_dir`, reading the new
-/// source archive from there when the checkout holds it. Returns `true` when
-/// no upstream notes were found: the bullet then stays alone.
+/// What a recap found: the lines for the `.changes` entry and, when a fetch
+/// failed, one short line saying so (not an error: the entry just stays short).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Recap {
+    pub lines: Vec<String>,
+    pub fetch_problem: Option<String>,
+}
+
+/// Writes the recap of packaging `new` (an update from `old`, or a first
+/// package when `old` is `None`) under the `Update to` bullet of the newest
+/// `.changes` entry in `checkout_dir`, reading the new source archive from
+/// there when the checkout holds it. With `no_agent` no model is called to
+/// condense long notes. `missing` of the result is `true` when no
+/// upstream notes were found: the bullet then stays alone.
 pub fn add_recap(
     checkout_dir: &std::path::Path,
     repo_url: Option<&str>,
     old: Option<&str>,
     new: &str,
-) -> Result<bool, crate::osc::Error> {
+    no_agent: bool,
+) -> Result<(bool, Option<String>), crate::osc::Error> {
     let archive = archive_in(checkout_dir, new);
-    let lines = update_notes(repo_url, archive.as_deref(), old, new);
-    crate::osc::set_update_notes(checkout_dir, new, &lines)?;
-    Ok(lines.is_empty())
+    let recap = gather(repo_url, archive.as_deref(), old, new, no_agent);
+    crate::osc::set_update_notes(checkout_dir, new, &recap.lines)?;
+    Ok((recap.lines.is_empty(), recap.fetch_problem))
 }
 
 /// The source archive of `version` in `dir`: a tarball whose name carries the
@@ -61,42 +74,61 @@ fn archive_in(dir: &std::path::Path, version: &str) -> Option<std::path::PathBuf
     found.into_iter().next()
 }
 
-/// The recap lines (`* item`, continuation lines indented) for updating a
-/// package from `old` to `new`. The changelog file in the new source archive
-/// is read first; the notes of the releases on the forge of `repo_url` are the
-/// fallback. Empty when neither has notes: the recap then says nothing.
-pub fn update_notes(
+/// The recap for updating a package from `old` to `new`, or for packaging
+/// `new` for the first time (`old` is `None`: then only what upstream says of
+/// `new` itself counts). The changelog file in the new source archive is read
+/// first; the notes of the releases on the forge of `repo_url` are the
+/// fallback. Empty lines when neither has notes: the recap then says nothing.
+/// With `no_agent` long notes are not condensed by a model: the links or the
+/// changelog file are named instead.
+pub fn gather(
     repo_url: Option<&str>,
     archive: Option<&std::path::Path>,
     old: Option<&str>,
     new: &str,
-) -> Vec<String> {
-    let section = old.and_then(|old| {
+    no_agent: bool,
+) -> Recap {
+    let mut fetch_problem = None;
+    // Older than every release heading: the section is the top one, `new`'s.
+    let section = {
         let fetched;
         let archive = match archive {
-            Some(a) => a,
+            Some(a) => Some(a),
             None => {
                 fetched = repo_url.and_then(|u| {
                     crate::sources::archive_urls(u, new)
                         .iter()
                         .find_map(|url| crate::sources::fetch_archive(url).ok())
-                })?;
-                &fetched
+                });
+                fetched.as_ref().map(|f| -> &std::path::Path { f })
             }
         };
-        changelog::section_of_archive(archive, old, new)
-    });
-    let releases = match (repo_url, old) {
-        (Some(url), Some(old)) => match crate::sources::list_releases(url) {
-            Ok(all) => releases_between(&all, url, old, new),
+        archive.and_then(|a| changelog::section_of_archive(a, old.unwrap_or("0"), new))
+    };
+    let releases = match repo_url {
+        Some(url) => match crate::sources::list_releases(url) {
+            Ok(all) => match old {
+                Some(old) => releases_between(&all, url, old, new),
+                None => release_of(&all, url, new),
+            },
             Err(e) => {
                 ap_core::diag!("  ✗ could not list the releases of {url}: {e}");
+                fetch_problem = Some(format!("could not list the releases of {url}: {e}"));
                 Vec::new()
             }
         },
-        _ => Vec::new(),
+        None => Vec::new(),
     };
-    recap(section, &releases, summarize::summarize)
+    Recap {
+        lines: recap(section, &releases, |text| {
+            if no_agent {
+                None
+            } else {
+                summarize::summarize(text)
+            }
+        }),
+        fetch_problem,
+    }
 }
 
 /// The recap from the changelog `section` of the sources, else from the notes
@@ -150,4 +182,19 @@ fn releases_between(all: &[RepoRelease], repo_url: &str, old: &str, new: &str) -
         .collect();
     between.sort_by(|a, b| version::sort_cmp(&b.0, &a.0));
     between.into_iter().map(|(_, r)| r).collect()
+}
+
+/// The release published for exactly `new`, if any.
+fn release_of(all: &[RepoRelease], repo_url: &str, new: &str) -> Vec<RepoRelease> {
+    let repo = ap_ecosystem::forge::parse(repo_url)
+        .map(|f| f.repo_name)
+        .unwrap_or_default();
+    all.iter()
+        .filter(|r| {
+            version::sort_cmp(&crate::sources::version_from_tag(&r.tag, &repo), new)
+                == Ordering::Equal
+        })
+        .take(1)
+        .cloned()
+        .collect()
 }

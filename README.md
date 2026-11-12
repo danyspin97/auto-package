@@ -285,6 +285,22 @@ applies is not looked up. A header-only change is never submitted. `lint` never
 replaces a patch: it writes the header and reports a moved request as
 `run update`.
 
+#### The recap in the `.changes` entry
+
+Under its `Update to <version>` bullet the entry lists what upstream says
+changed: the changelog section of the new source archive, else the notes of
+the releases between the old and the new version on the forge. Short bullet
+notes are listed as they are (each cut to 200 characters), long or prose notes
+are condensed by one model call, and when they stay too many the entry links
+the release pages or names the changelog file. `--no-agent` makes no model call
+and uses those links or that file line.
+
+A package packaged for the first time gets the recap of its own version only
+when it is a Rust package built from a `tar_scm` service, today. Other new
+packages keep the plain `Update to <version>` entry. A rerun of a first
+package whose spec already exists is not a new package (the spec existed
+before the run), so it gets no recap.
+
 ### Improving the quality of a whole project
 
 `lint` checks every package of an OBS project and fixes what it

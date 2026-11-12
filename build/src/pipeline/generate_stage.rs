@@ -354,6 +354,7 @@ pub(super) fn generate_spec_stage(
         is_maturin,
         is_rust,
         carried_from,
+        new_package: !spec_existed_before_generation,
     })
 }
 
@@ -421,6 +422,7 @@ pub(super) fn osc_service_stage(
 
             result?;
             step.finish(StepOutcome::Ok);
+            add_new_package_recap(ctx, spec.new_package);
         } else {
             // The source pass runs an existing `_service` that makes the source
             // (see `source_pass`), before the sdist is unpacked.

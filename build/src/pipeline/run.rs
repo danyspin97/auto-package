@@ -421,6 +421,8 @@ pub(super) struct SpecInfo {
     /// The version whose recipe this spec carries forward, when a version bump
     /// kept the existing spec instead of regenerating it.
     pub(super) carried_from: Option<String>,
+    /// The package had no spec before this run: it is packaged for the first time.
+    pub(super) new_package: bool,
 }
 
 /// Whether a round of the validate/build loop moves on or goes around again.
