@@ -26,7 +26,7 @@ pub fn latest_revision(history_xml: &str) -> Option<LatestRevision> {
         let from = entry.find(&open)? + open.len();
         let to = from + entry[from..].find(&format!("</{tag}>"))?;
         Some(
-            entry[from..to]
+            crate::obs_xml::unescape(&entry[from..to])
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" "),

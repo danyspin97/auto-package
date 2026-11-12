@@ -132,3 +132,34 @@ fn the_recorded_expanded_revision_passes_the_restore_guard() {
     .unwrap();
     assert!(may_restore_over(&head, EXPANDED, &[head.clone()]));
 }
+
+/// A history with one commit whose comment is `message` as OBS stores it.
+fn history_of(message: &str) -> String {
+    format!(
+        "<revisionlist><revision rev=\"5\" vrev=\"2\"><srcmd5>{SOURCE}</srcmd5>\
+         <user>jdoe</user><time>1794239724</time><comment>{}</comment></revision></revisionlist>",
+        crate::obs_xml::escape(message).replace('\'', "&apos;")
+    )
+}
+
+#[test]
+fn a_message_with_xml_special_characters_matches_its_escaped_comment() {
+    let message = "auto-package: Fix \"quoted\" it's a & b <c> \u{e9}\u{4e2d}";
+    let source = commit_source(&history_of(message), "jdoe", message).unwrap();
+    assert_eq!(source.srcmd5, SOURCE);
+}
+
+#[test]
+fn a_numeric_entity_in_the_comment_is_decoded() {
+    let history = history_of("x").replace(">x<", ">say &#34;hi&#x22; &#233;<");
+    let source = commit_source(&history, "jdoe", "say \"hi\" \u{e9}").unwrap();
+    assert_eq!(source.rev, "5");
+}
+
+#[test]
+fn a_message_cut_at_100_characters_next_to_a_quote_matches() {
+    let message = format!("auto-package: {}\"{}", "a".repeat(84), "b");
+    let cut: String = message.chars().take(100).collect();
+    assert_eq!(cut.chars().count(), 100);
+    assert!(commit_source(&history_of(&cut), "jdoe", &cut).is_some());
+}
