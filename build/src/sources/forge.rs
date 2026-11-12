@@ -249,7 +249,7 @@ pub(super) fn gh_api_path_ok(path: &str) -> bool {
 ///
 /// Non-GitHub URLs (gitlab, gitea, forgejo) stay on the raw HTTP path —
 /// `gh` doesn't speak them.
-pub(super) fn try_gh_api(url: &str) -> Option<Result<String, String>> {
+pub(super) fn try_gh_api(url: &str) -> Option<Result<String, super::gh_login::GhFailure>> {
     // Only usable for GitHub API URLs. Keep the match deliberately strict
     // so an unrelated `api.github.com`-mentioning path (e.g. a
     // documentation link in a diag message that happens to come through
@@ -300,7 +300,10 @@ pub(super) fn try_gh_api(url: &str) -> Option<Result<String, String>> {
 
     if out.code != 0 {
         let stderr = out.stderr.trim().to_string();
-        return Some(Err(format!(
+        if super::gh_login::is_not_logged_in(&stderr) {
+            return Some(Err(super::gh_login::GhFailure::NotLoggedIn));
+        }
+        return Some(Err(super::gh_login::GhFailure::Failed(format!(
             "gh api {path}: {}{}",
             if stderr.is_empty() {
                 format!("exit {}", out.code)
@@ -317,7 +320,7 @@ pub(super) fn try_gh_api(url: &str) -> Option<Result<String, String>> {
             } else {
                 ""
             }
-        )));
+        ))));
     }
 
     Some(Ok(out.stdout))
@@ -521,14 +524,11 @@ fn get_json_hops(
     check: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<serde_json::Value, String> {
     // Prefer `gh api` for GitHub URLs when it's installed — see
-    // `try_gh_api`'s doc comment for the three reasons.
-    if let Some(result) = try_gh_api(url) {
-        let body = result?;
-        return serde_json::from_str(&body).map_err(|e| format!("{url}: {e}"));
-    }
-
-    let body = super::redirects::http_get_text(url, check)?;
-    serde_json::from_str(&body).map_err(|e| format!("{url}: {e}"))
+    // `try_gh_api`'s doc comment for the three reasons. A `gh` that is not
+    // logged in falls back to the raw request.
+    super::gh_login::get_json_via(url, &try_gh_api, &|u| {
+        super::redirects::http_get_text(u, check)
+    })
 }
 
 /// The first `tag_name` (or `name`, for a bare tag list) in a forge response,

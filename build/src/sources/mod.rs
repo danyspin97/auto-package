@@ -24,6 +24,7 @@ mod fetch_tests;
 mod forge;
 #[cfg(test)]
 mod forge_urls;
+mod gh_login;
 #[cfg(test)]
 mod helpers;
 #[cfg(test)]
