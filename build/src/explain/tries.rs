@@ -226,6 +226,7 @@ fn failure_label(c: &BuildFailure) -> String {
         BuildFailure::BuildFailed => "BuildFailed".into(),
         BuildFailure::InstallFailed => "InstallFailed".into(),
         BuildFailure::CheckFailed => "CheckFailed".into(),
+        BuildFailure::FilesNotOwned { .. } => "FilesNotOwned".into(),
         BuildFailure::UnresolvableDeps { packages } => {
             format!("UnresolvableDeps: {}", packages.join(", "))
         }

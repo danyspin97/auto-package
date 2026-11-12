@@ -346,6 +346,44 @@ fn a_failure_note_round_trips_and_an_absent_one_is_not_written() {
 }
 
 #[test]
+fn a_build_failed_line_from_before_files_not_owned_still_parses() {
+    let old =
+        r#"{"event":"build_failed","step":2,"classification":"InstallFailed","log":"/w/log.txt"}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        e,
+        Event::BuildFailed {
+            classification: BuildFailure::InstallFailed,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn files_not_owned_has_its_wire_form_and_round_trips() {
+    let e = Event::BuildFailed {
+        step: StepId(2),
+        classification: BuildFailure::FilesNotOwned {
+            paths: vec!["/usr/share/wayland-sessions".into()],
+        },
+        log: "/w/log.txt".into(),
+    };
+    let text = serde_json::to_string(&e).unwrap();
+    assert_eq!(
+        text,
+        r#"{"event":"build_failed","step":2,"classification":{"FilesNotOwned":{"paths":["/usr/share/wayland-sessions"]}},"log":"/w/log.txt"}"#
+    );
+    let back: Event = serde_json::from_str(&text).unwrap();
+    match back {
+        Event::BuildFailed {
+            classification: BuildFailure::FilesNotOwned { paths },
+            ..
+        } => assert_eq!(paths, ["/usr/share/wayland-sessions"]),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_package_finished_line_without_a_note_still_parses() {
     let old = r#"{"event":"package_finished","pkg":"python-foo","version":"1.0","outcome":{"Failed":{"reason":"boom","disk_full":false,"remedy":null}}}"#;
     let e: Event = serde_json::from_str(old).unwrap();

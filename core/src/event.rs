@@ -125,13 +125,25 @@ pub enum SelectionReason {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BuildFailure {
-    RpmParseError { line: Option<u32>, message: String },
+    RpmParseError {
+        line: Option<u32>,
+        message: String,
+    },
     PrepFailed,
     BuildFailed,
     InstallFailed,
     CheckFailed,
-    UnresolvableDeps { packages: Vec<String> },
-    Unclassified { raw: String },
+    /// rpm's post-build check found directories no package owns: `paths` are
+    /// the unowned directories, in the order the log names them.
+    FilesNotOwned {
+        paths: Vec<String>,
+    },
+    UnresolvableDeps {
+        packages: Vec<String>,
+    },
+    Unclassified {
+        raw: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -212,6 +212,9 @@ impl HumanSink {
                     crate::event::BuildFailure::BuildFailed => "build failed".to_string(),
                     crate::event::BuildFailure::InstallFailed => "install failed".to_string(),
                     crate::event::BuildFailure::CheckFailed => "check failed".to_string(),
+                    crate::event::BuildFailure::FilesNotOwned { .. } => {
+                        "files not owned".to_string()
+                    }
                     crate::event::BuildFailure::UnresolvableDeps { packages } => {
                         format!("unresolvable deps: {}", packages.join(", "))
                     }
