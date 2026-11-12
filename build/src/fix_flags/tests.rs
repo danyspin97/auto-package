@@ -45,7 +45,8 @@ fn a_blocked_answer_survives_later_commits() {
     settle(&mut st, "r3", vec![]);
     assert_eq!(st.fix_flags.len(), 3, "{:?}", st.fix_flags);
     assert!(st.fix_flags.contains(&FixFlag::Blocked {
-        why: "no tests".into()
+        why: "no tests".into(),
+        run_id: Some("r2".into())
     }));
 }
 
@@ -384,7 +385,7 @@ fn a_new_package_built_from_a_wheel_is_not_a_switch() {
 #[test]
 fn a_line_is_one_line_and_capped() {
     let why = "word ".repeat(200);
-    let line = FixFlag::Blocked { why }.line();
+    let line = FixFlag::Blocked { why, run_id: None }.line();
     assert!(!line.contains('\n'));
     assert!(line.chars().count() <= LINE_CAP + "FLAG: a fix turn answered blocked: ...".len());
     assert!(line.ends_with("..."));
@@ -400,7 +401,8 @@ fn settle_keeps_blocked_answers_and_the_spec_flags_of_earlier_commits() {
         st.fix_flags,
         vec![
             FixFlag::Blocked {
-                why: "no gcc".into()
+                why: "no gcc".into(),
+                run_id: Some("r1".into())
             },
             FixFlag::CheckRemoved
         ]
@@ -439,4 +441,42 @@ fn the_state_round_trips_the_flags() {
     let text = serde_json::to_string(&st).unwrap();
     let back: PkgState = serde_json::from_str(&text).unwrap();
     assert_eq!(back.fix_flags, st.fix_flags);
+}
+
+#[test]
+fn only_a_later_run_clears_a_blocked_flag_and_other_kinds_stay() {
+    let mut st = PkgState::default();
+    settle(&mut st, "r1", vec![FixFlag::CheckRemoved]);
+    add_blocked(&mut st, "r1", "no toolchain".into());
+    assert!(!clear_blocked_of_earlier_runs(&mut st, "r1"));
+    assert_eq!(st.fix_flags.len(), 2);
+    assert!(clear_blocked_of_earlier_runs(&mut st, "r2"));
+    assert_eq!(st.fix_flags, vec![FixFlag::CheckRemoved]);
+    assert!(!clear_blocked_of_earlier_runs(&mut st, "r3"));
+}
+
+#[test]
+fn a_blocked_again_answer_replaces_the_old_flag_with_the_new_run_id() {
+    let mut st = PkgState::default();
+    add_blocked(&mut st, "r1", "no toolchain".into());
+    add_blocked(&mut st, "r2", "no toolchain".into());
+    assert_eq!(
+        st.fix_flags,
+        vec![FixFlag::Blocked {
+            why: "no toolchain".into(),
+            run_id: Some("r2".into())
+        }]
+    );
+}
+
+#[test]
+fn a_blocked_flag_is_one_scrubbed_line() {
+    let flag = FixFlag::Blocked {
+        why: "per convention 3,\n the service  cannot run".into(),
+        run_id: None,
+    };
+    let line = flag.line();
+    assert!(!line.contains('\n') && !line.contains("  "), "{line}");
+    assert!(!line.contains("convention 3"), "{line}");
+    assert!(line.starts_with("FLAG: a fix turn answered blocked: "));
 }

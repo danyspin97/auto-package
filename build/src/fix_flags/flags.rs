@@ -10,8 +10,13 @@ pub enum FixFlag {
     CheckRemoved,
     /// The package is built from the upstream wheel `wheel`, not from source.
     WheelSwitch { wheel: String },
-    /// A fix turn answered `blocked`; `why` is the reason it gave.
-    Blocked { why: String },
+    /// A fix turn answered `blocked`; `why` is the reason it gave and `run_id`
+    /// the run whose turn it was (`None` in a state written before the field).
+    Blocked {
+        why: String,
+        #[serde(default)]
+        run_id: Option<String>,
+    },
 }
 
 /// Longest a flag's text is kept on its one line.
@@ -29,7 +34,10 @@ impl FixFlag {
             FixFlag::WheelSwitch { wheel } => {
                 format!("FLAG: built from the upstream wheel {wheel}, not from source")
             }
-            FixFlag::Blocked { why } => format!("FLAG: a fix turn answered blocked: {why}"),
+            FixFlag::Blocked { why, .. } => format!(
+                "FLAG: a fix turn answered blocked: {}",
+                ap_core::user_text::scrub_internal_refs(why)
+            ),
         };
         one_line(&text)
     }
@@ -47,8 +55,30 @@ pub(crate) fn one_line(text: &str) -> String {
 
 /// Records a `blocked` answer of `run_id`.
 pub fn add_blocked(st: &mut PkgState, run_id: &str, why: String) {
-    add(st, FixFlag::Blocked { why });
+    // The flag says what the latest blocked turn answered: an earlier run's
+    // answer, and this run's earlier one, give way to it.
+    st.fix_flags
+        .retain(|f| !matches!(f, FixFlag::Blocked { .. }));
+    add(
+        st,
+        FixFlag::Blocked {
+            why,
+            run_id: Some(run_id.to_string()),
+        },
+    );
     st.fix_flags_run_id = Some(run_id.to_string());
+}
+
+/// Drops the `blocked` flags an earlier run than `run_id` recorded, for an
+/// agent turn of `run_id` that was not blocked. A flag of `run_id` itself stays:
+/// a turn of the run that was blocked is not undone by one that was not. True
+/// when a flag was removed.
+pub fn clear_blocked_of_earlier_runs(st: &mut PkgState, run_id: &str) -> bool {
+    let before = st.fix_flags.len();
+    st.fix_flags.retain(
+        |f| !matches!(f, FixFlag::Blocked { run_id: r, .. } if r.as_deref() != Some(run_id)),
+    );
+    st.fix_flags.len() != before
 }
 
 /// Adds `flag` unless it is already recorded. Tests skipped by an earlier

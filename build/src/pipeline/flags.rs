@@ -20,6 +20,25 @@ pub(super) fn start_flags_for_version(ws: &Workspace, version: &str, reporter: &
     });
 }
 
+/// Drops the `blocked` flags of earlier runs of `rpm_name`, after an agent
+/// turn of this run that was not blocked. The state is written only when a
+/// flag goes.
+pub(super) fn clear_blocked_flags(
+    config: &PipelineConfig,
+    rpm_name: &str,
+    reporter: &dyn Reporter,
+) {
+    let Ok(ws) = Workspace::open(&config.state_root, rpm_name) else {
+        return;
+    };
+    let mut probe = PkgState::load(&ws);
+    if crate::fix_flags::clear_blocked_of_earlier_runs(&mut probe, &config.run_id) {
+        update_state(&ws, reporter, |st| {
+            crate::fix_flags::clear_blocked_of_earlier_runs(st, &config.run_id);
+        });
+    }
+}
+
 /// Records the risk flags of the change about to be committed: what OBS holds
 /// (`baseline`) against the files on disk. Read from the files, not from what
 /// the agent said.

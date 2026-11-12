@@ -557,14 +557,19 @@ pub(super) fn apply_turn_and_reset(
     sdist_top_level: &mut String,
     from_repo_archive: &mut bool,
 ) -> Result<TurnEffect, TurnError> {
-    apply_turn_and_reset_with(
+    // The agent-driven path: a turn that was not blocked drops the blocked
+    // flags of earlier runs. Mechanical callers use `_with` and never do.
+    let (config, rpm_name) = (ctx.config, ctx.rpm_name);
+    let effect = apply_turn_and_reset_with(
         ctx,
         outcome,
         reporter,
         sdist_top_level,
         from_repo_archive,
         &fetch_release_json,
-    )
+    )?;
+    clear_blocked_flags(config, rpm_name, reporter);
+    Ok(effect)
 }
 
 /// [`apply_turn_and_reset`] with the PyPI lookup of a wheel switch given.
