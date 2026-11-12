@@ -163,6 +163,7 @@ pub(crate) fn config(pkg: &str, state_root: &Path) -> PipelineConfig {
         failed_deps: Vec::new(),
         unknown_build_system: false,
         unbuildable_deps: Vec::new(),
+        request_text: None,
         run_id: "test".into(),
         source_urls: Default::default(),
         python_flavors: Default::default(),

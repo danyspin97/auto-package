@@ -43,6 +43,7 @@ pub(crate) fn as_dependency(config: &PipelineConfig) -> PipelineConfig {
         // Per-run evidence shared by every package of the run.
         failed_deps: config.failed_deps.clone(),
         unbuildable_deps: config.unbuildable_deps.clone(),
+        request_text: None,
         run_id: config.run_id.clone(),
         source_urls: config.source_urls.clone(),
         python_flavors: config.python_flavors.clone(),
@@ -130,6 +131,7 @@ mod tests {
             failed_deps: Vec::new(),
             unknown_build_system: true,
             unbuildable_deps: Vec::new(),
+            request_text: None,
             run_id: "test".into(),
             source_urls: Default::default(),
             python_flavors: Default::default(),

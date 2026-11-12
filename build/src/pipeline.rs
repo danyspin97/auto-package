@@ -126,6 +126,10 @@ pub struct PipelineConfig {
     /// recipe the checkout holds can build it, so no spec is generated for it,
     /// and it is not a Python package whatever its RPM name says.
     pub unknown_build_system: bool,
+    /// The text the package was requested as (a name, `pypi:<name>` or a
+    /// repository URL), for commands the failure texts suggest. `None` for a
+    /// dependency, which nobody requested.
+    pub request_text: Option<String>,
 }
 mod state;
 pub use state::*;

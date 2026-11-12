@@ -170,6 +170,7 @@ pub(crate) fn cmd_build(
         failed_deps: Vec::new(),
         unknown_build_system,
         unbuildable_deps: Vec::new(),
+        request_text: Some(request_name.clone()),
     };
 
     let mut config = config;
