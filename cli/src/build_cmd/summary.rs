@@ -181,7 +181,8 @@ pub(crate) fn print_run_summary(memory: &MemorySink, state_root: &Path) -> Strin
     // How many builds each package needed in this run: the packages not built,
     // or built only after three or more tries, are listed.
     let tries = ap_build::explain::per_package(&memory.tries_records());
-    out.push_str(&ap_build::explain::summary_block(&tries));
+    let width = ap_core::sink::terminal_width(ap_core::sink::stdout_colour());
+    out.push_str(&ap_build::explain::summary_block(&tries, width));
 
     let mut queued: Vec<(&String, Vec<String>)> = latest
         .iter()

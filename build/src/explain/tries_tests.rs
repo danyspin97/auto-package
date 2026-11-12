@@ -1,4 +1,5 @@
 use super::*;
+use unicode_width::UnicodeWidthStr;
 
 fn start(pkg: &str, step: u32, attempt: u32, round: u32) -> String {
     format!(
@@ -192,7 +193,7 @@ fn an_already_built_package_with_no_build_is_not_counted() {
     assert_eq!(distribution(&all), Distribution::default());
     assert!(flagged(&all).is_empty());
     assert!(!ran_a_build(&all));
-    assert_eq!(summary_block(&all), "");
+    assert_eq!(summary_block(&all, 100), "");
 }
 
 #[test]
@@ -264,21 +265,19 @@ fn the_summary_lists_at_most_twenty_five_lines_of_packages() {
         })
         .collect();
     let all = tries(&lines);
-    let block = summary_block(&all);
+    let block = summary_block(&all, 100);
     let mut it = block.lines();
     assert_eq!(it.next(), Some(""));
-    assert_eq!(
-        it.next(),
-        Some("Tries to build: 1 try: 0, 2 tries: 0, 3+ tries: 0, not built: 30")
-    );
+    assert_eq!(it.next(), Some("Tries to build (30):"));
+    assert_eq!(it.next(), Some("  not built: 30"));
     let listed: Vec<&str> = it.collect();
     assert_eq!(listed.len(), SUMMARY_LINES);
-    assert_eq!(listed.last(), Some(&"  ... and 6 more"));
+    assert_eq!(listed.last(), Some(&"    ... and 6 more"));
 }
 
 #[test]
 fn the_summary_block_is_empty_when_no_package_ran_a_build() {
-    assert_eq!(summary_block(&[]), "");
+    assert_eq!(summary_block(&[], 100), "");
 }
 
 #[test]
@@ -344,4 +343,112 @@ fn the_project_of_a_whole_run_view_is_the_work_dir_when_it_holds_runs() {
     let t = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(t.path().join("runs")).unwrap();
     assert_eq!(resolve_run_dir(t.path(), None, "x86_64").unwrap(), t.path());
+}
+
+/// The lines of a package built on try `tries`, its earlier tries failing
+/// with the classification `failure`.
+fn built_on_try(pkg: &str, tries: u32, failure: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for k in 1..tries {
+        lines.push(start(pkg, k, k, k - 1));
+        lines.push(step_end(pkg, k, "Failed"));
+        lines.push(build_failed(pkg, k, &format!("\"{failure}\"")));
+    }
+    lines.push(start(pkg, tries, tries, tries - 1));
+    lines.push(step_end(pkg, tries, "Ok"));
+    lines.push(finished(pkg, BUILT));
+    lines
+}
+
+/// The lines of a package whose one build failed with `reason`.
+fn never_built(pkg: &str, reason: &str) -> Vec<String> {
+    vec![
+        start(pkg, 1, 1, 0),
+        step_end(pkg, 1, "Failed"),
+        build_failed(pkg, 1, r#""BuildFailed""#),
+        finished(pkg, &format!(r#"{{"Failed":{{"reason":"{reason}"}}}}"#)),
+    ]
+}
+
+#[test]
+fn the_summary_block_with_one_bucket_prints_only_that_bucket() {
+    let all = tries(&built_on_try("foo", 1, "BuildFailed"));
+    assert_eq!(
+        summary_block(&all, 100),
+        "\nTries to build (1):\n  1 try: 1\n"
+    );
+}
+
+#[test]
+fn the_summary_block_lists_only_the_buckets_that_are_not_empty() {
+    let mut lines = built_on_try("a", 1, "BuildFailed");
+    lines.extend(built_on_try("b", 2, "BuildFailed"));
+    lines.extend(built_on_try("c", 3, "InstallFailed"));
+    lines.extend(never_built("d", "x"));
+    let all = tries(&lines);
+    assert_eq!(
+        summary_block(&all, 100),
+        "\nTries to build (4):\n  1 try: 1, 2 tries: 1, 3+ tries: 1, not built: 1\n\
+         \x20   c  3 tries, built · last failed try: install failed\n\
+         \x20   d  1 try, not built [build failed] · x\n"
+    );
+}
+
+#[test]
+fn the_users_sample_reads_as_planned() {
+    let all = tries(&built_on_try("jay-compositor", 4, "InstallFailed"));
+    assert_eq!(
+        summary_block(&all, 100),
+        "\nTries to build (1):\n  3+ tries: 1\n    jay-compositor  4 tries, built · last failed try: install failed\n"
+    );
+}
+
+#[test]
+fn a_no_result_package_says_it_has_no_result() {
+    let lines = vec![start("pkg", 1, 1, 0), step_end("pkg", 1, "Ok")];
+    let block = summary_block(&tries(&lines), 100);
+    assert!(
+        block.contains("    pkg  1 try, no result · no package_finished: the run was"),
+        "{block}"
+    );
+}
+
+#[test]
+fn wide_names_align_by_display_width() {
+    let mut lines = built_on_try("日本語", 3, "BuildFailed");
+    lines.extend(built_on_try("ab", 3, "BuildFailed"));
+    let block = summary_block(&tries(&lines), 100);
+    let rows: Vec<&str> = block.lines().skip(3).collect();
+    assert_eq!(
+        rows,
+        vec![
+            "    ab      3 tries, built · last failed try: build failed",
+            "    日本語  3 tries, built · last failed try: build failed",
+        ]
+    );
+    let column = |row: &str| {
+        let at = row.find("3 tries").unwrap();
+        UnicodeWidthStr::width(&row[..at])
+    };
+    assert_eq!(column(rows[0]), column(rows[1]));
+}
+
+#[test]
+fn a_narrow_width_wraps_the_detail_under_its_column() {
+    let all = tries(&never_built(
+        "pkg",
+        "UnresolvableDeps: libfoo, libbar, libbaz, libqux, libquux",
+    ));
+    let block = summary_block(&all, 40);
+    for line in block.lines() {
+        assert!(UnicodeWidthStr::width(line) <= 40, "{line}");
+    }
+    assert!(block.lines().count() > 4, "{block}");
+    let words: Vec<&str> = block.split_whitespace().collect();
+    assert!(
+        words
+            .join(" ")
+            .contains("unresolvable deps: libfoo, libbar, libbaz, libqux, libquux"),
+        "{block}"
+    );
 }

@@ -14,8 +14,13 @@
 use std::collections::BTreeMap;
 
 use ap_core::event::{BuildFailure, Event, PackageOutcome, StepKind, StepOutcome};
+use ap_core::sink::pad_to;
 use serde::Serialize;
 use serde_json::Value;
+use unicode_width::UnicodeWidthStr;
+
+use super::humanise::humanise;
+use super::render::wrap;
 
 /// How many lines the summary's list of packages takes at most.
 pub const SUMMARY_LINES: usize = 25;
@@ -341,30 +346,90 @@ pub fn describe(p: &PkgTries) -> String {
     }
 }
 
-/// The block the end-of-run summary prints: the distribution, then the
-/// [`flagged`] packages, at most [`SUMMARY_LINES`] lines of them. Empty when no
-/// package ran a build.
-pub fn summary_block(pkgs: &[PkgTries]) -> String {
+/// The block the end-of-run summary prints: a heading with how many packages
+/// were tried, the buckets of their tries that are not empty, then the
+/// [`flagged`] packages, at most [`SUMMARY_LINES`] lines of them, wrapped to
+/// `width`. Empty when no package ran a build.
+pub fn summary_block(pkgs: &[PkgTries], width: usize) -> String {
     use std::fmt::Write as _;
     if !ran_a_build(pkgs) {
         return String::new();
     }
     let d = distribution(pkgs);
-    let mut out = format!(
-        "\nTries to build: 1 try: {}, 2 tries: {}, 3+ tries: {}, not built: {}\n",
-        d.one, d.two, d.three_plus, d.not_built
-    );
+    let total = d.one + d.two + d.three_plus + d.not_built;
+    if total == 0 {
+        return String::new();
+    }
+    let mut out = format!("\nTries to build ({total}):\n");
+    let buckets: Vec<String> = [
+        ("1 try", d.one),
+        ("2 tries", d.two),
+        ("3+ tries", d.three_plus),
+        ("not built", d.not_built),
+    ]
+    .iter()
+    .filter(|(_, n)| *n > 0)
+    .map(|(label, n)| format!("{label}: {n}"))
+    .collect();
+    let _ = writeln!(out, "  {}", buckets.join(", "));
+
     let flagged = flagged(pkgs);
     let shown = if flagged.len() > SUMMARY_LINES {
         SUMMARY_LINES - 1
     } else {
         flagged.len()
     };
-    for p in &flagged[..shown] {
-        let _ = writeln!(out, "  {}", describe(p));
+    let listed = &flagged[..shown];
+    let name_width = listed
+        .iter()
+        .map(|p| UnicodeWidthStr::width(p.pkg.as_str()))
+        .max()
+        .unwrap_or(0);
+    let column = 4 + name_width + 2;
+    for p in listed {
+        let detail = row_detail(p);
+        let lines = wrap(&detail, width.saturating_sub(column));
+        let mut lines = lines.iter();
+        let first = lines.next().map(String::as_str).unwrap_or_default();
+        let _ = writeln!(out, "    {}  {first}", pad_to(&p.pkg, name_width));
+        for line in lines {
+            let _ = writeln!(out, "{}{line}", " ".repeat(column));
+        }
     }
     if flagged.len() > shown {
-        let _ = writeln!(out, "  ... and {} more", flagged.len() - shown);
+        let _ = writeln!(out, "    ... and {} more", flagged.len() - shown);
     }
     out
+}
+
+/// The detail of a package's row in the summary: its tries, its outcome and
+/// the reason, with the failure kinds worded by [`humanise`].
+fn row_detail(p: &PkgTries) -> String {
+    let n = match p.tries {
+        1 => "1 try".to_string(),
+        n => format!("{n} tries"),
+    };
+    let shape = p
+        .shape
+        .as_ref()
+        .map(|s| format!(" [{}]", humanise(s)))
+        .unwrap_or_default();
+    match p.outcome {
+        TriesOutcome::Built => match &p.reason {
+            Some(r) => format!("{n}, built · last failed try: {}", humanise(r)),
+            None => format!("{n}, built"),
+        },
+        TriesOutcome::NotBuilt | TriesOutcome::NoResult => {
+            let what = match p.outcome {
+                TriesOutcome::NoResult => "no result",
+                _ => "not built",
+            };
+            let why = p
+                .reason
+                .as_deref()
+                .map_or_else(|| "no reason recorded".to_string(), humanise);
+            format!("{n}, {what}{shape} · {why}")
+        }
+        TriesOutcome::AlreadyBuilt => format!("{n}, already built"),
+    }
 }

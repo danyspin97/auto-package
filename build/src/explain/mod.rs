@@ -18,6 +18,9 @@ mod collect;
 mod detail;
 #[cfg(test)]
 mod detail_tests;
+mod humanise;
+#[cfg(test)]
+mod humanise_tests;
 mod logs;
 mod model;
 mod parse;
