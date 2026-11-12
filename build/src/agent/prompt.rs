@@ -72,6 +72,11 @@ pub(super) const STATIC_WORKFLOW: &str = r#"
 CRITICAL: NEVER delete the spec file completely. You can edit it, but it must
 remain present. Deleting it will break the build system.
 
+The licence header at the top of the spec (the `# spec file for package` and
+`# Copyright (c)` comment block) is added by auto-package when a spec has none.
+Never remove it, reword it or change its holder or year; when you rewrite the
+top of the spec, keep the block as it is.
+
 ### Finding Missing C Headers and Libraries
 
 When a build fails with "fatal error: <header.h>: No such file or directory" or

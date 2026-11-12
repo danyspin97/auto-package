@@ -22,6 +22,7 @@ mod review_tools;
 mod rust_cargo_skill;
 mod scrub;
 mod service_revision;
+mod spec_header_text;
 mod stub;
 mod text;
 mod tools;
