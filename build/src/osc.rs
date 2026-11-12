@@ -80,6 +80,8 @@ mod spec_file_name_tests;
 pub use changes::*;
 mod changes_author;
 pub use changes_author::*;
+mod changes_author_profile;
+pub use changes_author_profile::*;
 #[cfg(test)]
 mod changes_author_tests;
 mod changes_dates;

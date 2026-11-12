@@ -1,4 +1,5 @@
 use super::changes_author::*;
+use super::changes_author_profile::*;
 use std::collections::BTreeMap;
 
 const SEP: &str = "-------------------------------------------------------------------";
@@ -251,4 +252,60 @@ fn a_checkout_resolves_against_its_own_api_section() {
     assert_eq!(who(None), "Default Name <d@example.org>");
     let bare = tempfile::tempdir().unwrap();
     assert_eq!(who(Some(bare.path())), "Default Name <d@example.org>");
+}
+
+#[test]
+fn a_person_document_is_read() {
+    let xml = "<person><login>jdoe</login><email>j&amp;d@example.org</email><realname> Jo Doe </realname></person>";
+    assert_eq!(
+        parse_person(xml),
+        ObsProfile {
+            realname: Some("Jo Doe".into()),
+            email: Some("j&d@example.org".into())
+        }
+    );
+    assert_eq!(
+        parse_person("<person><email/></person>"),
+        ObsProfile::default()
+    );
+}
+
+#[test]
+fn control_characters_decoded_from_the_profile_make_the_name_unusable() {
+    for xml in [
+        "<person><realname>Jo&#0;Doe</realname><email>j@example.org</email></person>",
+        "<person><realname>Jo&#9;Doe</realname><email>j@example.org</email></person>",
+        "<person><realname>Jo&#8232;Doe</realname><email>j@example.org</email></person>",
+    ] {
+        let p = parse_person(xml);
+        let lookup = move |_: &str, _: &str| Ok(p.clone());
+        assert!(
+            resolve_author(&env(&[]), RC_USER, None, &lookup).is_err(),
+            "{xml}"
+        );
+    }
+}
+
+#[test]
+fn a_profile_is_asked_once_and_a_failure_is_kept() {
+    let calls = std::cell::Cell::new(0);
+    let ok = |_: &str, _: &str| {
+        calls.set(calls.get() + 1);
+        Ok(ObsProfile::default())
+    };
+    answer_once("https://cache-test.example.org", "u1", &ok).unwrap();
+    answer_once("https://cache-test.example.org", "u1", &ok).unwrap();
+    assert_eq!(calls.get(), 1);
+    answer_once("https://cache-test.example.org", "u2", &ok).unwrap();
+    assert_eq!(calls.get(), 2);
+
+    let failing = |_: &str, _: &str| {
+        calls.set(calls.get() + 1);
+        Err("timed out".to_string())
+    };
+    for _ in 0..3 {
+        let e = answer_once("https://cache-test.example.org", "u3", &failing).unwrap_err();
+        assert_eq!(e, "timed out");
+    }
+    assert_eq!(calls.get(), 3);
 }

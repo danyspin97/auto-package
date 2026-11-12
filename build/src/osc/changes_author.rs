@@ -3,6 +3,7 @@
 //! An RPM changelog needs `Name <email>`; without a name and an address rpmlint
 //! reports `no-changelogname-tag`, so a placeholder is never written.
 
+use super::changes_author_profile::fetch_profile;
 use super::run_start_copy;
 use crate::service_sandbox::{oscrc_identity, oscrc_paths, oscrc_user};
 use std::collections::BTreeSet;
@@ -220,13 +221,8 @@ pub fn resolve_author_for(
     resolve_author(env, oscrc, apiurl.as_deref(), profile)
 }
 
-/// The profile lookup of a host that reads none: nothing to add.
-fn no_profile(_apiurl: &str, _user: &str) -> Result<ObsProfile, String> {
-    Ok(ObsProfile::default())
-}
-
-/// [`resolve_author_for`] with this machine's environment and oscrc; the OBS
-/// profile is not read.
+/// [`resolve_author_for`] with this machine's environment and oscrc and the
+/// OBS profile (read once per run).
 pub fn host_author(checkout: Option<&Path>) -> Result<Author, String> {
     let oscrc = oscrc_paths()
         .into_iter()
@@ -236,7 +232,7 @@ pub fn host_author(checkout: Option<&Path>) -> Result<Author, String> {
         checkout,
         &|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()),
         &oscrc,
-        &no_profile,
+        &fetch_profile,
     )
 }
 
