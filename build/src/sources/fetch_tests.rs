@@ -506,3 +506,52 @@ pub(super) fn a_value_that_is_neither_is_rejected_rather_than_guessed() {
     assert!(SourceMap::parse_arg("just-a-name", "root").is_err());
     assert!(SourceMap::parse_arg("pkg=", "root").is_err());
 }
+
+/// The refusal hint names the variable the host reads, and no other host's.
+#[test]
+pub(super) fn the_rate_limit_hint_names_the_token_of_the_host() {
+    let gh = rate_limit_hint(Some("api.github.com"), false);
+    assert!(
+        gh.contains("GITHUB_TOKEN") && gh.contains("gh auth login"),
+        "{gh}"
+    );
+    assert!(!gh.contains("GITLAB_TOKEN"), "{gh}");
+    let gh_authed = rate_limit_hint(Some("api.github.com"), true);
+    assert!(
+        gh_authed.contains("rate-limited") && gh_authed.contains("rotate"),
+        "{gh_authed}"
+    );
+    assert!(!gh_authed.contains("GITLAB_TOKEN"), "{gh_authed}");
+    let gl = rate_limit_hint(Some("gitlab.com"), false);
+    assert!(
+        gl.contains("set GITLAB_TOKEN") && !gl.contains("GITHUB_TOKEN"),
+        "{gl}"
+    );
+    let gl_authed = rate_limit_hint(Some("gitlab.com"), true);
+    assert!(
+        gl_authed.contains("GITLAB_TOKEN") && gl_authed.contains("rotate"),
+        "{gl_authed}"
+    );
+}
+
+/// Codeberg and other Gitea hosts take no token here: the hint says to wait.
+#[test]
+pub(super) fn the_codeberg_rate_limit_hint_does_not_ask_for_a_token() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let msg = describe_forge_http_error(
+        "https://codeberg.org/api/v1/repos/search?q=jay",
+        &ForgeError::RateLimited {
+            status: 429,
+            retry_after: None,
+        },
+    );
+    assert!(
+        msg.contains("rate-limited") && msg.contains("try again later"),
+        "{msg}"
+    );
+    assert!(!msg.contains("TOKEN"), "{msg}");
+    assert_eq!(
+        rate_limit_hint(None, false),
+        rate_limit_hint(Some("codeberg.org"), false)
+    );
+}

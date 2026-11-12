@@ -341,12 +341,7 @@ pub(super) fn forge_auth_header(url: &str) -> Option<(&'static str, String)> {
         return first_set(&["GITHUB_TOKEN", "GH_TOKEN"])
             .map(|tok| ("Authorization", format!("Bearer {tok}")));
     }
-    let self_hosted = std::env::var("GITLAB_HOST").ok().map(|h| {
-        h.trim_start_matches("https://")
-            .trim_end_matches('/')
-            .to_ascii_lowercase()
-    });
-    if host == "gitlab.com" || self_hosted.as_deref() == Some(host.as_str()) {
+    if is_gitlab_host(&host) {
         return gitlab_auth(|v| first_set(&[v]));
     }
     None
@@ -451,30 +446,10 @@ impl std::fmt::Display for ForgeError {
 /// preferred for GitHub and has its own friendlier errors (see
 /// [`try_gh_api`]).
 pub(super) fn describe_forge_http_error(url: &str, err: &ForgeError) -> String {
-    let authed = forge_auth_header(url).is_some();
-    let github = crate::http::host_of(url).as_deref() == Some("api.github.com");
+    let host = crate::http::host_of(url);
     if err.is_refusal() {
-        if authed {
-            format!(
-                "{url}: {err} (your GITHUB_TOKEN/GITLAB_TOKEN is being \
-                 rate-limited — wait or rotate to a token with a higher \
-                 quota)"
-            )
-        } else if github {
-            format!(
-                "{url}: {err} (GitHub unauthenticated REST is 60 req/hour \
-                 per IP; install the `gh` CLI and run `gh auth login` so \
-                 this process can use its auth automatically, or set \
-                 GITHUB_TOKEN/GH_TOKEN, or pass --version to skip the \
-                 API call)"
-            )
-        } else {
-            format!(
-                "{url}: {err} (rate-limited; set GITLAB_TOKEN for \
-                 authenticated access, or pass --version to skip the API \
-                 call)"
-            )
-        }
+        let hint = rate_limit_hint(host.as_deref(), forge_auth_header(url).is_some());
+        format!("{url}: {err} ({hint})")
     } else if *err == ForgeError::Unauthorized {
         format!(
             "{url}: {err} (the authentication token this process has for \
@@ -483,6 +458,41 @@ pub(super) fn describe_forge_http_error(url: &str, err: &ForgeError) -> String {
         )
     } else {
         format!("{url}: {err}")
+    }
+}
+
+/// Whether `host` is GitLab: gitlab.com, or the self-hosted one `GITLAB_HOST` names.
+fn is_gitlab_host(host: &str) -> bool {
+    let self_hosted = std::env::var("GITLAB_HOST").ok().map(|h| {
+        h.trim_start_matches("https://")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    });
+    host == "gitlab.com" || self_hosted.as_deref() == Some(host)
+}
+
+/// What to do about a refused request to `host`, naming the variable that host
+/// reads: `GITHUB_TOKEN`/`GH_TOKEN` (or `gh auth login`) for GitHub,
+/// `GITLAB_TOKEN` for GitLab. No other host takes a token, so for those the
+/// advice is to try again later. `authed` is whether a token was sent.
+pub(super) fn rate_limit_hint(host: Option<&str>, authed: bool) -> String {
+    match host {
+        Some("api.github.com") if authed => "your GITHUB_TOKEN/GH_TOKEN is being rate-limited \
+             — wait or rotate to a token with a higher quota"
+            .to_string(),
+        Some("api.github.com") => "GitHub unauthenticated REST is 60 req/hour per IP; install \
+             the `gh` CLI and run `gh auth login` so this process can use its auth \
+             automatically, or set GITHUB_TOKEN/GH_TOKEN, or pass --version to skip the API call"
+            .to_string(),
+        Some(h) if is_gitlab_host(h) && authed => "your GITLAB_TOKEN is being rate-limited \
+             — wait or rotate to a token with a higher quota"
+            .to_string(),
+        Some(h) if is_gitlab_host(h) => "rate-limited; set GITLAB_TOKEN for authenticated access, \
+             or pass --version to skip the API call"
+            .to_string(),
+        _ => "rate-limited; this host takes no token, so try again later, or pass --version to \
+             skip the API call"
+            .to_string(),
     }
 }
 
