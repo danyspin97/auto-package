@@ -95,7 +95,7 @@ pub use args::*;
 pub(crate) use request::{ArchWait, prepare_request};
 pub use run::*;
 pub(crate) use submit::{review_gate, yes_refusal};
-pub(crate) use tidy::confirm_with;
+pub(crate) use tidy::{ask_line, confirm_with};
 pub(crate) use tui_row::{queue_found, row_name};
 
 use audit::*;

@@ -22,6 +22,8 @@ mod run_limits;
 mod tui;
 mod unconfirmed;
 mod unconfirmed_offer;
+#[cfg(test)]
+mod unconfirmed_offer_tests;
 mod update_project;
 
 use std::path::{Path, PathBuf};

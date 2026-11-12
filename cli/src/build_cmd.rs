@@ -100,7 +100,14 @@ pub(crate) fn cmd_build(
     // Resolve the version if it was not pinned. A repository has no package
     // index behind it, so "latest" comes from the forge's own release list.
     let pinned_version = version.map(str::to_string);
-    let version = resolve_version(name, version, &mut source_repo, &reporter)?;
+    let version = resolve_version(
+        name,
+        version,
+        &mut source_repo,
+        &source_urls,
+        work_dir,
+        &reporter,
+    )?;
 
     // A repository tells us two things we were only guessing at: whether it is
     // a Python project or a Rust crate, and what it actually calls itself. Ask

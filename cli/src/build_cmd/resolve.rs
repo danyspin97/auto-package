@@ -3,10 +3,14 @@ use super::*;
 /// The version to build: the pinned one, or the latest release of the
 /// source repository, the name on the command line, or the repository
 /// discovered for it. `source_repo` is set when a repository is discovered.
+/// A name PyPI does not carry uses the repository `source_urls` records for
+/// it before any search; `work_dir` is where a confirmed one is recorded.
 pub(super) fn resolve_version(
     name: &str,
     version: Option<&str>,
     source_repo: &mut Option<String>,
+    source_urls: &ap_build::sources::SourceMap,
+    work_dir: &Path,
     reporter: &Arc<dyn Reporter + Send + Sync>,
 ) -> color_eyre::Result<String> {
     Ok(match version {
@@ -42,7 +46,10 @@ pub(super) fn resolve_version(
                 if let Some(v) = pypi_version {
                     v
                 } else {
-                    let repo_url = crate::unconfirmed_offer::discover(name)?;
+                    let repo_url = match crate::unconfirmed_offer::remembered(source_urls, name) {
+                        Some(url) => url,
+                        None => crate::unconfirmed_offer::discover(name, work_dir)?,
+                    };
                     let repo_url = &repo_url;
                     let v = ap_build::sources::latest_release(repo_url)
                         .map_err(|e| color_eyre::eyre::eyre!(e))?;

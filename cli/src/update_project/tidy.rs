@@ -269,7 +269,7 @@ pub(crate) fn confirm_with(question: &str, warn: &dyn Fn(&str)) -> bool {
 
 /// A line typed on the terminal after `prompt`, trimmed; `None` without a
 /// terminal (which is said through `warn`) or when it cannot be read.
-pub(super) fn ask_line(prompt: &str, warn: &dyn Fn(&str)) -> Option<String> {
+pub(crate) fn ask_line(prompt: &str, warn: &dyn Fn(&str)) -> Option<String> {
     use std::io::{BufRead, IsTerminal, Write};
     if !std::io::stdin().is_terminal() {
         warn("cannot ask for confirmation without a terminal; pass --yes to submit unasked");
