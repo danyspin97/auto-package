@@ -29,7 +29,7 @@ impl Terminal {
         }
     }
 
-    fn can_ask(self) -> bool {
+    pub(crate) fn can_ask(self) -> bool {
         self.stdin && self.stderr && !self.tui
     }
 }
@@ -108,10 +108,20 @@ pub(crate) fn remember(work_dir: &Path, name: &str, url: &str) -> Result<(), Str
     map.save(work_dir)
 }
 
+/// Use `url` for `name` because the person chose it, and remember it.
+pub(crate) fn adopt(work_dir: &Path, name: &str, url: &str) -> String {
+    ap_core::diag!("using {url} (confirmed by you)");
+    match remember(work_dir, name, url) {
+        Ok(()) => ap_core::diag!("remembered in sources.toml"),
+        Err(e) => ap_core::diag!("warning: not remembered: {e}"),
+    }
+    url.to_string()
+}
+
 /// The repository for a name PyPI does not carry and the search could not
-/// verify: a verified one, or the one the person confirms on the terminal.
-/// Otherwise the refusal that lists what was found, or the plain message when
-/// nothing was.
+/// verify: a verified one, or the one the person confirms or picks on the
+/// terminal. Otherwise the refusal that lists what was found, or the plain
+/// message when nothing was.
 pub(crate) fn discover(name: &str, work_dir: &Path) -> color_eyre::Result<String> {
     let repos = ap_build::pipeline::find_source_repo_candidates(name, name);
     if let Some(url) = repos.verified.first() {
@@ -125,15 +135,20 @@ pub(crate) fn discover(name: &str, work_dir: &Path) -> color_eyre::Result<String
     }
     ap_build::pipeline::fetch_metadata(&mut found);
     let ask = |p: &str| crate::update_project::ask_line(p, &|_| {});
-    if let Some(c) = offerable(name, &found, Terminal::current())
-        && confirm(c, &ask)
-    {
-        ap_core::diag!("using {} (confirmed by you)", c.url);
-        match remember(work_dir, name, &c.url) {
-            Ok(()) => ap_core::diag!("remembered in sources.toml"),
-            Err(e) => ap_core::diag!("warning: not remembered: {e}"),
+    let term = Terminal::current();
+    let chosen = match offerable(name, &found, term) {
+        Some(c) => confirm(c, &ask).then_some(c),
+        None => {
+            let show = |s: &str| eprintln!("{s}");
+            let view = (
+                ap_core::sink::terminal_width(crate::name_clash::stderr_colour()),
+                crate::name_clash::stderr_colour(),
+            );
+            crate::unconfirmed_pick::pick(name, &found, term, view, &show, &ask)
         }
-        return Ok(c.url.clone());
+    };
+    if let Some(c) = chosen {
+        return Ok(adopt(work_dir, name, &c.url));
     }
     Err(crate::unconfirmed::Unconfirmed {
         name: name.to_string(),

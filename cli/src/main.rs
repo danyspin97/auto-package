@@ -24,6 +24,7 @@ mod unconfirmed;
 mod unconfirmed_offer;
 #[cfg(test)]
 mod unconfirmed_offer_tests;
+mod unconfirmed_pick;
 mod update_project;
 
 use std::path::{Path, PathBuf};

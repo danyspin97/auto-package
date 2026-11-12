@@ -153,3 +153,17 @@ fn a_confirmed_repository_is_written_to_sources_toml_and_found_again() {
     assert_eq!(remembered(&map, "other"), None);
     assert_eq!(remembered(&map, "absent"), None);
 }
+
+#[test]
+fn adopting_a_pick_remembers_it_and_keeps_other_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut before = ap_build::sources::SourceMap::default();
+    before.insert("other", "https://example.org/other");
+    before.save(dir.path()).unwrap();
+
+    let url = adopt(dir.path(), "pleamar", "https://github.com/o2/pleamar");
+    assert_eq!(url, "https://github.com/o2/pleamar");
+    let map = ap_build::sources::SourceMap::load(dir.path()).unwrap();
+    assert_eq!(map.get("pleamar"), Some("https://github.com/o2/pleamar"));
+    assert_eq!(map.get("other"), Some("https://example.org/other"));
+}

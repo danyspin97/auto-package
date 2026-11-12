@@ -51,6 +51,20 @@ Pick one and run: auto-package build https://github.com/k4ditano/pleamar";
 }
 
 #[test]
+fn the_numbered_table_adds_a_column_and_drops_the_command() {
+    let got = numbered_table("pleamar", &pleamar(), 100, false);
+    let want = "`pleamar` has no PyPI release and nothing in openSUSE; the search found these \
+repositories but nothing confirms them:
+  1. github.com/k4ditano/pleamar     222 stars  30 releases
+  2. github.com/ramiroAGI/pleamar      0 stars  no releases
+  3. github.com/k4ditano/pleamar-wm   23 stars               fork";
+    assert_eq!(got, want);
+    let narrow = numbered_table("pleamar", &pleamar(), 40, false);
+    assert!(narrow.contains("  1. github.com/k4ditano/pleamar\n"));
+    assert!(narrow.contains("\n       222 stars  30 releases"));
+}
+
+#[test]
 fn colour_adds_only_escapes_and_paints_the_command_and_the_flags() {
     let plain = table("pleamar", &pleamar(), 100, false);
     let on = table("pleamar", &pleamar(), 100, true);

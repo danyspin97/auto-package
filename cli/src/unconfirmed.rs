@@ -63,7 +63,30 @@ fn flags(c: &Candidate, colour: bool) -> String {
 /// flags yellow; stripped of escapes it is the plain text. A row that does not
 /// fit `width` puts its facts on a second line, so the URL stays whole.
 pub(crate) fn table(name: &str, candidates: &[Candidate], width: usize, colour: bool) -> String {
+    table_with(name, candidates, width, colour, false)
+}
+
+/// The table the pick prompt shows: the same rows behind a number each, and
+/// no command line (the prompt that follows is the way on).
+pub(crate) fn numbered_table(
+    name: &str,
+    candidates: &[Candidate],
+    width: usize,
+    colour: bool,
+) -> String {
+    table_with(name, candidates, width, colour, true)
+}
+
+fn table_with(
+    name: &str,
+    candidates: &[Candidate],
+    width: usize,
+    colour: bool,
+    numbered: bool,
+) -> String {
     use unicode_width::UnicodeWidthStr;
+    let digits = candidates.len().to_string().len();
+    let lead_w = if numbered { 2 + digits + 2 } else { 2 };
     let rows: Vec<(&str, (String, String))> = candidates
         .iter()
         .map(|c| (shown(&c.url), facts(c)))
@@ -78,18 +101,28 @@ pub(crate) fn table(name: &str, candidates: &[Candidate], width: usize, colour: 
         .map(|c| flags(c, false).width())
         .max()
         .unwrap_or(0);
-    let one_line = 2 + url_w + 2 + stars_w + 2 + rel_w + flag_w <= width;
+    let one_line = lead_w + url_w + 2 + stars_w + 2 + rel_w + flag_w <= width;
     let mut out = format!(
         "{} has no PyPI release and nothing in openSUSE; the search found these \
          repositories but nothing confirms them:\n",
         paint(&format!("`{name}`"), Role::Package, colour)
     );
-    for (c, (url, (stars, rel))) in candidates.iter().zip(&rows) {
+    for (i, (c, (url, (stars, rel)))) in candidates.iter().zip(&rows).enumerate() {
+        let lead = if numbered {
+            format!("  {:>digits$}. ", i + 1)
+        } else {
+            "  ".to_string()
+        };
+        let cont = " ".repeat(lead_w + 2);
         let right = format!("{stars:>stars_w$}");
         let mut line = if one_line {
-            format!("  {}  {right}  {}", pad_to(url, url_w), pad_to(rel, rel_w))
+            format!(
+                "{lead}{}  {right}  {}",
+                pad_to(url, url_w),
+                pad_to(rel, rel_w)
+            )
         } else {
-            format!("  {url}\n    {right}  {}", pad_to(rel, rel_w))
+            format!("{lead}{url}\n{cont}{right}  {}", pad_to(rel, rel_w))
         };
         let flagged = flags(c, colour);
         if flagged.is_empty() {
@@ -100,7 +133,10 @@ pub(crate) fn table(name: &str, candidates: &[Candidate], width: usize, colour: 
         out.push_str(&line);
         out.push('\n');
     }
-    if let Some(first) = candidates.first() {
+    if numbered {
+        out.pop();
+    }
+    if let Some(first) = candidates.first().filter(|_| !numbered) {
         out.push_str(&format!(
             "Pick one and run: {}",
             paint(
