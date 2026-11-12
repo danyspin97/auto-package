@@ -39,6 +39,9 @@ fn an_unowned_directory_is_fixed_on_every_path_with_the_directory_rule() {
     let rule = crate::conventions_table::CONVENTIONS[108].1;
     assert!(rule.contains("Every directory the package creates is owned exactly once."));
     assert!(rule.contains("%{_datadir}/wayland-sessions/"));
+    let flat = rule.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("directly above the first %files entry"));
+    assert!(flat.contains("takes no comment"));
     // The pre-build review of a non-Python package widens the same rule and the every-path rule.
     let review = crate::agent::review_prompt_non_python();
     assert!(review.contains("every new directory the spec installs into"));
