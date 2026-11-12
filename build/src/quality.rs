@@ -23,6 +23,8 @@ pub enum Kind {
     SpecStyle,
     /// An obsolete spec construct [`tidy`] removes: one finding per construct.
     SpecHygiene,
+    /// A comment that repeats an earlier comment of the spec. Only reported.
+    DuplicateComment,
     /// The spec has no `%check`.
     NoCheck,
     /// Tests were dropped from `%check` to get the package to build.
@@ -69,6 +71,7 @@ impl Kind {
             Kind::RpmlintWarning => "rpmlint-warning",
             Kind::SpecStyle => "style",
             Kind::SpecHygiene => "hygiene",
+            Kind::DuplicateComment => "duplicate-comment",
             Kind::NoCheck => "no-check",
             Kind::DroppedTests => "dropped-tests",
             Kind::RpmlintrcStyle => "rpmlintrc-style",
@@ -111,7 +114,8 @@ impl Kind {
     pub fn is_report_only(self) -> bool {
         matches!(
             self,
-            Kind::RpmlintrcName
+            Kind::DuplicateComment
+                | Kind::RpmlintrcName
                 | Kind::RpmlintrcUnnamed
                 | Kind::PatchUpstreamMoved
                 | Kind::PatchUpstreamReleased
@@ -204,6 +208,15 @@ pub fn audit_spec(spec: &str, ldconfig_macro: bool) -> Vec<Finding> {
         out.push(Finding {
             kind: Kind::SpecHygiene,
             detail: format!("line {}: {}; fix: {}", c.line, c.what, c.fix),
+        });
+    }
+    for d in spec_tidy::duplicate_comments::duplicates(spec) {
+        out.push(Finding {
+            kind: Kind::DuplicateComment,
+            detail: format!(
+                "line {}: this comment repeats the one on line {}; keep the one where the fact applies",
+                d.line, d.of
+            ),
         });
     }
     if !spec.lines().any(|l| l.trim_end() == "%check") {
@@ -322,6 +335,25 @@ mod tests {
     use super::*;
 
     const GOOD: &str = "Name: python-foo\nVersion: 1.0\nSource: foo-%{version}.tar.gz\n\n%prep\n%autosetup\n\n%build\n%pyproject_wheel\n\n%install\n%pyproject_install\n\n%check\n%pytest\n\n%files\n%license LICENSE\n\n%changelog\n";
+
+    #[test]
+    fn a_repeated_comment_is_a_finding_that_tidy_does_not_fix() {
+        let spec = "%check\n# the text tests need a system font installed\n:\n# the text tests need a system font installed\n";
+        let found = audit_spec(spec, false);
+        let f: Vec<_> = found
+            .iter()
+            .filter(|f| f.kind == Kind::DuplicateComment)
+            .collect();
+        assert_eq!(f.len(), 1);
+        assert!(f[0].detail.starts_with("line 4: "), "{}", f[0].detail);
+        assert!(!Kind::DuplicateComment.is_mechanical());
+        assert!(Kind::DuplicateComment.is_report_only());
+        let only: Vec<_> = found
+            .into_iter()
+            .filter(|f| f.kind == Kind::DuplicateComment)
+            .collect();
+        assert!(!needs_pipeline(&only));
+    }
 
     #[test]
     fn a_spec_with_a_check_has_no_missing_check_finding() {

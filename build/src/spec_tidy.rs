@@ -10,6 +10,9 @@ pub mod comment_macros;
 pub mod dir_owners;
 #[cfg(test)]
 mod dir_owners_tests;
+pub mod duplicate_comments;
+#[cfg(test)]
+mod duplicate_comments_tests;
 pub mod header;
 pub mod header_add;
 pub mod hygiene;
