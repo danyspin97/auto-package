@@ -416,17 +416,6 @@ impl HumanSink {
     }
 }
 
-/// A duration for people: `850ms`, `12.3s`, `4m07s`, `1h02m`.
-pub(super) fn fmt_elapsed(d: Duration) -> String {
-    let ms = d.as_millis();
-    match ms {
-        0..1000 => format!("{ms}ms"),
-        1000..60_000 => format!("{:.1}s", ms as f64 / 1000.0),
-        60_000..3_600_000 => format!("{}m{:02}s", ms / 60_000, ms / 1000 % 60),
-        _ => format!("{}h{:02}m", ms / 3_600_000, ms / 60_000 % 60),
-    }
-}
-
 /// A grep-able dump: a titled rule, the body, and a footer naming the file it
 /// was also written to. Every `--log debug` dump is delimited this way.
 fn delimited(title: &str, body: &str, artifact: &Path) -> String {

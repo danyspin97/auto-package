@@ -37,8 +37,12 @@ macro_rules! diag {
 
 mod colour;
 mod diagnostics;
+mod elapsed;
 mod human;
 mod jsonl;
+mod live;
+#[cfg(test)]
+mod live_tests;
 mod memory;
 #[cfg(test)]
 mod memory_tests;
@@ -64,8 +68,10 @@ mod tests;
 
 pub use colour::*;
 pub use diagnostics::*;
+pub use elapsed::*;
 pub use human::*;
 pub use jsonl::*;
+pub use live::*;
 pub use memory::*;
 pub use reporter::*;
 pub use style::*;
