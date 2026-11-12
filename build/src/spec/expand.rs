@@ -292,18 +292,8 @@ pub fn strip_ap_fix_comments(spec: &str) -> String {
 pub fn first_macro_in_comment(spec: &str) -> Option<(usize, String)> {
     for (i, line) in spec.lines().enumerate() {
         let trimmed = line.trim_start();
-        if !trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some(pos) = trimmed.find('%') {
-            let after = &trimmed[pos + 1..];
-            // `%%` is a literal percent — not a macro.
-            if after.starts_with('%') {
-                continue;
-            }
-            if after.starts_with(|c: char| c.is_alphabetic() || c == '{') {
-                return Some((i + 1, line.to_string()));
-            }
+        if trimmed.starts_with('#') && crate::spec_tidy::comment_macros::has_macro(trimmed) {
+            return Some((i + 1, line.to_string()));
         }
     }
     None
