@@ -6,7 +6,11 @@
 //! of packages: a model asked to fix them one by one spends a turn on each.
 
 pub mod comment_macros;
+pub mod dir_owners;
+#[cfg(test)]
+mod dir_owners_tests;
 pub mod hygiene;
+pub mod standard_dirs;
 
 /// Headers that start a new section of a spec.
 const SECTION_HEADERS: &[&str] = &[
