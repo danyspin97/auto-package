@@ -30,6 +30,7 @@ mod settle;
 use settle::*;
 mod frontier;
 use frontier::*;
+mod bin_name;
 mod resolve;
 use resolve::*;
 
@@ -116,12 +117,29 @@ pub(crate) fn cmd_build(
     // before anything is named. The name itself is not taken from it: the
     // pipeline resolves the spelling OBS lists the package under (a package
     // OBS has as `python-APScheduler` is checked out under that spelling).
-    ap_build::osc::try_list_project_packages(project, ap_build::proc::Emit::run(reporter.as_ref()))
-        .map_err(|e| color_eyre::eyre::eyre!(e))?;
+    let listed = ap_build::osc::try_list_project_packages(
+        project,
+        ap_build::proc::Emit::run(reporter.as_ref()),
+    )
+    .map_err(|e| color_eyre::eyre::eyre!(e))?;
+    let checkout_root = work_dir.join(project);
+    let filed = |rpm: &str| {
+        !matches!(
+            ap_build::osc::find_listed(rpm, listed.iter().map(String::as_str)),
+            ap_build::osc::Listed::Absent
+        ) || bin_name::state_holds_package(state_root, &checkout_root, rpm)
+    };
+    // A build in a branch project (an update) keeps the rpm name of the
+    // package it branched, so the name must not change under it.
+    let lookups = bin_name::NameLookups {
+        filed: &filed,
+        factory: &ap_build::osc::OscFactory,
+        enabled: branch.is_none(),
+    };
     let refusal =
         ap_build::sources::recipe_refusal(branch.is_some_and(|b| b.keeps_recipe()), regen);
     let (name, rpm_name, subprojects, unknown_build_system) =
-        resolve_names(name, &version, &source_repo, refusal, &reporter)?;
+        resolve_names(name, &version, &source_repo, refusal, &lookups, &reporter)?;
     // The run's key is the lowercase guess; the pipeline resolves the spelling
     // OBS lists the package under (`PkgState::obs_name`) in its own preflight.
     // A package branched from another project already has a name, and the

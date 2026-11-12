@@ -101,6 +101,7 @@ pub(super) fn resolve_names(
     version: &str,
     source_repo: &Option<String>,
     refusal: Option<ap_build::sources::Refusal>,
+    lookups: &super::bin_name::NameLookups<'_>,
     reporter: &Arc<dyn Reporter + Send + Sync>,
 ) -> color_eyre::Result<(String, String, Vec<(String, String)>, bool)> {
     Ok(match source_repo {
@@ -113,7 +114,19 @@ pub(super) fn resolve_names(
         Some(repo) => {
             let probe = ap_build::sources::probe(repo, &version, name, refusal)
                 .map_err(|e| color_eyre::eyre::eyre!(e))?;
-            let (effective_name, rpm, subprojects, unknown) = repo_names(name, &probe);
+            let (mut effective_name, mut rpm, subprojects, unknown) = repo_names(name, &probe);
+            if let Some(chosen) = super::bin_name::binary_name(name, repo, &probe, lookups) {
+                if let Some(bin) = chosen.name {
+                    rpm = probe.ecosystem.rpm_name(&bin);
+                    effective_name = bin;
+                }
+                if let Some(message) = chosen.note {
+                    reporter.report(&Event::Progress {
+                        step: None,
+                        message,
+                    });
+                }
+            }
             if !effective_name.eq_ignore_ascii_case(name) {
                 reporter.report(&Event::Progress {
                     step: None,
