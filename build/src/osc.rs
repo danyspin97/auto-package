@@ -78,6 +78,10 @@ mod changes;
 #[cfg(test)]
 mod spec_file_name_tests;
 pub use changes::*;
+mod changes_author;
+pub use changes_author::*;
+#[cfg(test)]
+mod changes_author_tests;
 mod changes_dates;
 mod changes_flag_lines;
 pub use changes_dates::*;

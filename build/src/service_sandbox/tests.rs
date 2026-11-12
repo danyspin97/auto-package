@@ -369,6 +369,25 @@ fn the_identity_comes_from_the_apis_section_only() {
 }
 
 #[test]
+fn the_oscrc_user_is_the_one_of_the_apis_section() {
+    let rc = "[https://a]\nuser = x\n[https://b/]\nUser = \"y\"\n";
+    assert_eq!(oscrc_user(rc, "https://b").as_deref(), Some("y"));
+    assert_eq!(oscrc_user(rc, "https://c"), None);
+}
+
+#[test]
+fn oscrc_keys_ignore_case_and_quotes() {
+    let rc = "[https://api.opensuse.org]\nEmail = \"me@example.com\"\nRealName: 'Me'\n";
+    assert_eq!(
+        oscrc_identity(rc, "https://api.opensuse.org"),
+        vec![
+            ("VC_MAILADDR".to_string(), "me@example.com".to_string()),
+            ("VC_REALNAME".to_string(), "Me".to_string())
+        ]
+    );
+}
+
+#[test]
 fn outputs_are_moved_and_links_refused() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join(".o.tar_scm.service");

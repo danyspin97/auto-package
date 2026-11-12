@@ -277,7 +277,23 @@ pub(crate) fn oscrc_paths() -> Vec<PathBuf> {
 }
 
 /// `realname` and `email` from the oscrc section of `apiurl`.
-pub(super) fn oscrc_identity(text: &str, apiurl: &str) -> Vec<(String, String)> {
+pub(crate) fn oscrc_identity(text: &str, apiurl: &str) -> Vec<(String, String)> {
+    oscrc_keys(
+        text,
+        apiurl,
+        &[("realname", "VC_REALNAME"), ("email", "VC_MAILADDR")],
+    )
+}
+
+/// The `user` of the oscrc section of `apiurl`.
+pub(crate) fn oscrc_user(text: &str, apiurl: &str) -> Option<String> {
+    let found = oscrc_keys(text, apiurl, &[("user", "user")]);
+    found.into_iter().next().map(|(_, v)| v)
+}
+
+/// The values of `keys` (oscrc key, name given) in the oscrc section of
+/// `apiurl`: keys in any case, quotes dropped, empty values skipped.
+fn oscrc_keys(text: &str, apiurl: &str, keys: &[(&str, &str)]) -> Vec<(String, String)> {
     fn norm(url: &str) -> String {
         let url = url.trim().to_ascii_lowercase();
         let url = url
@@ -298,12 +314,11 @@ pub(super) fn oscrc_identity(text: &str, apiurl: &str) -> Vec<(String, String)> 
             continue;
         }
         if let Some((key, value)) = line.split_once(['=', ':']) {
-            let var = match key.trim() {
-                "realname" => "VC_REALNAME",
-                "email" => "VC_MAILADDR",
-                _ => continue,
+            let key = key.trim().to_ascii_lowercase();
+            let Some((_, var)) = keys.iter().find(|(k, _)| *k == key) else {
+                continue;
             };
-            let value = value.trim();
+            let value = crate::osc::unquote(value);
             if !value.is_empty() {
                 out.push((var.to_string(), value.to_string()));
             }
