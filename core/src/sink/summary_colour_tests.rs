@@ -181,3 +181,88 @@ fn a_word_with_a_wide_character_keeps_its_spacing() {
     let line = "  字 1.0 -> 1.1";
     assert_eq!(strip_sgr(&colour_summary(line, true)), line);
 }
+
+/// The tries block of the run summary with the user's sample row.
+const TRIES_SAMPLE: &str = "Tries to build (1):
+  3+ tries: 1
+    jay-compositor  4 tries, built · last failed try: install failed";
+
+/// The needs-review section with a grouped service line and a host line.
+const REVIEW_SAMPLE: &str = "Needs review (1):
+  jay-compositor
+    risk  new source services: tar_scm, recompress, set_version, cargo_vendor
+    risk  new source host: github.com";
+
+#[test]
+fn a_tries_row_is_bold_name_green_built_and_dim_reason() {
+    assert_eq!(
+        colour_summary(TRIES_SAMPLE, true),
+        "\x1b[1mTries to build\x1b[22m (1):\n  3+ tries: 1\n    \x1b[1mjay-compositor\x1b[22m  4 tries, \x1b[32mbuilt\x1b[39m · last failed try: \x1b[2minstall failed\x1b[22m"
+    );
+}
+
+#[test]
+fn a_not_built_row_is_red_and_its_shape_plain() {
+    assert_eq!(
+        colour_summary(
+            "Tries to build (1):\n    foo  2 tries, not built [build failed] · x",
+            true
+        ),
+        "\x1b[1mTries to build\x1b[22m (1):\n    \x1b[1mfoo\x1b[22m  2 tries, \x1b[1;31mnot built\x1b[22;39m [build failed] · \x1b[2mx\x1b[22m"
+    );
+    assert_eq!(
+        colour_summary("Tries to build (1):\n    foo  1 try, no result · why", true),
+        "\x1b[1mTries to build\x1b[22m (1):\n    \x1b[1mfoo\x1b[22m  1 try, \x1b[1;31mno result\x1b[22;39m · \x1b[2mwhy\x1b[22m"
+    );
+}
+
+#[test]
+fn a_wide_name_in_a_tries_row_is_bold_and_the_padding_is_kept() {
+    assert_eq!(
+        colour_summary("Tries to build (1):\n    日本語  3 tries, built", true),
+        "\x1b[1mTries to build\x1b[22m (1):\n    \x1b[1m日本語\x1b[22m  3 tries, \x1b[32mbuilt\x1b[39m"
+    );
+}
+
+#[test]
+fn the_bucket_line_and_the_more_line_of_the_tries_block_are_plain() {
+    assert_eq!(
+        colour_summary(
+            "Tries to build (3):\n  1 try: 1, 3+ tries: 2\n    ... and 6 more",
+            true
+        ),
+        "\x1b[1mTries to build\x1b[22m (3):\n  1 try: 1, 3+ tries: 2\n    ... and 6 more"
+    );
+}
+
+#[test]
+fn a_wrapped_reason_line_of_a_tries_row_is_not_painted_as_a_row() {
+    let text = "Tries to build (1):\n    pkg  1 try, not built · a b\n         c d";
+    assert_eq!(
+        colour_summary(text, true),
+        "\x1b[1mTries to build\x1b[22m (1):\n    \x1b[1mpkg\x1b[22m  1 try, \x1b[1;31mnot built\x1b[22;39m · \x1b[2ma b\x1b[22m\n         c d"
+    );
+}
+
+#[test]
+fn a_review_row_has_a_yellow_risk_label_and_plain_text() {
+    assert_eq!(
+        colour_summary(REVIEW_SAMPLE, true),
+        "\x1b[1mNeeds review\x1b[22m (1):\n  \x1b[1mjay-compositor\x1b[22m\n    \x1b[33mrisk\x1b[39m  new source services: tar_scm, recompress, set_version, cargo_vendor\n    \x1b[33mrisk\x1b[39m  new source host: github.com"
+    );
+}
+
+#[test]
+fn a_risk_line_outside_the_review_section_is_not_painted() {
+    assert_eq!(colour_summary("    risk  x", true), "    risk  x");
+}
+
+#[test]
+fn the_new_rows_are_plain_without_colour_and_strip_back_to_their_input() {
+    let wide = "Tries to build (1):\n    日本語  3 tries, built · last failed try: a b";
+    for text in [TRIES_SAMPLE, REVIEW_SAMPLE, wide] {
+        assert!(!colour_summary(text, false).contains('\u{1b}'));
+        assert_eq!(colour_summary(text, false), text);
+        assert_eq!(strip_sgr(&colour_summary(text, true)), text);
+    }
+}
