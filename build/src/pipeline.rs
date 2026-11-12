@@ -126,10 +126,15 @@ pub struct PipelineConfig {
     /// recipe the checkout holds can build it, so no spec is generated for it,
     /// and it is not a Python package whatever its RPM name says.
     pub unknown_build_system: bool,
-    /// The text the package was requested as (a name, `pypi:<name>` or a
-    /// repository URL), for commands the failure texts suggest. `None` for a
-    /// dependency, which nobody requested.
+    /// The request as the user typed it after `auto-package build` (`foo`,
+    /// `pypi:foo`, a repository URL, `foo --url <url>`), for the rerun command
+    /// the failure texts suggest. `None` for a dependency, which nobody
+    /// requested: its rerun is named by its own name.
     pub request_text: Option<String>,
+    /// Set for a build in a branch project (an update, an improvement or a
+    /// backport): a plain `build` of the package does not reproduce it, so the
+    /// failure suggests no rerun command.
+    pub branch_build: bool,
 }
 mod state;
 pub use state::*;

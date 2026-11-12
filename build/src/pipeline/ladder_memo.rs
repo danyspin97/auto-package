@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::pipeline::ladder::LADDER_FAILED_PREFIX;
-use crate::pipeline::ladder_end::{REASON_CAP, force_hint, memo_head, then_step};
+use crate::pipeline::ladder_end::{REASON_CAP, memo_head, rerun_action, rerun_target};
 use crate::pipeline::ladder_recap::recap;
 use crate::pipeline::sibling::*;
 use ap_core::failure_note::FailureNote;
@@ -65,14 +65,14 @@ fn legacy_history(full: &str) -> Vec<String> {
 /// as the user types it. A rerun needs `--force` once the cause is fixed.
 pub(super) fn repeat_failure(
     rpm: &str,
-    pkg: &str,
+    target: Option<&str>,
     summary: &str,
     action: Option<&str>,
-) -> (String, String) {
+) -> (String, Option<String>) {
     let reason = format!("{} {summary}", memo_head(rpm));
     (
         crate::pipeline::ladder_recap::cap(reason.trim_end(), REASON_CAP),
-        then_step(action, &force_hint(pkg)),
+        rerun_action(action, target),
     )
 }
 
@@ -115,10 +115,7 @@ pub(super) fn spent_ladder_refusal(
     };
     let (reason, action) = repeat_failure(
         &ctx.rpm_name,
-        ctx.config
-            .request_text
-            .as_deref()
-            .unwrap_or(&ctx.config.pkg_name),
+        rerun_target(ctx.config),
         &summary,
         action.as_deref(),
     );
@@ -133,7 +130,7 @@ pub(super) fn spent_ladder_refusal(
         reason,
         FailureNote {
             detail: Some(detail),
-            action: Some(action),
+            action,
         },
     ))
 }

@@ -389,6 +389,7 @@ fn build_item(
             ctx.tui_ctrl.clone(),
             Some(&build),
             None,
+            None,
         )
     })
     .map_err(|e| format!("{e:#}"))

@@ -403,6 +403,20 @@ fn a_request_names_its_package_under_any_spelling() {
 }
 
 #[test]
+fn a_typed_request_keeps_its_url_option() {
+    assert_eq!(typed_request("foo", None), "foo");
+    assert_eq!(typed_request("pypi:foo", None), "pypi:foo");
+    assert_eq!(
+        typed_request("https://github.com/o/foo", None),
+        "https://github.com/o/foo"
+    );
+    assert_eq!(
+        typed_request("foo", Some("https://example.org/foo-1.0.tar.gz")),
+        "foo --url https://example.org/foo-1.0.tar.gz"
+    );
+}
+
+#[test]
 fn the_root_text_of_a_pypi_build_is_read_back_as_pypi() {
     assert_eq!(root_text("jay", true).as_deref(), Some("pypi:jay"));
     assert_eq!(root_text("jay", false), None);

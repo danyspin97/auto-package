@@ -22,6 +22,22 @@ pub(super) fn force_hint(pkg: &str) -> String {
     format!("after fixing the cause, run: auto-package build {pkg} --force")
 }
 
+/// The text a rerun of the package is named by: the request as typed, else the
+/// package's own name. None for a branch build, which no plain `build` repeats.
+pub(super) fn rerun_target(config: &PipelineConfig) -> Option<&str> {
+    (!config.branch_build).then(|| config.request_text.as_deref().unwrap_or(&config.pkg_name))
+}
+
+/// The action of a spent ladder: the stored step (`action`), then the command
+/// that reruns the package with `--force` when there is a `target` to name.
+/// Without one, only the stored step is left.
+pub(super) fn rerun_action(action: Option<&str>, target: Option<&str>) -> Option<String> {
+    match target {
+        Some(target) => Some(then_step(action, &force_hint(target))),
+        None => action.map(str::to_string),
+    }
+}
+
 /// `first` (when there is one) and then `next`, as one action.
 /// A sentence's own `.` or `;` after a letter or digit is dropped; one that is
 /// part of a command or path (`cd .`, `./`) stays.
@@ -80,7 +96,7 @@ fn fit(head: &str, recap: &Recap, pinned: usize) -> String {
 /// types after `auto-package build` to run the package again.
 pub(super) fn short_failure(
     rpm: &str,
-    target: &str,
+    target: Option<&str>,
     recap: &Recap,
     pinned: usize,
     ending: &Ending,
@@ -90,7 +106,7 @@ pub(super) fn short_failure(
     let reason = cap(reason.trim_end(), REASON_CAP);
     let action = recap.action.as_deref();
     let action = match ending {
-        Ending::Remembered => Some(then_step(action, &force_hint(target))),
+        Ending::Remembered => rerun_action(action, target),
         Ending::Unremembered => action.map(str::to_string),
         Ending::Budget { .. } => Some(then_step(action, "raise --budget and run again")),
     };
@@ -192,7 +208,7 @@ pub(super) fn end_exhausted(
         }
         None => 0,
     };
-    let target = config.request_text.as_deref().unwrap_or(&config.pkg_name);
+    let target = rerun_target(config);
     // A patch-driven ladder (the package is a dependency being patched)
     // writes no memo: the spec it failed on is the dependency's, and an
     // ordinary run of that package must not find it spent. `spent_ladder_refusal`

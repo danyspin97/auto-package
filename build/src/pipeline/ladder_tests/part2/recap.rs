@@ -160,31 +160,48 @@ fn body(headline: &str, lines: &[&str], action: Option<&str>) -> Recap {
 fn the_rerun_hint_depends_on_how_the_ladder_ended() {
     let hint = "after fixing the cause, run: auto-package build foo --force";
     let plain = body("Body.", &[], None);
-    let (reason, action) = short_failure("python-foo", "foo", &plain, 0, &Ending::Remembered);
+    let (reason, action) = short_failure("python-foo", Some("foo"), &plain, 0, &Ending::Remembered);
     assert_eq!(reason, "python-foo could not be resolved: Body.");
     assert_eq!(action.as_deref(), Some(hint));
     // A step of its own comes first.
     let stepped = body("Body.", &[], Some("Do x."));
-    let (_, action) = short_failure("python-foo", "foo", &stepped, 0, &Ending::Remembered);
+    let (_, action) = short_failure("python-foo", Some("foo"), &stepped, 0, &Ending::Remembered);
     assert_eq!(action.as_deref(), Some(format!("Do x; {hint}").as_str()));
     // A request text is what the command repeats.
-    let (_, action) = short_failure("python-foo", "pypi:foo", &plain, 0, &Ending::Remembered);
+    let (_, action) = short_failure(
+        "python-foo",
+        Some("pypi:foo"),
+        &plain,
+        0,
+        &Ending::Remembered,
+    );
     assert!(
         action
             .unwrap()
             .ends_with("auto-package build pypi:foo --force")
     );
     // A patch-driven ladder wrote no memo: nothing to force.
-    let (_, action) = short_failure("python-foo", "foo", &plain, 0, &Ending::Unremembered);
+    let (_, action) = short_failure("python-foo", Some("foo"), &plain, 0, &Ending::Unremembered);
     assert_eq!(action, None);
-    let (_, action) = short_failure("python-foo", "foo", &stepped, 0, &Ending::Unremembered);
+    let (_, action) = short_failure(
+        "python-foo",
+        Some("foo"),
+        &stepped,
+        0,
+        &Ending::Unremembered,
+    );
     assert_eq!(action.as_deref(), Some("Do x."));
+    // A branch build has no rerun command to name: its stored step only.
+    let (_, action) = short_failure("python-foo", None, &stepped, 0, &Ending::Remembered);
+    assert_eq!(action.as_deref(), Some("Do x."));
+    let (_, action) = short_failure("python-foo", None, &plain, 0, &Ending::Remembered);
+    assert_eq!(action, None);
     // A budget stop says to raise the budget, never --force.
     let budget = Ending::Budget {
         spent: 1.5,
         limit: 1.0,
     };
-    let (reason, action) = short_failure("python-foo", "foo", &plain, 0, &budget);
+    let (reason, action) = short_failure("python-foo", Some("foo"), &plain, 0, &budget);
     assert!(
         reason.starts_with(
             "python-foo could not be resolved: stopped on the budget ($1.50 spent of $1.00)"
@@ -207,7 +224,7 @@ fn a_step_keeps_a_dot_that_belongs_to_a_command_or_a_path() {
 #[test]
 fn the_reason_is_capped_at_four_hundred_characters() {
     let long = body(&"word ".repeat(200), &[], None);
-    let (reason, _) = short_failure("foo", "foo", &long, 0, &Ending::Remembered);
+    let (reason, _) = short_failure("foo", Some("foo"), &long, 0, &Ending::Remembered);
     assert!((390..=400).contains(&reason.chars().count()), "{reason}");
     assert!(reason.ends_with('…'));
 }
@@ -220,7 +237,7 @@ fn a_long_headline_gives_way_before_the_refusal_does() {
         &[refusal, "3 resolution rounds did not fix it."],
         None,
     );
-    let (reason, _) = short_failure("python-foo", "foo", &recap, 1, &Ending::Remembered);
+    let (reason, _) = short_failure("python-foo", Some("foo"), &recap, 1, &Ending::Remembered);
     assert!(reason.chars().count() <= 400, "{reason}");
     assert!(reason.ends_with(refusal), "{reason}");
     assert!(!reason.contains("resolution rounds"), "{reason}");

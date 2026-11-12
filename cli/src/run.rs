@@ -58,6 +58,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             // thing but lets the package be named separately.
             let request =
                 name_clash::parse_request(&name).map_err(|e| color_eyre::eyre::eyre!(e))?;
+            let typed = name_clash::typed_request(&name, url.as_deref());
             let pypi = request.pypi;
             let (name, source_repo) = match (request.repo, url) {
                 (Some(_), Some(u)) => {
@@ -391,6 +392,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                                                     tui_ctrl.clone(),
                                                     None,
                                                     req.pypi.then(|| raw.clone()),
+                                                    Some(raw.clone()),
                                                 )
                                             })
                                         }),
@@ -500,6 +502,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                             tui_ctrl.clone(),
                             None,
                             name_clash::root_text(&name, pypi),
+                            Some(typed),
                         )
                     });
                     // The TUI stays open after the root build until it finds

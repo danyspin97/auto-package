@@ -372,6 +372,7 @@ mod tests {
             unknown_build_system: true,
             unbuildable_deps: Vec::new(),
             request_text: None,
+            branch_build: false,
             run_id: "test".into(),
             source_urls: Default::default(),
             python_flavors: Default::default(),

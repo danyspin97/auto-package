@@ -457,6 +457,7 @@ fn cmd_update(
             tui_ctrl.clone(),
             Some(&existing),
             None,
+            None,
         );
         if let Err(e) = r {
             failures.push((name, e.to_string()));

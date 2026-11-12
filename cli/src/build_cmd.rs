@@ -68,6 +68,9 @@ pub(crate) fn cmd_build(
     // The text a TUI request was typed as, when it is not the name (`pypi:foo`).
     // It is the row's origin, which a retry resends.
     request_text: Option<String>,
+    // The request as the user typed it, for the rerun command a failure
+    // suggests (`foo --url U` keeps its `--url`). See `PipelineConfig::request_text`.
+    typed: Option<String>,
 ) -> color_eyre::Result<()> {
     // Reporter for events belonging to a single package: still delivered to
     // jsonl/memory like `reporter`, but tagged so the TUI can attribute
@@ -170,7 +173,8 @@ pub(crate) fn cmd_build(
         failed_deps: Vec::new(),
         unknown_build_system,
         unbuildable_deps: Vec::new(),
-        request_text: Some(request_name.clone()),
+        request_text: typed,
+        branch_build: branch.is_some(),
     };
 
     let mut config = config;

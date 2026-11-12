@@ -364,6 +364,16 @@ pub(crate) fn requested_name(text: &str) -> String {
         .unwrap_or_else(|_| text.to_string())
 }
 
+/// The request as the user typed it after `auto-package build`: the text, and
+/// `--url <url>` after it when the repository came from `--url`. A rerun
+/// command repeats it, so it names the same package and repository.
+pub(crate) fn typed_request(name: &str, url: Option<&str>) -> String {
+    match url {
+        Some(url) => format!("{name} --url {url}"),
+        None => name.to_string(),
+    }
+}
+
 /// The origin of a root build given as `pypi:<name>`: a retry of its row sends
 /// the same text, so the PyPI choice survives. None for any other root.
 pub(crate) fn root_text(name: &str, pypi: bool) -> Option<String> {

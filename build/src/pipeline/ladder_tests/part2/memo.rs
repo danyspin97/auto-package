@@ -17,12 +17,24 @@ fn refusal_of(
     request: Option<&str>,
     set: impl FnOnce(&mut PkgState),
 ) -> Refusal {
+    refusal_with(rpm, pkg, request, false, set)
+}
+
+/// [`refusal_of`] for a package built in a branch project when `branch`.
+fn refusal_with(
+    rpm: &str,
+    pkg: &str,
+    request: Option<&str>,
+    branch: bool,
+    set: impl FnOnce(&mut PkgState),
+) -> Refusal {
     let root = tempfile::tempdir().unwrap();
     let state_root = root.path().join("state");
     let mut config = super::super::super::hygiene_tests::config(pkg, &state_root);
     config.work_dir = root.path().join("work");
     config.project = "p".into();
     config.request_text = request.map(str::to_string);
+    config.branch_build = branch;
     let ws = Workspace::open(&state_root, rpm).unwrap();
     let run = ap_core::run::RunDir::allocate(root.path()).unwrap();
     let pkg_run = run.pkg(rpm);
@@ -122,6 +134,43 @@ fn the_hint_repeats_the_request_text_when_there_is_one() {
         note.action.as_deref(),
         Some("after fixing the cause, run: auto-package build pypi:foo --force")
     );
+}
+
+#[test]
+fn the_rerun_hint_repeats_each_request_as_it_was_typed() {
+    let hint = |request: Option<&str>| {
+        let (_, _, note) = refusal_of("python-foo", "foo", request, |s| {
+            s.ladder_reason = Some("turn 0: x".into());
+        });
+        note.action.unwrap()
+    };
+    let run = "after fixing the cause, run: auto-package build";
+    assert_eq!(hint(None), format!("{run} foo --force"));
+    assert_eq!(hint(Some("foo")), format!("{run} foo --force"));
+    assert_eq!(hint(Some("pypi:foo")), format!("{run} pypi:foo --force"));
+    assert_eq!(
+        hint(Some("foo --url https://example.org/foo-1.0.tar.gz")),
+        format!("{run} foo --url https://example.org/foo-1.0.tar.gz --force")
+    );
+    assert_eq!(
+        hint(Some("https://github.com/o/foo")),
+        format!("{run} https://github.com/o/foo --force")
+    );
+}
+
+#[test]
+fn a_branch_build_suggests_no_rerun_command() {
+    let (_, _, note) = refusal_with("python-foo", "foo", Some("foo"), true, |s| {
+        s.ladder_reason = Some("turn 0: x".into());
+        s.ladder_recap.ladder_summary = Some("The host has no Rust toolchain.".into());
+        s.ladder_recap.ladder_action = Some("Run rustup default stable.".into());
+    });
+    assert_eq!(note.action.as_deref(), Some("Run rustup default stable."));
+    let (_, _, bare) = refusal_with("python-foo", "foo", None, true, |s| {
+        s.ladder_reason = Some("turn 0: x".into());
+        s.ladder_recap.ladder_summary = Some("The host has no Rust toolchain.".into());
+    });
+    assert_eq!(bare.action, None);
 }
 
 #[test]
