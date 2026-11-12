@@ -124,6 +124,81 @@ pub(crate) fn fix_flagged<'a>(
     })
 }
 
+/// The kinds of risk line that name one value each: the prefix after `RISK: `,
+/// and the singular and plural words the grouped line uses.
+const LISTED_RISKS: [(&str, &str, &str); 2] = [
+    (
+        "new source service: ",
+        "new source service",
+        "new source services",
+    ),
+    ("new source host: ", "new source host", "new source hosts"),
+];
+
+/// The risk lines of one package with the values of each listed kind grouped
+/// into one line, at the place the kind first appears, values in the order
+/// first seen and without repeats. The `RISK: ` prefix is dropped; any other
+/// line is kept as it is.
+pub(crate) fn group_risks(lines: &[String]) -> Vec<String> {
+    enum Row<'a> {
+        Listed(usize, Vec<&'a str>),
+        Plain(&'a str),
+    }
+    let mut rows: Vec<Row> = Vec::new();
+    for line in lines {
+        let body = line.strip_prefix("RISK: ").unwrap_or(line);
+        let Some(kind) = LISTED_RISKS
+            .iter()
+            .position(|(prefix, _, _)| body.starts_with(prefix))
+        else {
+            rows.push(Row::Plain(body));
+            continue;
+        };
+        let value = &body[LISTED_RISKS[kind].0.len()..];
+        match rows
+            .iter_mut()
+            .find(|r| matches!(r, Row::Listed(k, _) if *k == kind))
+        {
+            Some(Row::Listed(_, values)) => {
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+            }
+            _ => rows.push(Row::Listed(kind, vec![value])),
+        }
+    }
+    rows.iter()
+        .map(|row| match row {
+            Row::Plain(text) => text.to_string(),
+            Row::Listed(kind, values) => {
+                let (_, one, many) = LISTED_RISKS[*kind];
+                match values.as_slice() {
+                    [only] => format!("{one}: {only}"),
+                    _ => format!("{many}: {}", values.join(", ")),
+                }
+            }
+        })
+        .collect()
+}
+
+/// The Needs review section: each package that has review lines, with its
+/// lines grouped by [`group_risks`]. Empty when no package has any.
+pub(crate) fn needs_review_text(risks: &[(String, Vec<String>)]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if risks.is_empty() {
+        return out;
+    }
+    let _ = writeln!(out, "\nNeeds review ({}):", risks.len());
+    for (pkg, lines) in risks {
+        let _ = writeln!(out, "  {pkg}");
+        for line in group_risks(lines) {
+            let _ = writeln!(out, "    risk  {line}");
+        }
+    }
+    out
+}
+
 /// The packages among `pkgs` that `lines_of` gives lines for, with those
 /// lines, in the order given.
 pub(crate) fn with_lines<'a>(
@@ -259,15 +334,7 @@ pub(crate) fn print_run_summary(memory: &MemorySink, state_root: &Path) -> Strin
     let risks = with_lines(touched.iter().copied(), |pkg| {
         ap_build::risk_flags::lines_of_package(state_root, pkg)
     });
-    if !risks.is_empty() {
-        let _ = writeln!(out, "\nNeeds review ({}):", risks.len());
-    }
-    for (pkg, lines) in &risks {
-        let _ = writeln!(out, "  {pkg}");
-        for line in lines {
-            let _ = writeln!(out, "    {line}");
-        }
-    }
+    out.push_str(&needs_review_text(&risks));
 
     let lint = rpmlint_errors_of(state_root, &built);
     if !lint.is_empty() {
@@ -301,6 +368,105 @@ pub(crate) fn print_run_summary(memory: &MemorySink, state_root: &Path) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lines(text: &[&str]) -> Vec<String> {
+        text.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn one_new_service_or_host_is_a_singular_line() {
+        assert_eq!(
+            group_risks(&lines(&["RISK: new source service: tar_scm"])),
+            vec!["new source service: tar_scm"]
+        );
+        assert_eq!(
+            group_risks(&lines(&["RISK: new source host: github.com"])),
+            vec!["new source host: github.com"]
+        );
+    }
+
+    #[test]
+    fn the_services_of_a_package_are_one_line_in_the_order_first_seen() {
+        let input = lines(&[
+            "RISK: new source service: tar_scm",
+            "RISK: new source service: recompress",
+            "RISK: new source service: set_version",
+            "RISK: new source service: cargo_vendor",
+        ]);
+        assert_eq!(
+            group_risks(&input),
+            vec!["new source services: tar_scm, recompress, set_version, cargo_vendor"]
+        );
+    }
+
+    #[test]
+    fn a_service_and_a_host_are_separate_lines_at_their_first_places() {
+        let input = lines(&[
+            "RISK: new source host: github.com",
+            "RISK: new source service: tar_scm",
+            "RISK: new source host: gitlab.com",
+            "RISK: new source service: recompress",
+        ]);
+        assert_eq!(
+            group_risks(&input),
+            vec![
+                "new source hosts: github.com, gitlab.com",
+                "new source services: tar_scm, recompress",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_kind_is_kept_as_it_is_and_keeps_its_place() {
+        let input = lines(&[
+            "RISK: new scriptlet: %post",
+            "RISK: new source service: tar_scm",
+            "RISK: not analysed: the spec has a macro",
+            "RISK: new source service: recompress",
+        ]);
+        assert_eq!(
+            group_risks(&input),
+            vec![
+                "new scriptlet: %post",
+                "new source services: tar_scm, recompress",
+                "not analysed: the spec has a macro",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repeated_value_is_listed_once() {
+        let input = lines(&[
+            "RISK: new source service: tar_scm",
+            "RISK: new source service: tar_scm",
+        ]);
+        assert_eq!(group_risks(&input), vec!["new source service: tar_scm"]);
+    }
+
+    #[test]
+    fn the_needs_review_section_reads_as_planned() {
+        let risks = vec![(
+            "jay-compositor".to_string(),
+            lines(&[
+                "RISK: new source service: tar_scm",
+                "RISK: new source service: recompress",
+                "RISK: new source service: set_version",
+                "RISK: new source service: cargo_vendor",
+                "RISK: new source host: github.com",
+            ]),
+        )];
+        assert_eq!(
+            needs_review_text(&risks),
+            "\nNeeds review (1):\n  jay-compositor\n\
+             \x20   risk  new source services: tar_scm, recompress, set_version, cargo_vendor\n\
+             \x20   risk  new source host: github.com\n"
+        );
+    }
+
+    #[test]
+    fn no_review_lines_print_no_section() {
+        assert_eq!(needs_review_text(&[]), "");
+    }
 
     fn latest(
         outcomes: &[(&str, PackageOutcome)],
