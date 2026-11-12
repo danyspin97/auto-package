@@ -242,7 +242,8 @@ pub(super) fn review_prompt_update() -> &'static str {
      - The glob style of `%files`: do not narrow or widen a glob.\n\
      - `Summary:`, `%description`, the copyright and licence header, and comments: \
        do not reword one. Do not add a comment, except the reason a new skip or a \
-       dropped bound needs (conventions 11 and 75).\n\
+       dropped bound needs (conventions 11 and 75), and never one that restates a \
+       comment the spec already has.\n\
      - The spelling of a Requires that is already there (`python3dist(...)`, \
        `%{python_module ...}`).\n\
      - A `%license` or licence-file line that no build gate asks for.\n\

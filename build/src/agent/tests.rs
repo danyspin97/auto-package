@@ -2,6 +2,7 @@ use super::*;
 mod bounds_on_provides;
 mod check_dependencies_once;
 mod check_files_list;
+mod comment_rule;
 mod denies;
 mod edit_bytes;
 mod errors;

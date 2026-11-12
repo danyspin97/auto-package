@@ -83,3 +83,9 @@ fn the_skill_maps_system_library_needs_to_buildrequires_before_the_first_build()
         assert!(s.contains(want), "R1a lacks {want:?}");
     }
 }
+
+#[test]
+fn the_skill_keeps_a_test_dependency_comment_on_its_buildrequires() {
+    let s = section(SKILL, "R4a.", "R4b.");
+    assert!(s.contains("do not repeat it above `%{cargo_test}`"), "{s}");
+}

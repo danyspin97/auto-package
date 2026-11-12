@@ -38,7 +38,7 @@ R1a. System libraries. A crate that links a C library fails at the first build
      reliable only for tools in package metadata, never for headers or
      libraries). The answer is a hint from the machine's repository data, which
      can differ from the project's targets. Write the package it returns as a
-     BuildRequires, with a comment naming the crate or file. Prefer a looked-up
+     BuildRequires, without a comment. Prefer a looked-up
      name; when the lookup finds nothing, keep a plausible name only with a
      comment naming the source file and line that needs it, and say
      `unverified` in `reasoning`, instead of dropping it or guessing silently.
@@ -86,7 +86,9 @@ R4a. `%check` runs the crate's tests:
 
    Leave it out only with a quoted log line proving no test can run here
    (convention 11 (iv)); skip single tests with `-- --skip <name>` and a
-   comment naming the reason.
+   comment naming the reason. A dependency a test needs (a font, a tool) is
+   explained by the comment on its BuildRequires only; do not repeat it above
+   `%{cargo_test}`.
 
 R4b. `vendor.tar.zst` is made by the `cargo_vendor` service in `_service`. The
    pipeline runs the services (`osc service ra`) before the build; your turn

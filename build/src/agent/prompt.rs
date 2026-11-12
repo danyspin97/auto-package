@@ -41,6 +41,20 @@ const PRIORITIES: &str = r#"
    `patch_dependencies`, `use_upstream_wheel`, vendoring, a relaxed bound, an
    added Source, an extra package, a failing test skipped with evidence)
    instead of reporting a hollow success.
+4. **Comment only what would surprise a maintainer.** Add a spec comment
+   only when a reader would otherwise be surprised or need evidence: a skipped
+   or deselected test and why, an `unverified` dependency with its source
+   `file:line`, a deviation from the usual packaging (a pinned version, a
+   patch rationale, a disabled feature), a non-obvious workaround. Never
+   comment a standard BuildRequires, Requires, Source or macro line whose
+   purpose its name makes evident (a compiler, a library the crate links), the
+   packaging tool's mechanics (archive naming, services, vendoring), where you
+   found the information, or what a line does. When unsure, write no comment,
+   but never drop a comment another rule requires (a patch tag, `unverified`
+   evidence, a licence or legal note).
+   Give a fact one comment, on the line it explains: a `%check` comment is
+   only for the decision to skip or omit tests and does not restate a
+   `BuildRequires` comment. Evidence comments may be longer than one line.
 "#;
 
 /// The Bash grants of a checkout turn (`turn_allowed_tools`), and the refusals
