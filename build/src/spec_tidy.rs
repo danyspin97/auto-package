@@ -5,6 +5,7 @@
 //! because a review of the specs of a full run found the same slips on dozens
 //! of packages: a model asked to fix them one by one spends a turn on each.
 
+pub mod comment_compare;
 pub mod comment_macros;
 pub mod dir_owners;
 #[cfg(test)]

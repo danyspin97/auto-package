@@ -84,37 +84,60 @@ fn is_comment(line: &str) -> bool {
     line.trim_start().starts_with('#')
 }
 
-/// The terminator word of a here-document that `line` opens (`<<WORD`,
-/// `<<'WORD'`, `<<"WORD"`, `<<-WORD`), and whether it is the `<<-` form whose
-/// terminator may be indented. `None` when the line opens none.
+/// The terminator word of a here-document that `line` opens, and whether it is
+/// the `<<-` form whose terminator may be indented. `None` when the line opens
+/// none. The opener is `<<` (or `<<-`), optional blanks, an optional quote or
+/// backslash, then a word that starts with a letter or `_`. `<<<` opens none,
+/// and so does arithmetic such as `$((1<<2))`. Some other `<<` followed by a
+/// name (`x<<y`) is read as an opener too: a false opener only makes the lines
+/// after it count as text, which keeps an edit rather than discarding it.
 fn heredoc_opened(line: &str) -> Option<(String, bool)> {
-    let at = line.find("<<")?;
-    let mut rest = &line[at + 2..];
-    let dash = rest.starts_with('-');
-    if dash {
-        rest = &rest[1..];
+    let mut from = 0;
+    while let Some(i) = line[from..].find("<<") {
+        let after = from + i + 2;
+        if line[after..].starts_with('<') {
+            from = after + 1;
+            continue;
+        }
+        if let Some(opened) = heredoc_word(&line[after..]) {
+            return Some(opened);
+        }
+        from = after;
     }
-    let quote = rest.chars().next().filter(|c| *c == '\'' || *c == '"');
-    if quote.is_some() {
-        rest = &rest[1..];
-    }
+    None
+}
+
+/// The terminator of a here-document whose `<<` is followed by `rest`: see
+/// [`heredoc_opened`].
+fn heredoc_word(rest: &str) -> Option<(String, bool)> {
+    let (dash, rest) = match rest.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, rest),
+    };
+    let rest = rest.trim_start_matches([' ', '\t']);
+    let (quote, rest) = match rest.chars().next() {
+        Some(q @ ('\'' | '"')) => (Some(q), &rest[1..]),
+        Some('\\') => (None, &rest[1..]),
+        _ => (None, rest),
+    };
     let word: String = rest
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect();
-    if word.is_empty() || word.starts_with(|c: char| c.is_ascii_digit()) {
+    if !word.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
         return None;
     }
-    if let Some(q) = quote {
-        if !rest[word.len()..].starts_with(q) {
-            return None;
-        }
+    if let Some(q) = quote
+        && !rest[word.len()..].starts_with(q)
+    {
+        return None;
     }
     Some((word, dash))
 }
 
-/// The depth of open macro bodies (`%{...}`, `%{lua:...}`) after `line`, given
-/// the depth before it. A `%{` opens a body; the braces inside it count.
+/// The depth of open macro bodies (`%{...}`, `%(...)`, `%[...]`) after `line`,
+/// given the depth before it. Each opener counts as one level, and the brackets
+/// of every kind inside it count.
 fn brace_depth_after(line: &str, depth: usize) -> usize {
     let mut depth = depth;
     let mut chars = line.chars().peekable();
@@ -122,7 +145,7 @@ fn brace_depth_after(line: &str, depth: usize) -> usize {
         if depth == 0 {
             if c == '%' {
                 match chars.peek().copied() {
-                    Some('{') => {
+                    Some('{' | '(' | '[') => {
                         chars.next();
                         depth = 1;
                     }
@@ -134,8 +157,8 @@ fn brace_depth_after(line: &str, depth: usize) -> usize {
             }
         } else {
             match c {
-                '{' => depth += 1,
-                '}' => depth -= 1,
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth -= 1,
                 _ => {}
             }
         }
@@ -143,27 +166,20 @@ fn brace_depth_after(line: &str, depth: usize) -> usize {
     depth
 }
 
-/// Escape the macros in the comment lines of `spec`, returning the new text
-/// and the 1-based numbers of the lines that changed.
-///
-/// A comment line is left alone when rpm would not read it as a comment or
-/// would read it as expanded text: inside `%changelog` or `%description`,
-/// inside a here-document of a script section, inside an open `%{...}` body,
-/// or continuing a line that ends in `\`. The pass is idempotent.
-pub fn escape_comment_macros(spec: &str) -> (String, Vec<usize>) {
-    let mut out = String::with_capacity(spec.len() + 16);
-    let mut changed = Vec::new();
+/// Which lines rpm reads as comments: `true` for each `#` line that rpm reads
+/// as a comment and not as text. Such a line is not one inside `%changelog` or
+/// `%description`, inside a here-document of a script section, inside an open
+/// `%{...}` body, or continuing a line that ends in `\`. Section lines are
+/// never comments.
+pub(super) fn comment_lines(lines: &[&str]) -> Vec<bool> {
+    let mut real = Vec::with_capacity(lines.len());
     let mut skip_section = false;
     let mut script = false;
     // The terminator word and the `<<-` flag of the open here-document.
     let mut heredoc: Option<(String, bool)> = None;
     let mut depth = 0usize;
     let mut continued = false;
-    let lines: Vec<&str> = spec.split('\n').collect();
-    for (i, &line) in lines.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
+    for &line in lines {
         if is_section(line) {
             let name = first_word(line);
             skip_section = matches!(name, "%changelog" | "%description");
@@ -171,19 +187,11 @@ pub fn escape_comment_macros(spec: &str) -> (String, Vec<usize>) {
                 || TRIGGER_PREFIXES.iter().any(|p| name.starts_with(p));
             heredoc = None;
             depth = 0;
-            out.push_str(line);
+            real.push(false);
         } else {
             let comment = is_comment(line);
             let inside = skip_section || depth > 0 || continued || heredoc.is_some();
-            if comment && !inside {
-                let escaped = escape_line(line);
-                if escaped != line {
-                    changed.push(i + 1);
-                }
-                out.push_str(&escaped);
-            } else {
-                out.push_str(line);
-            }
+            real.push(comment && !inside);
             let closes = heredoc.as_ref().map(|(word, dash)| {
                 let t = if *dash { line.trim_start() } else { line };
                 t.trim_end() == word.as_str()
@@ -198,25 +206,38 @@ pub fn escape_comment_macros(spec: &str) -> (String, Vec<usize>) {
         }
         continued = line.trim_end().ends_with('\\');
     }
-    (out, changed)
+    real
 }
 
-/// Whether `a` and `b` are the same spec once every `#` comment line and the
-/// blank lines at the end are dropped.
-pub fn same_without_comments(a: &str, b: &str) -> bool {
-    fn code(spec: &str) -> Vec<&str> {
-        let mut lines: Vec<&str> = spec.lines().filter(|l| !is_comment(l)).collect();
-        while lines.last().is_some_and(|l| l.trim().is_empty()) {
-            lines.pop();
+/// Escape the macros in the comment lines of `spec` (see [`comment_lines`]),
+/// returning the new text and the 1-based numbers of the lines that changed.
+/// The pass is idempotent.
+pub fn escape_comment_macros(spec: &str) -> (String, Vec<usize>) {
+    let lines: Vec<&str> = spec.split('\n').collect();
+    let real = comment_lines(&lines);
+    let mut out = String::with_capacity(spec.len() + 16);
+    let mut changed = Vec::new();
+    for (i, (&line, &is_real)) in lines.iter().zip(&real).enumerate() {
+        if i > 0 {
+            out.push('\n');
         }
-        lines
+        if is_real {
+            let escaped = escape_line(line);
+            if escaped != line {
+                changed.push(i + 1);
+            }
+            out.push_str(&escaped);
+        } else {
+            out.push_str(line);
+        }
     }
-    code(a) == code(b)
+    (out, changed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec_tidy::comment_compare::same_without_comments;
 
     fn escaped(spec: &str) -> String {
         escape_comment_macros(spec).0
@@ -349,39 +370,67 @@ mod tests {
     }
 
     #[test]
+    fn every_here_document_opener_form_is_read() {
+        for (line, word) in [
+            ("cat << EOF", "EOF"),
+            ("cat <<  'EOF'", "EOF"),
+            ("cat <<-\tEOF", "EOF"),
+            ("cat <<\\EOF", "EOF"),
+            ("cat <<\"EOF\"", "EOF"),
+            ("$(cat <<EOF", "EOF"),
+            ("x=$(cat <<-'EOF' | tr a b", "EOF"),
+        ] {
+            assert_eq!(
+                heredoc_opened(line),
+                Some((word.to_string(), line.contains("<<-"))),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_here_document_opener_form_that_is_not_one_opens_nothing() {
+        for line in [
+            "echo <<< x",
+            "x=$((1<<2))",
+            "x=$(( 1 << 2 ))",
+            "echo << 2",
+            "cat <<",
+            "cat << \"\"",
+        ] {
+            assert_eq!(heredoc_opened(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_comment_inside_a_here_document_opened_with_a_space_is_left_alone() {
+        let spec = "%install\ncat << EOF > f\n#!/usr/bin/python3\nEOF\n# after %{x}\n";
+        assert_eq!(
+            escaped(spec),
+            "%install\ncat << EOF > f\n#!/usr/bin/python3\nEOF\n# after %%{x}\n"
+        );
+    }
+
+    #[test]
+    fn a_multi_line_shell_or_expression_body_is_left_alone() {
+        let spec = "%{expand:\nx=$(\n# kept %{x}\n)\n}\n# after %{x}\n%[1 +\n# kept %{y}\n2]\n# after %{y}\n";
+        assert_eq!(
+            escaped(spec),
+            "%{expand:\nx=$(\n# kept %{x}\n)\n}\n# after %%{x}\n%[1 +\n# kept %{y}\n2]\n# after %%{y}\n"
+        );
+        assert_eq!(
+            escaped("%(echo\n# kept %{x}\n)\n# after %{x}\n"),
+            "%(echo\n# kept %{x}\n)\n# after %%{x}\n"
+        );
+    }
+
+    #[test]
     fn the_pass_is_idempotent() {
         let spec = "# a %{_bindir} %%{x} %_libdir\n#%if 0\n%build\n# b %(x)\n";
         let once = escape_comment_macros(spec);
         let twice = escape_comment_macros(&once.0);
         assert_eq!(twice.0, once.0);
         assert!(twice.1.is_empty());
-    }
-
-    #[test]
-    fn a_comment_only_change_leaves_the_code_the_same() {
-        let before = "Name: a\n# old %{_bindir}\n%build\n";
-        let after = "Name: a\n# new text\n%build\n";
-        assert!(same_without_comments(before, after));
-    }
-
-    #[test]
-    fn a_code_change_is_not_the_same_without_comments() {
-        let before = "Name: a\n# c\n%build\n";
-        assert!(!same_without_comments(before, "Name: b\n%build\n"));
-        assert!(!same_without_comments(before, "Name: a\n%build\necho x\n"));
-    }
-
-    #[test]
-    fn trailing_blank_lines_do_not_count() {
-        assert!(same_without_comments(
-            "Name: a\n%build\n",
-            "Name: a\n%build\n\n\n"
-        ));
-        assert!(same_without_comments("Name: a\n# c\n\n", "Name: a\n"));
-        assert!(!same_without_comments(
-            "Name: a\n\n%build\n",
-            "Name: a\n%build\n"
-        ));
     }
 
     #[test]
