@@ -77,7 +77,9 @@ mod changes;
 mod spec_file_name_tests;
 pub use changes::*;
 mod changes_dates;
+mod changes_flag_lines;
 pub use changes_dates::*;
+pub use changes_flag_lines::*;
 mod changes_normalise;
 pub use changes_normalise::*;
 mod changes_drop;
@@ -88,6 +90,8 @@ mod changes_refresh;
 pub use changes_refresh::*;
 #[cfg(test)]
 mod changes_file_tests;
+#[cfg(test)]
+mod changes_flag_lines_tests;
 #[cfg(test)]
 mod changes_merge_tests;
 #[cfg(test)]

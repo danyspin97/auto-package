@@ -59,9 +59,11 @@ pub(super) fn with_update_notes_in_release_entry(
         .map_or(end, |i| at + 1 + i);
     // What stays under the bullet: the flag lines and the blank lines that
     // close the entry. Every other indented line is an earlier recap.
-    let kept = all[at + 1..block_end]
-        .iter()
-        .filter(|l| !l.starts_with(' ') || l.trim_start().starts_with("FLAG: "));
+    let block = &all[at + 1..block_end];
+    let flag = flag_line_mask(block);
+    let kept = (0..block.len())
+        .filter(|&i| !block[i].starts_with(' ') || flag[i])
+        .map(|i| &block[i]);
     let mut out: Vec<String> = all[..=at].iter().map(|l| l.to_string()).collect();
     out.extend(lines.iter().map(|l| format!("  {l}")));
     out.extend(kept.map(|l| l.to_string()));
@@ -98,6 +100,18 @@ mod tests {
             "{out}"
         );
         assert!(out.ends_with("- Update to 1.0\n"));
+    }
+
+    #[test]
+    fn a_wrapped_flag_stays_whole_and_a_bullet_with_a_flag_word_is_not_a_flag() {
+        let flag = "  FLAG: tests skipped: aaaa bbbb\n    cccc dddd";
+        let working = entry(&format!(
+            "- Update to 2.0\n{flag}\n- {} FLAG: marker\n  more words\n",
+            "x".repeat(62)
+        ));
+        let out = with_update_notes_in_release_entry(&working, "2.0", &lines(&["* a"])).unwrap();
+        assert!(out.contains(&format!("  * a\n{flag}\n- ")), "{out}");
+        assert!(out.contains("FLAG: marker\n  more words"), "{out}");
     }
 
     #[test]

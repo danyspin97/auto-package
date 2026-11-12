@@ -202,12 +202,12 @@ pub(super) fn with_flag_lines_in_release_entry(
     {
         return None;
     }
-    // A continuation line of an earlier flag set: two spaces, then `FLAG: `.
-    let stale = |l: &str| l.starts_with("  ") && l.trim_start().starts_with("FLAG: ");
-    let kept: Vec<&str> = all[first + 1..end]
-        .iter()
-        .copied()
-        .filter(|l| !stale(l))
+    // An earlier flag set goes whole: its flags and their wrapped lines.
+    let body = &all[first + 1..end];
+    let stale = flag_line_mask(body);
+    let kept: Vec<&str> = (0..body.len())
+        .filter(|&i| !stale[i])
+        .map(|i| body[i])
         .collect();
     // The flags go under the `Update to` bullet: after its last line, before
     // the next bullet of the entry (a bullet starts at column 0).
@@ -427,13 +427,18 @@ pub(super) fn wrap_changes_line(line: &str) -> Vec<String> {
         .find(|b| rest.starts_with(**b))
         .map_or(0, |b| b.len());
     let first_prefix = &line[..lead + bullet];
-    let indent = " ".repeat(lead + bullet);
+    // A flag's continuation sits deeper than the flag, so it reads as part of it.
+    let flag = if rest.starts_with("FLAG: ") { 2 } else { 0 };
+    let indent = " ".repeat(lead + bullet + flag);
     let mut out = Vec::new();
     let mut current = first_prefix.to_string();
     let mut empty = true;
     for word in rest[bullet..].split_whitespace() {
         let add = if empty { 0 } else { 1 } + word.chars().count();
-        if !empty && current.chars().count() + add > CHANGES_WIDTH {
+        // An ordinary line never breaks before `FLAG:`: the next line would
+        // read as a flag (see `flag_line_mask`), so the word stays on this one.
+        let starts_flag = flag == 0 && word == "FLAG:";
+        if !empty && !starts_flag && current.chars().count() + add > CHANGES_WIDTH {
             out.push(std::mem::replace(&mut current, indent.clone()));
             empty = true;
         }
