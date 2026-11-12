@@ -11,6 +11,7 @@ pub fn is_nvidia_package_name(lower: &str) -> bool {
 }
 
 mod candidates;
+mod failure;
 use candidates::KNOWN_MAPPINGS;
 mod listing;
 pub use candidates::{RepoCandidates, is_known_mapped_name};
@@ -46,6 +47,7 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
     let mut candidates = Vec::new();
     let mut verified_candidates = Vec::new();
     let mut search_hits = Vec::new();
+    let mut search_failed = false;
     let mut distro_evidence: Option<crate::discovery::DistroInfo> = None;
 
     // Check known mappings first
@@ -146,6 +148,8 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
                 .unwrap_or_else(|e| std::panic::resume_unwind(e));
             (github, forges)
         });
+        let (github, github_failed) = github;
+        search_failed = github_failed;
         search_hits.extend(github.iter().flatten().cloned());
         if let Some(urls) = github {
             for url in urls {
@@ -286,8 +290,8 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
 
     if verified_candidates.is_empty() {
         ap_core::diag!(
-            "  ✗ no verified repositories found after trying {} URLs",
-            candidates.len()
+            "{}",
+            failure::none_found_line(candidates.len(), search_failed)
         );
     }
 
@@ -459,7 +463,22 @@ pub(super) fn is_vouched_for(
 
 /// Search GitHub for repositories matching the package name.
 /// Returns multiple candidates ranked by relevance.
-fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
+/// The second value is whether the search itself failed (as opposed to
+/// finding nothing).
+fn search_github_repos(pkg_name: &str) -> (Option<Vec<String>>, bool) {
+    match github_search(pkg_name) {
+        Ok(hits) => (hits, false),
+        Err(e) => {
+            ap_core::diag!(
+                "  GitHub search for {pkg_name} failed: {}",
+                failure::one_line(&e)
+            );
+            (None, true)
+        }
+    }
+}
+
+fn github_search(pkg_name: &str) -> Result<Option<Vec<String>>, String> {
     let normalized = pkg_name.replace("_", "-");
     let search_url = format!(
         "https://api.github.com/search/repositories?q={}&sort=stars&order=desc",
@@ -472,15 +491,11 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
     // the user's `gh auth login` auth and gh's own rate-limit backoff
     // both apply) and only falls back to raw ureq + GITHUB_TOKEN when
     // `gh` isn't installed. See `sources::try_gh_api`'s doc comment.
-    let json = match crate::sources::get_json_for_search(&search_url) {
-        Ok(json) => json,
-        Err(e) => {
-            ap_core::diag!("  GitHub search for {normalized} failed: {e}");
-            return None;
-        }
-    };
+    let json = crate::sources::get_json_for_search(&search_url)?;
 
-    let items = json.get("items")?.as_array()?;
+    let Some(items) = json.get("items").and_then(|i| i.as_array()) else {
+        return Ok(None);
+    };
 
     // GitHub returns the items sorted by stars DESC thanks to the
     // `sort=stars&order=desc` query. Preserve that order by appending to
@@ -522,9 +537,9 @@ fn search_github_repos(pkg_name: &str) -> Option<Vec<String>> {
 
     if !matches.is_empty() {
         ap_core::diag!("  found {} matching repos via GitHub API", matches.len());
-        Some(matches)
+        Ok(Some(matches))
     } else {
-        None
+        Ok(None)
     }
 }
 
