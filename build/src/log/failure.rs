@@ -146,6 +146,10 @@ static POST_BUILD_PROBLEM: LazyLock<Regex> = LazyLock::new(|| {
 static CHECK_MARKER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\.\.\. running \d+-check-").expect("static"));
 
+/// An indented ` - <text>` finding under a post-build check's header line.
+static POST_BUILD_BULLET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s+- \S").expect("static"));
+
 /// Build chatter that is never diagnostic.
 ///
 /// Measured on iteration 1: `copying`, `byte-compiling` and `creating` alone
@@ -277,7 +281,16 @@ fn post_build_failure(lines: &[&str], spans: &[Span]) -> Option<Failure> {
         .unwrap_or(first);
 
     let start = marker.min(first.saturating_sub(2));
-    let end = (last + 2).min(post.end);
+    // A check lists its findings as indented ` - <text>` bullets after the
+    // header (`directories not owned by a package:` names one path per
+    // bullet). Keep the whole list, then one line of context after it.
+    let bullets_end = last
+        + 1
+        + lines[last + 1..post.end]
+            .iter()
+            .take_while(|l| POST_BUILD_BULLET.is_match(l))
+            .count();
+    let end = (bullets_end + 1).max(last + 2).min(post.end);
 
     let kept: Vec<&str> = lines[start..end].to_vec();
     let elided = (end - start).saturating_sub(kept.len());

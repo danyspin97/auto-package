@@ -101,6 +101,36 @@ fn post_build_failure_is_found_without_rpm_error_vocabulary() {
     assert!(f.excerpt.contains("check-install-rpms") || f.excerpt.contains("check-filelist"));
 }
 
+/// A `50-check-filelist` failure naming three unowned directories. The header
+/// matches `POST_BUILD_PROBLEM`; the ` - /path` bullets after it do not, so the
+/// excerpt must reach past them, not stop after the header.
+#[test]
+fn every_unowned_directory_bullet_is_quoted_and_the_excerpt_ends_after_them() {
+    let lines = &[
+        "... running 50-check-filelist",
+        "jay-compositor-1.15.0-1.1.x86_64.rpm: directories not owned by a package:",
+        " - /usr/share/wayland-sessions",
+        " - /usr/share/xdg-desktop-portal",
+        " - /usr/share/xdg-desktop-portal/portals",
+        "... running 51-check-something",
+        "some other line the excerpt must not reach",
+    ];
+    let f = run(lines);
+    assert_eq!(f.genre, Genre::PostBuildCheck);
+    assert_eq!(
+        f.excerpt,
+        [
+            "... running 50-check-filelist",
+            "jay-compositor-1.15.0-1.1.x86_64.rpm: directories not owned by a package:",
+            " - /usr/share/wayland-sessions",
+            " - /usr/share/xdg-desktop-portal",
+            " - /usr/share/xdg-desktop-portal/portals",
+            "... running 51-check-something",
+        ]
+        .join("\n")
+    );
+}
+
 #[test]
 fn traceback_keeps_our_source_and_elides_plumbing() {
     let mut lines = vec!["Executing(%install): /usr/bin/bash -e /var/tmp/rpm-tmp.Asoqjo"];
