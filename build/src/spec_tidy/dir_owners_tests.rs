@@ -1,4 +1,4 @@
-use super::dir_owners::{MissingDir, missing_dirs};
+use super::dir_owners::{MissingDir, missing_dirs, own_new_dirs};
 use super::standard_dirs::{STANDARD_DIRS, is_standard_dir};
 
 /// A spec with `files` after the `%install` of the jay package.
@@ -238,4 +238,74 @@ fn the_whitelist_is_sorted_and_free_of_the_jay_directories() {
         assert!(is_standard_dir(dir), "{dir}");
     }
     assert!(!is_standard_dir("/usr/share/icons/hicolor/48x48/x"));
+}
+
+#[test]
+fn the_jay_files_section_gets_its_dir_lines_before_the_first_entry() {
+    let before = spec(JAY_FILES);
+    let after = own_new_dirs(&before);
+    let section = |s: &str| s.split("%files\n").nth(1).unwrap().to_string();
+    assert_eq!(
+        section(&after),
+        "%{_bindir}/jay\n\
+         %dir %{_datadir}/wayland-sessions\n\
+         %{_datadir}/wayland-sessions/jay.desktop\n\
+         %dir %{_datadir}/xdg-desktop-portal\n\
+         %dir %{_datadir}/xdg-desktop-portal/portals\n\
+         %{_datadir}/xdg-desktop-portal/portals/jay.portal\n\
+         %{_datadir}/xdg-desktop-portal/jay-portals.conf\n\n%changelog\n"
+    );
+    assert_eq!(
+        after.split("%files\n").next(),
+        before.split("%files\n").next()
+    );
+}
+
+#[test]
+fn a_second_run_adds_nothing() {
+    let once = own_new_dirs(&spec(JAY_FILES));
+    assert_eq!(own_new_dirs(&once), once);
+}
+
+#[test]
+fn a_spec_that_needs_nothing_is_returned_as_it_is() {
+    let text = spec("%{_bindir}/jay\n");
+    assert_eq!(own_new_dirs(&text), text);
+    assert_eq!(own_new_dirs(""), "");
+}
+
+#[test]
+fn the_line_goes_inside_the_subpackage_and_if_block_of_its_entry() {
+    let text = spec("%{_bindir}/jay\n").replace(
+        "%changelog\n",
+        "%files -n jay-extra\n%if 0%{?x}\n%attr(0644,root,root) %{_datadir}/extra/a.conf\n\
+         %endif\n\n%changelog\n",
+    );
+    let after = own_new_dirs(&text);
+    assert!(
+        after.contains("%files -n jay-extra\n%if 0%{?x}\n%dir %{_datadir}/extra\n%attr(0644"),
+        "{after}"
+    );
+}
+
+#[test]
+fn crlf_lines_get_crlf_dir_lines() {
+    let text = spec(JAY_FILES).replace('\n', "\r\n");
+    let after = own_new_dirs(&text);
+    assert!(after.contains("%dir %{_datadir}/wayland-sessions\r\n%{_datadir}/wayland"));
+    assert!(!after.replace("\r\n", "").contains('\n'));
+    assert_eq!(own_new_dirs(&after), after);
+}
+
+#[test]
+fn nothing_is_removed_or_reordered() {
+    let before = spec(JAY_FILES);
+    let after = own_new_dirs(&before);
+    let mut rest = after.lines().peekable();
+    for line in before.lines() {
+        while rest.peek().is_some_and(|l| *l != line) {
+            assert!(rest.next().unwrap().starts_with("%dir "));
+        }
+        assert_eq!(rest.next(), Some(line));
+    }
 }

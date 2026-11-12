@@ -459,6 +459,32 @@ mod tidy_on_update {
             );
         }
     }
+
+    #[test]
+    fn the_dirs_a_files_section_lists_but_never_owns_are_added_on_both_paths() {
+        let spec = "Name: jay\nVersion: 2.0\nRelease: 0\nSummary: A tool\n\
+            License: MIT\nSource0: jay-2.0.tar.gz\n\n%description\nA tool.\n\n\
+            %prep\n%setup -q\n\n%build\n\n%install\n\n\
+            %files\n%{_datadir}/wayland-sessions/jay.desktop\n\n%changelog\n";
+        for update in [false, true] {
+            let passes = normalize_spec_text(spec, update, None, None);
+            assert!(
+                passes.text.contains(
+                    "%files\n%dir %{_datadir}/wayland-sessions\n%{_datadir}/wayland-sessions/jay"
+                ),
+                "update {update}:\n{}",
+                passes.text
+            );
+            let change = passes
+                .changes
+                .iter()
+                .find(|c| c.rule == "own_new_dirs")
+                .expect("the pass is reported");
+            assert_eq!(change.added, vec!["%dir %{_datadir}/wayland-sessions"]);
+            let again = normalize_spec_text(&passes.text, update, None, None);
+            assert!(again.changes.iter().all(|c| c.rule != "own_new_dirs"));
+        }
+    }
 }
 
 mod failed_build_log {

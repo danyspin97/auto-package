@@ -427,3 +427,28 @@ pub fn missing_dirs(spec: &str) -> Vec<MissingDir> {
     }
     out
 }
+
+/// `spec` with a `%dir` line for each directory [`missing_dirs`] finds,
+/// outermost first, right before the first `%files` entry under it, so the
+/// entry's subpackage and `%if` block are kept. No line is removed or
+/// reordered; a second run adds nothing.
+pub fn own_new_dirs(spec: &str) -> String {
+    let missing = missing_dirs(spec);
+    if missing.is_empty() {
+        return spec.to_string();
+    }
+    let mut out = String::with_capacity(spec.len() + missing.len() * 40);
+    for (number, line) in spec.split('\n').enumerate() {
+        if number > 0 {
+            out.push('\n');
+        }
+        let eol = if line.ends_with('\r') { "\r\n" } else { "\n" };
+        for dir in missing.iter().filter(|m| m.line == number) {
+            out.push_str("%dir ");
+            out.push_str(&dir.text);
+            out.push_str(eol);
+        }
+        out.push_str(line);
+    }
+    out
+}

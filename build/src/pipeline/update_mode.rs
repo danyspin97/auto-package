@@ -130,7 +130,8 @@ pub(super) struct UpdateMode {
 ///   (a second `%changelog` is not a changelog), `unwrap_python_expand_block` (a
 ///   `#` rpm reads as a comment), `use_version_macro` (a literal version an
 ///   update leaves stale), `escape_comment_macros` (a macro in a comment, which
-///   rpm expands and rpmlint reports).
+///   rpm expands and rpmlint reports), `own_new_dirs` (a `%dir` for a directory
+///   `%files` lists files in and nothing owns, which fails the OBS build).
 /// - skipped on an update: `collapse_dist_info_license_lines` (the form of the
 ///   `%files` licence lines), `normalize_nvidia_license` (licence spelling, which
 ///   rpmlint reports), `move_check_before_files` (section order),
@@ -227,7 +228,10 @@ pub(super) fn normalize_spec_text(
     };
     // A macro in a comment is expanded by rpm and reported by rpmlint, whatever
     // the origin has; the escape is the same on an update.
-    passes.apply("escape_comment_macros", |s| {
+    let passes = passes.apply("escape_comment_macros", |s| {
         crate::spec_tidy::comment_macros::escape_comment_macros(s).0
-    })
+    });
+    // OBS fails a build for a directory no package owns; the `%files` entries
+    // say which directories the package needs, whatever the origin has.
+    passes.apply("own_new_dirs", crate::spec_tidy::dir_owners::own_new_dirs)
 }
