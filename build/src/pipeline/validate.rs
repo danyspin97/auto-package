@@ -57,7 +57,11 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
         // Bounds a distro package's newer release misses are dropped (the
         // dependency stays); see `relaxed_dependencies`.
         let relaxed = PkgState::load(ws).relaxed_dependencies;
-        let passes = normalize_spec_text(&current, st.update.is_some(), origin, source)
+        let package = spec_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(rpm_name.as_str());
+        let passes = normalize_spec_text(&current, st.update.is_some(), origin, source, package)
             .apply("spec_with_published_defects_fixed", |s| {
                 spec_with_published_defects_fixed(s, checkout_dir, &config.rpms_dir)
             })

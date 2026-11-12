@@ -11,6 +11,7 @@ pub mod dir_owners;
 #[cfg(test)]
 mod dir_owners_tests;
 pub mod header;
+pub mod header_add;
 pub mod hygiene;
 pub mod standard_dirs;
 

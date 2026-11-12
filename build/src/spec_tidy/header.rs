@@ -6,6 +6,16 @@ use std::cell::Cell;
 /// The holder the generated header names.
 pub const HOLDER: &str = "SUSE LLC and contributors";
 
+/// The words of the title line of the header.
+const TITLE: &str = "spec file for package";
+/// The word that opens the copyright line of the header.
+const COPYRIGHT: &str = "Copyright (c)";
+
+/// Whether `line` is the title or the copyright line the header renders.
+pub fn is_header_line(line: &str) -> bool {
+    line.contains(TITLE) || line.contains(COPYRIGHT)
+}
+
 thread_local! {
     static FIXED_YEAR: Cell<Option<i64>> = const { Cell::new(None) };
 }
@@ -49,9 +59,9 @@ pub fn with_year<T>(year: i64, f: impl FnOnce() -> T) -> T {
 pub fn spec_header(package: &str, year: i64) -> String {
     format!(
         "#\n\
-         # spec file for package {package}\n\
+         # {TITLE} {package}\n\
          #\n\
-         # Copyright (c) {year} {HOLDER}\n\
+         # {COPYRIGHT} {year} {HOLDER}\n\
          #\n\
          # All modifications and additions to the file contributed by third parties\n\
          # remain the property of their copyright owners, unless otherwise agreed\n\
@@ -72,6 +82,19 @@ pub fn spec_header(package: &str, year: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rendered_title_and_copyright_are_header_lines() {
+        let out = spec_header("x", 2044);
+        let found: Vec<&str> = out.lines().filter(|l| is_header_line(l)).collect();
+        assert_eq!(
+            found,
+            [
+                "# spec file for package x",
+                "# Copyright (c) 2044 SUSE LLC and contributors"
+            ]
+        );
+    }
 
     #[test]
     fn the_year_follows_the_clock() {

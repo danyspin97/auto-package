@@ -275,6 +275,12 @@ mod inherited_checks {
 mod tidy_on_update {
     use crate::pipeline::update_mode::normalize_spec_text;
 
+    /// The spec without the licence header the tidy adds to these fixtures.
+    fn body_after_header(spec: String) -> String {
+        let at = spec.find("Name: ").expect("a Name tag");
+        spec[at..].to_string()
+    }
+
     /// `%check` after `%files`: the order `move_check_before_files` puts right.
     const CHECK_AFTER_FILES: &str = "Name: foo\nVersion: 2.0\nRelease: 0\nSummary: A tool\n\
         License: MIT\nSource0: foo-2.0.tar.gz\n\n%description\nA tool that does things.\n\n\
@@ -297,7 +303,8 @@ mod tidy_on_update {
     #[test]
     fn an_update_keeps_the_order_the_origin_chose() {
         // Only the version macro changes (see the test below): the order stays.
-        let kept = normalize_spec_text(CHECK_AFTER_FILES, true, None, None).text;
+        let kept =
+            body_after_header(normalize_spec_text(CHECK_AFTER_FILES, true, None, None, "x").text);
         assert_eq!(
             kept,
             CHECK_AFTER_FILES.replace("foo-2.0.tar.gz", "foo-%{version}.tar.gz")
@@ -306,7 +313,7 @@ mod tidy_on_update {
 
     #[test]
     fn a_new_spec_still_gets_the_section_order() {
-        let moved = normalize_spec_text(CHECK_AFTER_FILES, false, None, None).text;
+        let moved = normalize_spec_text(CHECK_AFTER_FILES, false, None, None, "x").text;
         assert_ne!(moved, CHECK_AFTER_FILES);
         let check = moved.find("\n%check").expect("a %check");
         let files = moved.find("\n%files").expect("a %files");
@@ -317,7 +324,7 @@ mod tidy_on_update {
     fn an_update_fixes_a_requires_written_after_the_subpackages_it_belongs_to() {
         // A dependency tag after `%python_subpackages` attaches to the wrong
         // subpackage: an edit of this version is fixed on an update too.
-        let kept = normalize_spec_text(SUBPACKAGE_REQUIRES, true, None, None).text;
+        let kept = normalize_spec_text(SUBPACKAGE_REQUIRES, true, None, None, "x").text;
         let tag = kept.find("Requires: python-bar").expect("the tag");
         let sub = kept.find("%python_subpackages").expect("the subpackages");
         assert!(tag < sub, "{kept}");
@@ -347,14 +354,14 @@ mod tidy_on_update {
     #[test]
     fn an_update_drops_a_pytest_build_requires_its_check_does_not_use() {
         let source = plain_tests();
-        let kept = normalize_spec_text(UNUSED_PYTEST, true, None, Some(source.path())).text;
+        let kept = normalize_spec_text(UNUSED_PYTEST, true, None, Some(source.path()), "x").text;
         assert!(!kept.contains("%{python_module pytest}"), "{kept}");
     }
 
     #[test]
     fn a_dropped_pytest_line_is_recorded_under_its_rule() {
         let source = plain_tests();
-        let passes = normalize_spec_text(UNUSED_PYTEST, true, None, Some(source.path()));
+        let passes = normalize_spec_text(UNUSED_PYTEST, true, None, Some(source.path()), "x");
         let change = passes
             .changes
             .iter()
@@ -375,7 +382,7 @@ mod tidy_on_update {
         )
         .unwrap();
         let spec = pyunittest_check("BuildRequires: %{python_module pytest}");
-        let kept = normalize_spec_text(&spec, true, None, Some(source.path())).text;
+        let kept = normalize_spec_text(&spec, true, None, Some(source.path()), "x").text;
         assert!(
             kept.contains("BuildRequires: %{python_module pytest}"),
             "{kept}"
@@ -386,7 +393,7 @@ mod tidy_on_update {
     fn a_pytest_line_the_origin_has_is_kept_though_nothing_uses_it() {
         let source = plain_tests();
         let spec = pyunittest_check("BuildRequires: %{python_module pytest}");
-        let kept = normalize_spec_text(&spec, true, Some(&spec), Some(source.path())).text;
+        let kept = normalize_spec_text(&spec, true, Some(&spec), Some(source.path()), "x").text;
         assert!(
             kept.contains("BuildRequires: %{python_module pytest}"),
             "{kept}"
@@ -396,7 +403,7 @@ mod tidy_on_update {
     #[test]
     fn a_pytest_line_no_source_can_show_is_kept() {
         let spec = pyunittest_check("BuildRequires: %{python_module pytest}");
-        let kept = normalize_spec_text(&spec, true, None, None).text;
+        let kept = normalize_spec_text(&spec, true, None, None, "x").text;
         assert!(
             kept.contains("BuildRequires: %{python_module pytest}"),
             "{kept}"
@@ -416,7 +423,7 @@ mod tidy_on_update {
     fn an_update_leaves_the_obsolete_constructs_for_lint() {
         // The hygiene passes of `lint` are not in the update's normalisation:
         // an update keeps the maintainer's recipe (convention 86).
-        let kept = normalize_spec_text(OBSOLETE, true, None, None).text;
+        let kept = body_after_header(normalize_spec_text(OBSOLETE, true, None, None, "x").text);
         for construct in [
             "Group: Development/Tools",
             "BuildRoot: %{_tmppath}/%{name}",
@@ -442,7 +449,7 @@ mod tidy_on_update {
             %files\n%{_bindir}/foo\n\n%changelog\n";
         let escaped = "# Installs the crate's binaries into %%{_bindir}\nmake install";
         for update in [false, true] {
-            let passes = normalize_spec_text(spec, update, None, None);
+            let passes = normalize_spec_text(spec, update, None, None, "x");
             assert!(
                 passes.text.contains(escaped),
                 "update {update}:\n{}",
@@ -467,7 +474,7 @@ mod tidy_on_update {
             %prep\n%setup -q\n\n%build\n\n%install\n\n\
             %files\n%{_datadir}/wayland-sessions/jay.desktop\n\n%changelog\n";
         for update in [false, true] {
-            let passes = normalize_spec_text(spec, update, None, None);
+            let passes = normalize_spec_text(spec, update, None, None, "x");
             assert!(
                 passes.text.contains(
                     "%files\n%dir %{_datadir}/wayland-sessions\n%{_datadir}/wayland-sessions/jay"
@@ -481,7 +488,7 @@ mod tidy_on_update {
                 .find(|c| c.rule == "own_new_dirs")
                 .expect("the pass is reported");
             assert_eq!(change.added, vec!["%dir %{_datadir}/wayland-sessions"]);
-            let again = normalize_spec_text(&passes.text, update, None, None);
+            let again = normalize_spec_text(&passes.text, update, None, None, "x");
             assert!(again.changes.iter().all(|c| c.rule != "own_new_dirs"));
         }
     }
@@ -509,5 +516,52 @@ mod failed_build_log {
         assert!(!facts(Some(BuildStatus::Succeeded)).has_failed_build_log(true));
         assert!(!facts(None).has_failed_build_log(true));
         assert!(!facts(Some(BuildStatus::Failed)).has_failed_build_log(false));
+    }
+}
+
+mod spec_header_pass {
+    use crate::pipeline::update_mode::normalize_spec_text;
+    use crate::spec_tidy::header::with_year;
+
+    const HEADERLESS: &str = "Name:           x\nVersion:        1\n%changelog\n";
+
+    #[test]
+    fn a_headerless_spec_gets_the_header_and_the_change_is_reported() {
+        for update in [false, true] {
+            let passes = with_year(2041, || {
+                normalize_spec_text(HEADERLESS, update, None, None, "x")
+            });
+            assert!(
+                passes.text.starts_with(
+                    "#\n# spec file for package x\n#\n# Copyright (c) 2041 SUSE LLC and contributors\n"
+                ),
+                "{}",
+                passes.text
+            );
+            let change = passes
+                .changes
+                .iter()
+                .find(|c| c.rule == "add_spec_header")
+                .expect("reported");
+            assert!(change.removed.is_empty());
+            assert_eq!(
+                change.added,
+                [
+                    "# spec file for package x",
+                    "# Copyright (c) 2041 SUSE LLC and contributors"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn an_existing_header_is_untouched_and_a_second_pass_changes_nothing() {
+        let old = "#\n# spec file for package x\n#\n# Copyright (c) 2012 SUSE LINUX GmbH\n#\n\nName: x\n%changelog\n";
+        let kept = with_year(2041, || normalize_spec_text(old, true, None, None, "x"));
+        assert_eq!(kept.text, old);
+        assert!(kept.changes.iter().all(|c| c.rule != "add_spec_header"));
+        let once = normalize_spec_text(HEADERLESS, false, None, None, "x").text;
+        let twice = with_year(2099, || normalize_spec_text(&once, false, None, None, "x"));
+        assert_eq!(twice.text, once);
     }
 }

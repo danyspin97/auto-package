@@ -50,6 +50,21 @@ impl SpecPasses {
     }
 }
 
+impl SpecPasses {
+    /// Cut the lines `rule` added down to those `keep` accepts, so that a pass
+    /// that adds a long block is reported by its telling lines.
+    pub(in crate::pipeline) fn summarise_added(
+        mut self,
+        rule: &str,
+        keep: impl Fn(&str) -> bool,
+    ) -> Self {
+        for change in self.changes.iter_mut().filter(|c| c.rule == rule) {
+            change.added.retain(|l| keep(l));
+        }
+        self
+    }
+}
+
 /// The non-blank lines `before` has and `after` does not, and the other way
 /// round, each line counted as many times as it occurs.
 fn line_diff(before: &str, after: &str) -> (Vec<String>, Vec<String>) {

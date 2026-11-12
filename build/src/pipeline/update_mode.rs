@@ -118,7 +118,8 @@ pub(super) struct UpdateMode {
 /// it out would leave the build, the install or the package's metadata wrong, or
 /// would leave an edit this version makes wrong. The others are style, and an
 /// inherited recipe keeps them as the origin has them:
-/// - kept: `normalize_python_module_versions` (a name that does not exist),
+/// - kept: `add_spec_header` (a spec with no licence header gets the standard one;
+///   an existing header is never changed), `normalize_python_module_versions` (a name that does not exist),
 ///   `fix_stray_dollar_macros` (a bare `$python_sitelib` outside its expansion),
 ///   `fix_missing_alternatives_requires` (an install-time failure),
 ///   `drop_unused_pytest_build_requires` (a pytest BuildRequires that neither
@@ -146,11 +147,20 @@ pub(super) fn normalize_spec_text(
     update: bool,
     origin: Option<&str>,
     source: Option<&Path>,
+    package: &str,
 ) -> SpecPasses {
     let pytest_needed = origin
         .is_some_and(|o| o.lines().any(crate::spec::is_pytest_build_requires))
         || source.is_none_or(crate::spec::tests_may_need_pytest);
     let passes = SpecPasses::new(current)
+        .apply("add_spec_header", |s| {
+            crate::spec_tidy::header_add::add_spec_header(
+                s,
+                package,
+                crate::spec_tidy::header::current_year(),
+            )
+        })
+        .summarise_added("add_spec_header", crate::spec_tidy::header::is_header_line)
         .apply(
             "normalize_python_module_versions",
             crate::spec::normalize_python_module_versions,
