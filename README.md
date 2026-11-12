@@ -850,6 +850,7 @@ auto-package doctor: environment check (offline)
 
   ✓ osc on PATH                             required  osc is on PATH
   ✓ an oscrc file                           required  oscrc at /home/you/.config/osc/oscrc
+  ✓ a changelog author                      required  changelog entries are by Jo Doe <jo@example.org>
   ✓ rpmspec on PATH                         required  rpmspec is on PATH
   ✗ quilt on PATH                           required  quilt is not installed
       sudo zypper install quilt

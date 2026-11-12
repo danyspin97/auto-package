@@ -102,7 +102,9 @@ fn every_check_has_a_unique_id_and_a_name() {
 #[test]
 fn applies_follows_the_needs() {
     let none = Needs::default();
-    for id in ["osc", "oscrc", "rpmspec", "quilt", "sandbox", "gpg"] {
+    for id in [
+        "osc", "oscrc", "author", "rpmspec", "quilt", "sandbox", "gpg",
+    ] {
         assert!(applies(id, &none), "{id} is for every run");
     }
     for id in [
@@ -511,6 +513,7 @@ fn a_run_that_names_no_service_has_no_service_rows() {
         [
             "osc",
             "oscrc",
+            "author",
             "rpmspec",
             "quilt",
             "sandbox",
@@ -518,5 +521,54 @@ fn a_run_that_names_no_service_has_no_service_rows() {
             "gitlab-token",
             "gpg"
         ]
+    );
+}
+
+#[test]
+fn the_author_is_found_in_the_oscrc_or_the_environment_and_never_a_placeholder() {
+    let dir = tempfile::tempdir().unwrap();
+    let services = tempfile::tempdir().unwrap();
+    let rc = dir.path().join("oscrc");
+    fs::write(
+        &rc,
+        "[general]\napiurl = https://api.example.org\n[https://api.example.org]\nrealname = Rc Name\nemail = rc@example.org\n",
+    )
+    .unwrap();
+    let mut p = probe(OsString::new(), services.path(), &no_run);
+    p.oscrc_paths = vec![rc];
+    let rows = run(&Needs::default(), &p);
+    assert!(
+        matches!(&row(&rows, "author").outcome, Outcome::Ok(t) if t.contains("Rc Name <rc@example.org>"))
+    );
+    assert_eq!(row(&rows, "author").required, Required::Yes);
+
+    let mut p = probe(OsString::new(), services.path(), &no_run);
+    p.env.insert("VC_MAILADDR".into(), "YOUR EMAIL HERE".into());
+    p.env.insert("VC_REALNAME".into(), "A B".into());
+    let rows = run(&Needs::default(), &p);
+    assert!(
+        matches!(&row(&rows, "author").outcome, Outcome::MissingText(t) if t.contains("VC_MAILADDR"))
+    );
+
+    p.env.insert("EMAIL".into(), "A B <ab@example.org>".into());
+    let rows = run(&Needs::default(), &p);
+    assert!(matches!(&row(&rows, "author").outcome, Outcome::Ok(_)));
+}
+
+#[test]
+fn a_part_only_the_obs_profile_could_give_is_unchecked_not_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let services = tempfile::tempdir().unwrap();
+    let rc = dir.path().join("oscrc");
+    fs::write(
+        &rc,
+        "[general]\napiurl = https://api.example.org\n[https://api.example.org]\nuser = jdoe\n",
+    )
+    .unwrap();
+    let mut p = probe(OsString::new(), services.path(), &no_run);
+    p.oscrc_paths = vec![rc];
+    let rows = run(&Needs::default(), &p);
+    assert!(
+        matches!(&row(&rows, "author").outcome, Outcome::Unchecked(t) if t.contains("OBS profile"))
     );
 }

@@ -183,6 +183,13 @@ pub const CHECKS: &[Check] = &[
         detect: probes::oscrc,
     },
     Check {
+        id: "author",
+        name: "a changelog author",
+        required: Required::Yes,
+        applies: always,
+        detect: probes::author,
+    },
+    Check {
         id: "rpmspec",
         name: "rpmspec on PATH",
         required: Required::Yes,
@@ -399,10 +406,18 @@ pub fn host_probe() -> Probe<'static> {
     // SAFETY: geteuid has no preconditions and cannot fail.
     let uid = unsafe { libc::geteuid() };
     let osc_config_set = std::env::var_os("OSC_CONFIG").is_some_and(|v| !v.is_empty());
-    let env: BTreeMap<String, String> = ["GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", UNSAFE_ENV]
-        .iter()
-        .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
-        .collect();
+    let env: BTreeMap<String, String> = [
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITLAB_TOKEN",
+        UNSAFE_ENV,
+        "VC_REALNAME",
+        "VC_MAILADDR",
+        "EMAIL",
+    ]
+    .iter()
+    .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+    .collect();
     Probe {
         path: std::env::var_os("PATH").unwrap_or_default(),
         services_dir: PathBuf::from(SERVICE_DIR),

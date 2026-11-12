@@ -131,6 +131,29 @@ pub fn oscrc(probe: &Probe<'_>) -> Outcome {
     }
 }
 
+/// A `Name <email>` for the `.changes` entries, from the sources a run reads
+/// (see `osc::resolve_author`). Without one a run that commits stops. The
+/// OBS profile, the last source, is read over the network, which no check
+/// does: a part only it could give leaves the row unchecked, not missing.
+pub fn author(probe: &Probe<'_>) -> Outcome {
+    let oscrc = probe
+        .oscrc_paths
+        .iter()
+        .find_map(|p| fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let env = |k: &str| probe.env.get(k).filter(|v| !v.trim().is_empty()).cloned();
+    let asked = std::cell::Cell::new(false);
+    let profile = |_: &str, _: &str| {
+        asked.set(true);
+        Err("the doctor makes no network call, a run reads it".to_string())
+    };
+    match crate::osc::resolve_author(&env, &oscrc, None, &profile) {
+        Ok(author) => Outcome::Ok(format!("changelog entries are by {author}")),
+        Err(why) if asked.get() => Outcome::Unchecked(why),
+        Err(why) => Outcome::MissingText(why),
+    }
+}
+
 pub fn sandbox(probe: &Probe<'_>) -> Outcome {
     let unsafe_on = probe
         .env
