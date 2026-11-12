@@ -197,7 +197,7 @@ fn abbreviations_and_numbers_do_not_end_a_sentence() {
         ("See cf. the spec. Next.", "See cf. the spec."),
         ("Ask Dr. Who today. Next.", "Ask Dr. Who today."),
         ("See No. 5 for it. Next.", "See No. 5 for it."),
-        ("Ask J. Smith today. Next.", "Ask J. Smith today."),
+        ("Ask Dr. J. Smith today. Next.", "Ask Dr. J. Smith today."),
         (
             "It needs vendor.tar.zst to exist. Next.",
             "It needs vendor.tar.zst to exist.",
@@ -234,6 +234,34 @@ fn closers_and_cjk_marks_end_a_sentence() {
         ("The last one ends here.", "The last one ends here."),
         ("No end at all", "No end at all"),
         (r#"It said "bad".")"#, r#"It said "bad".")"#),
+    ] {
+        assert_eq!(sentence(text), want, "{text}");
+    }
+}
+
+#[test]
+fn a_single_capital_is_an_initial_only_after_a_title_or_in_dotted_initials() {
+    for (text, want) in [
+        ("The build needs X. Rerun it.", "The build needs X."),
+        ("Ask J. Smith today. Next.", "Ask J."),
+        ("Ask Mr. J. Smith today. Next.", "Ask Mr. J. Smith today."),
+        (
+            "Visit the U.S. Army site. Next.",
+            "Visit the U.S. Army site.",
+        ),
+    ] {
+        assert_eq!(sentence(text), want, "{text}");
+    }
+}
+
+#[test]
+fn quoted_groups_are_balanced_and_never_cut_a_sentence() {
+    for (text, want) in [
+        (r#"x ("a ("b") c") y. z"#, "x y."),
+        (r#"a (see "foo. bar") end. Z"#, r#"a (see "foo. bar") end."#),
+        (r#"("whole")"#, "whole"),
+        ("x ) y. z", "x ) y."),
+        ("x (open y. z", "x (open y."),
     ] {
         assert_eq!(sentence(text), want, "{text}");
     }

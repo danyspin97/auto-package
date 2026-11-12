@@ -128,30 +128,67 @@ pub(super) fn cap(text: &str, limit: usize) -> String {
 /// a quote (`("rustup could not ...")`) is quoted output, not part of the
 /// sentence: it is left out.
 pub(super) fn first_sentence(text: &str) -> String {
-    let text = drop_quoted_groups(&clean_uncapped(text));
-    cap(&text[..sentence_end(&text)], SENTENCE_CAP)
+    let cleaned = clean_uncapped(text);
+    let mut sentence = drop_quoted_groups(&cleaned);
+    if sentence.is_empty() {
+        // Nothing but quoted output: its words are the headline, not an empty one.
+        sentence = clean_uncapped(&cleaned.replace(['(', ')', '"'], ""));
+    }
+    cap(&sentence[..sentence_end(&sentence)], SENTENCE_CAP)
 }
 
-/// `text` without the `("...")` and `('...')` groups, and the space before each.
+/// `text` without its quoted-output groups: each top-level `("...")` or
+/// `('...')` group, balanced so that a quote or a parenthesis inside it does
+/// not end it, and the space before it. A parenthesis that never closes stays.
 fn drop_quoted_groups(text: &str) -> String {
     let mut out = text.to_string();
-    for (open, close) in [("(\"", "\")"), ("('", "')")] {
-        while let Some(start) = out.find(open)
-            && let Some(len) = out[start..].find(close)
-        {
-            let end = start + len + close.len();
-            out.replace_range(start..end, "");
-            let kept = out[..start].trim_end().len();
-            out.replace_range(kept..start, "");
+    loop {
+        let spans = paren_spans(&out);
+        let quoted = spans
+            .iter()
+            .find(|&&(open, _)| out[open + 1..].starts_with(['"', '\'']));
+        let Some(&(open, close)) = quoted else {
+            return out;
+        };
+        let kept = out[..open].trim_end().len();
+        out.replace_range(kept..=close, "");
+    }
+}
+
+/// The outermost balanced `(` `)` pairs of `text`, as the byte offsets of the
+/// two parentheses. A `(` that never closes, or a `)` with nothing open, is in
+/// no pair.
+fn paren_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut open = Vec::new();
+    let mut pairs = Vec::new();
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' => open.push(i),
+            ')' => {
+                if let Some(start) = open.pop() {
+                    pairs.push((start, i));
+                }
+            }
+            _ => {}
         }
     }
-    out
+    pairs.sort_unstable();
+    let mut outer: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in pairs {
+        if outer.last().is_none_or(|&(_, last_end)| start > last_end) {
+            outer.push((start, end));
+        }
+    }
+    outer
 }
 
 /// Abbreviations that do not end a sentence, lowercase, without their last dot.
 const ABBREVIATIONS: [&str; 10] = [
     "e.g", "i.e", "etc", "vs", "cf", "dr", "mr", "mrs", "ms", "approx",
 ];
+
+/// Titles that make a single capital before a dot an initial (`Dr. J. Smith`).
+const TITLES: [&str; 6] = ["dr", "mr", "mrs", "ms", "st", "prof"];
 
 /// Where the first sentence of `text` ends, in bytes (the text length when it
 /// has no sentence end). A `.` ends it when a space or the end follows (after
@@ -160,8 +197,13 @@ const ABBREVIATIONS: [&str; 10] = [
 /// abbreviation (`e.g.`, `etc.`, `No. 5`) or a single capital (`J.`).
 fn sentence_end(text: &str) -> usize {
     let closers = |c: char| matches!(c, '"' | '\'' | ')' | ']' | '}' | '”' | '’' | '»');
+    let groups = paren_spans(text);
     let mut chars = text.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
+        // A sentence does not end inside a parenthesis.
+        if groups.iter().any(|&(open, close)| open < i && i < close) {
+            continue;
+        }
         let mut end = i + c.len_utf8();
         match c {
             '。' | '！' | '？' => {}
@@ -191,16 +233,35 @@ fn sentence_end(text: &str) -> usize {
 }
 
 /// Whether the `.` at byte `dot` ends an abbreviation; `next` is the text
-/// after it.
+/// after it. A single capital is an initial only after a title (`Dr. J.`) or
+/// in dotted initials (`U.S.`); after any other word it ends the sentence.
 fn abbreviation_before(text: &str, dot: usize, next: &str) -> bool {
     let word = text[..dot]
         .rsplit(|c: char| c.is_whitespace() || matches!(c, '(' | '"' | '\'' | '[' | ','))
         .next()
         .unwrap_or("");
     let lower = word.to_lowercase();
+    let before = text[..dot - word.len()].trim_end();
+    let previous = before
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.')
+        .to_lowercase();
+    let capital = word.chars().count() == 1 && word.starts_with(char::is_uppercase);
     ABBREVIATIONS.contains(&lower.as_str())
         || (lower == "no" && next.starts_with(|c: char| c.is_ascii_digit()))
-        || (word.chars().count() == 1 && word.starts_with(char::is_uppercase))
+        || is_dotted_initials(word)
+        || (capital && (before.ends_with('.') || TITLES.contains(&previous.as_str())))
+}
+
+/// Whether `word` is dotted initials such as `U.S` (the last dot is the
+/// sentence's own).
+fn is_dotted_initials(word: &str) -> bool {
+    word.contains('.')
+        && word
+            .split('.')
+            .all(|p| p.is_empty() || (p.chars().count() == 1 && p.starts_with(char::is_uppercase)))
 }
 
 /// [`clean`] without the cap, so a sentence is found before it is cut.
