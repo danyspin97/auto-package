@@ -6,6 +6,7 @@ use crate::osc::branch::project_meta::*;
 use crate::osc::error::*;
 use crate::osc::names::*;
 use crate::osc::query::*;
+use ap_core::event::Event;
 
 /// The API request that rebases a branched package onto the current sources
 /// of its origin (what `osc rebase` does).
@@ -51,18 +52,29 @@ pub fn rebase_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Rebase
         return Ok(Rebased::NotALink);
     }
     let listing_path = format!("/source/{project}/{}", enc(pkg));
+    let listing = api_get(&listing_path, emit)?;
+    let seen = linkinfo_seen(&listing);
+    emit.reporter.report(&Event::Progress {
+        step: emit.step,
+        message: format!("rebase {project}/{pkg}: {seen}"),
+    });
     // A link whose base is already the origin's current revision has nothing
     // to rebase onto, and OBS answers the request with a 404 then.
-    if !linkinfo_is_behind(&api_get(&listing_path, emit)?) {
+    if !linkinfo_is_behind(&listing) {
         return check_link(project, pkg, emit);
     }
     let path = rebase_api_path(project, pkg);
     let out = api_call(Some("POST"), &path, None, emit)?;
     if !out.success() {
+        let stderr = if is_not_found(&out.stderr) {
+            format!("{}\n{seen}", out.stderr.trim_end())
+        } else {
+            out.stderr
+        };
         return Err(Error::OscFailed {
             cmd: format!("api -X POST {path}"),
             code: out.code,
-            stderr: out.stderr,
+            stderr,
         });
     }
     check_link(project, pkg, emit)
@@ -172,20 +184,70 @@ mod link_origin_tests {
     }
 }
 
+/// The `srcmd5` and `baserev` of a package listing's `<linkinfo>`, each `None`
+/// when absent (or when there is no `<linkinfo>` at all).
+fn linkinfo_revs(xml: &str) -> (Option<String>, Option<String>) {
+    let Some(rest) = xml.find("<linkinfo").map(|i| &xml[i..]) else {
+        return (None, None);
+    };
+    let tag = &rest[..rest.find('>').unwrap_or(rest.len())];
+    (
+        crate::obs_xml::attr(tag, "srcmd5"),
+        crate::obs_xml::attr(tag, "baserev"),
+    )
+}
+
 /// Whether a package listing's `<linkinfo>` shows the link based on a revision
 /// of its origin other than the current one. Unknown counts as behind, so the
 /// rebase is still asked for.
 pub(super) fn linkinfo_is_behind(xml: &str) -> bool {
-    let Some(rest) = xml.find("<linkinfo").map(|i| &xml[i..]) else {
-        return true;
-    };
-    let tag = &rest[..rest.find('>').unwrap_or(rest.len())];
-    match (
-        crate::obs_xml::attr(tag, "srcmd5"),
-        crate::obs_xml::attr(tag, "baserev"),
-    ) {
+    match linkinfo_revs(xml) {
         (Some(current), Some(base)) => current != base,
         _ => true,
+    }
+}
+
+/// The `<linkinfo>` values [`rebase_package`] compared, as one line for the
+/// run record and for a 404 from the rebase request.
+fn linkinfo_seen(xml: &str) -> String {
+    let (srcmd5, baserev) = linkinfo_revs(xml);
+    let shown = |v: Option<String>| v.unwrap_or_else(|| "none".into());
+    format!(
+        "linkinfo srcmd5={} baserev={} behind={}",
+        shown(srcmd5),
+        shown(baserev),
+        linkinfo_is_behind(xml)
+    )
+}
+
+#[cfg(test)]
+mod linkinfo_seen_tests {
+    use super::*;
+
+    #[test]
+    fn the_values_compared_are_recorded_with_the_verdict() {
+        let at = r#"<directory><linkinfo project="P" srcmd5="aa" baserev="aa"/></directory>"#;
+        assert_eq!(
+            linkinfo_seen(at),
+            "linkinfo srcmd5=aa baserev=aa behind=false"
+        );
+        let behind = r#"<directory><linkinfo project="P" srcmd5="bb" baserev="aa"/></directory>"#;
+        assert_eq!(
+            linkinfo_seen(behind),
+            "linkinfo srcmd5=bb baserev=aa behind=true"
+        );
+    }
+
+    #[test]
+    fn a_missing_value_is_recorded_as_none_and_counts_as_behind() {
+        assert_eq!(
+            linkinfo_seen(r#"<linkinfo project="P" srcmd5="aa"/>"#),
+            "linkinfo srcmd5=aa baserev=none behind=true"
+        );
+        assert_eq!(
+            linkinfo_seen("<directory/>"),
+            "linkinfo srcmd5=none baserev=none behind=true"
+        );
     }
 }
 
