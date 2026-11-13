@@ -148,6 +148,16 @@ fn changelog_bullets_name_no_file_and_no_own_fix() {
     assert!(convention(40).contains("A cosmetic edit the gate did not force gets no bullet."));
 }
 
+/// Convention 40 gives no bullet to housekeeping: an archive name that only tracks
+/// the release, and a workaround removed from the build sections.
+#[test]
+fn housekeeping_edits_get_no_bullet() {
+    assert!(convention(40).contains("Housekeeping gets no bullet either"));
+    assert!(convention(40).contains("changes only the archive name of the new"));
+    assert!(convention(40).contains("workaround removed from `%prep`, `%build` or `%check`"));
+    assert!(convention(40).contains("A changed host or project is a change"));
+}
+
 /// Dropping an `rm` of installed files is judged on the installed tree, not the source.
 #[test]
 fn an_rm_of_installed_files_is_checked_against_the_installed_tree() {

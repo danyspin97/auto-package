@@ -195,8 +195,10 @@ latter, name the exact missing compiler/SDK and quote the build.log line proving
   log and the package notes, not to the changelog.
 - "changelog": required when action is "edited" and a change needs a bullet;
   empty when every change is a dependency change (a BuildRequires, a Requires or a
-  version bound), which gets no bullet; any other edit with an empty changelog is
-  rolled back. The rules are convention 40 above.
+  version bound), or housekeeping: a Source name change that only tracks the archive
+  name of the new release (and its %setup -n directory), or a workaround removed from
+  %prep, %build or %check that skips no test. Those get no bullet; any other edit with
+  an empty changelog is rolled back. The rules are convention 40 above.
 - "evidence": MUST list SPECIFIC files/patterns you Read or Grepped before editing.
   REQUIRED format (each entry must name a specific file or pattern):
   ["Read source/pyproject.toml lines 1-50",
