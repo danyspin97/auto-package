@@ -29,3 +29,4 @@ mod text;
 mod tools;
 mod turn_response;
 mod user_text;
+mod workspace_section;

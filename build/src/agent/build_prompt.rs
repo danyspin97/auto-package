@@ -509,6 +509,8 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
          \n\
          {source_note}\
          ## Workspace\n\
+         Your working directory is this workspace. Give every path in a command \
+         relative to it (`conventions/75.md`, `source/`): never an absolute path or `..`.\n\
          {map}\n\
          \n\
          {spec_section}\
