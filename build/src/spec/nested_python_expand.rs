@@ -43,7 +43,7 @@ pub fn fresh_nested_python_expand_lines(before: &str, after: &str) -> Vec<(usize
 
 /// The brace depth after `line`, starting from `depth`. `%{` opens a macro and
 /// `}` closes one, so `%{$python_sitelib}` leaves the depth where it was.
-fn brace_depth(line: &str, mut depth: usize) -> usize {
+pub(super) fn brace_depth(line: &str, mut depth: usize) -> usize {
     let bytes = line.as_bytes();
     let mut i = 0;
     while i < bytes.len() {

@@ -427,6 +427,18 @@ fn accept_checked(
     ) {
         return Err(problem);
     }
+    // A braced block the origin has keeps its shape (convention 19 (section 119)).
+    if let Some(problem) = reject_reshaped_python_expand_block(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
+    ) {
+        return Err(problem);
+    }
 
     // A patch header naming an absolute path or a `..` component would let the
     // patch carry files from outside the checkout into the commit. Checked for

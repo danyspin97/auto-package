@@ -158,6 +158,11 @@ pub use nested_python_expand::*;
 #[cfg(test)]
 mod nested_python_expand_tests;
 
+mod python_expand_shape;
+pub use python_expand_shape::*;
+#[cfg(test)]
+mod python_expand_shape_tests;
+
 #[cfg(test)]
 mod check_probe_tests;
 mod deps;

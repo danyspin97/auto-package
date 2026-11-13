@@ -174,6 +174,11 @@ pub enum SpecRejection {
     NestedPythonExpand {
         lines: Vec<String>,
     },
+    /// The edit reshaped a braced `%{python_expand ...}` block the origin has
+    /// (convention 19 (section 119)), named by the origin's first line.
+    ReshapedPythonExpandBlock {
+        first_lines: Vec<String>,
+    },
     /// The edit left an rpmlintrc with lines convention 39 does not allow, as
     /// `file: line N (...) ...`.
     BadRpmlintrc {
