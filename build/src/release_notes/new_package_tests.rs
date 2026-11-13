@@ -47,7 +47,7 @@ fn a_first_package_reads_the_top_section_of_the_changelog_in_its_archive() {
         .unwrap();
     assert!(status.success());
     let got = gather(None, Some(&archive), None, "1.2.0", false);
-    assert_eq!(got.lines, ["* Add a thing", "* Fix a bug"]);
+    assert_eq!(got.releases[0].1, ["* Add a thing", "* Fix a bug"]);
     assert_eq!(got.fetch_problem, None);
 }
 
@@ -99,7 +99,7 @@ fn without_an_agent_long_notes_name_the_file_and_call_no_model() {
     assert!(status.success());
     let got = gather(None, Some(&archive), None, "1.2.0", true);
     assert_eq!(
-        got.lines,
+        got.releases[0].1,
         ["* Too many changes to list, see CHANGELOG.md in the sources"]
     );
 }

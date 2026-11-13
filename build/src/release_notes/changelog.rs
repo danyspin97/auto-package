@@ -155,6 +155,33 @@ fn is_heading_of(line: &str, version: &str) -> bool {
     false
 }
 
+/// The releases of a changelog `section` (as [`section_between`] cuts it) that
+/// are newer than `old` and not newer than `new`, in the section's order (the
+/// newest first): each with its version and the body under its heading. Only
+/// headings of the section's own level (its first release heading) split it.
+pub(super) fn releases_of_section(section: &str, old: &str, new: &str) -> Vec<(String, String)> {
+    let mut level = None;
+    let mut out: Vec<(String, Vec<&str>)> = Vec::new();
+    for line in section.lines() {
+        let heading = heading_version(line);
+        if let Some(v) = heading {
+            let level = *level.get_or_insert_with(|| heading_level(line));
+            let in_window = version::sort_cmp(&v, old) == Ordering::Greater
+                && version::sort_cmp(&v, new) != Ordering::Greater;
+            if heading_level(line) == level && in_window {
+                out.push((v, Vec::new()));
+                continue;
+            }
+        }
+        if let Some(cur) = out.last_mut() {
+            cur.1.push(line);
+        }
+    }
+    out.into_iter()
+        .map(|(v, body)| (v, body.join("\n")))
+        .collect()
+}
+
 /// The section of a changelog whose heading for `old` is missing. It is taken
 /// when `old` is older than every release heading in the file and `new` is the
 /// first one: the section runs from that heading to the next release heading

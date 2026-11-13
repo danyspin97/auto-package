@@ -11,6 +11,9 @@ mod clean_tests;
 mod markdown;
 #[cfg(test)]
 mod new_package_tests;
+mod per_release;
+#[cfg(test)]
+mod per_release_tests;
 mod render;
 mod routine;
 mod summarize;
@@ -19,16 +22,19 @@ mod tests;
 
 use std::cmp::Ordering;
 
+use crate::osc::ReleaseNotes;
 use crate::sources::RepoRelease;
 use crate::version;
 
 use render::Notes;
 
-/// What a recap found: the lines for the `.changes` entry and, when a fetch
-/// failed, one short line saying so (not an error: the entry just stays short).
+/// What a recap found: the releases of the update, its own first and then the
+/// older ones of the jump that have lines, newest first (none when nothing was
+/// found), and, when a fetch failed, one short line saying so (not an error:
+/// the entry just stays short).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Recap {
-    pub lines: Vec<String>,
+    pub releases: Vec<ReleaseNotes>,
     pub fetch_problem: Option<String>,
 }
 
@@ -47,8 +53,16 @@ pub fn add_recap(
 ) -> Result<(bool, Option<String>), crate::osc::Error> {
     let archive = archive_in(checkout_dir, new);
     let recap = gather(repo_url, archive.as_deref(), old, new, no_agent);
-    crate::osc::set_update_notes(checkout_dir, new, &recap.lines)?;
-    Ok((recap.lines.is_empty(), recap.fetch_problem))
+    // Nothing found still names the update's own release, so an earlier recap
+    // of it is removed.
+    let releases = if recap.releases.is_empty() {
+        vec![(new.to_string(), Vec::new())]
+    } else {
+        recap.releases
+    };
+    let missing = releases.iter().all(|(_, lines)| lines.is_empty());
+    crate::osc::set_release_notes(checkout_dir, &releases)?;
+    Ok((missing, recap.fetch_problem))
 }
 
 /// The source archive of `version` in `dir`: a tarball whose name carries the
@@ -119,14 +133,34 @@ pub fn gather(
         },
         None => Vec::new(),
     };
+    if let Some(old) = old {
+        let changelog = section
+            .as_ref()
+            .map(|s| per_release::from_section(&s.file, &s.text, old, new))
+            .unwrap_or_default();
+        let forge = repo_url
+            .map(|u| per_release::from_releases(u, &releases))
+            .unwrap_or_default();
+        if let Some(several) = per_release::several(new, old, changelog, forge) {
+            return Recap {
+                releases: several,
+                fetch_problem,
+            };
+        }
+    }
+    let lines = recap(section, &releases, |text| {
+        if no_agent {
+            None
+        } else {
+            summarize::summarize(text)
+        }
+    });
     Recap {
-        lines: recap(section, &releases, |text| {
-            if no_agent {
-                None
-            } else {
-                summarize::summarize(text)
-            }
-        }),
+        releases: if lines.is_empty() {
+            Vec::new()
+        } else {
+            vec![(new.to_string(), lines)]
+        },
         fetch_problem,
     }
 }
