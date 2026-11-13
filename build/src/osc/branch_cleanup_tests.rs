@@ -1,4 +1,4 @@
-use super::branch_cleanup::clean_with_origin;
+use super::branch_cleanup::{clean_with_origin, without_explained_flags};
 use super::*;
 
 const ORIGIN: &str = "\
@@ -36,7 +36,7 @@ fn a_dependency_bullet_of_an_unpublished_update_entry_is_dropped() {
          \x20 * Add a template option.\n\
          - Require binaryornot 0.4.4 and requests 2.23.0 as the new release declares\n",
     );
-    let messages = clean_with_origin(dir.path(), Some(ORIGIN), "pkg", &[]);
+    let messages = clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[]);
     assert_eq!(messages.len(), 1, "{messages:?}");
     let text = changes_of(&dir);
     assert!(!text.contains("Require binaryornot"), "{text}");
@@ -53,7 +53,7 @@ fn a_placeholder_bullet_of_an_unpublished_update_entry_is_dropped() {
          - Update to 2.7.1\n\
          \x20 * No upstream changelog found or provided\n",
     );
-    clean_with_origin(dir.path(), Some(ORIGIN), "pkg", &[]);
+    clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[]);
     let text = changes_of(&dir);
     assert!(!text.contains("No upstream changelog"), "{text}");
     assert!(text.contains("- Update to 2.7.1"), "{text}");
@@ -66,7 +66,7 @@ fn an_origin_entry_is_never_edited() {
         "* Support more templates.\n- Require pytest",
     );
     let dir = checkout("2.6.0", &published);
-    let messages = clean_with_origin(dir.path(), Some(&published), "pkg", &[]);
+    let messages = clean_with_origin(dir.path(), Some(&published), None, "pkg", &[]);
     assert!(messages.is_empty(), "{messages:?}");
     assert_eq!(changes_of(&dir), published);
 }
@@ -81,7 +81,7 @@ fn no_origin_leaves_the_changes_alone() {
          - Update to 2.7.1\n\
          - Require pytest\n",
     );
-    assert!(clean_with_origin(dir.path(), None, "pkg", &[]).is_empty());
+    assert!(clean_with_origin(dir.path(), None, None, "pkg", &[]).is_empty());
     assert!(changes_of(&dir).contains("- Require pytest"));
 }
 
@@ -94,7 +94,7 @@ fn a_service_source_dir_the_spec_does_not_name_is_removed() {
     )
     .unwrap();
     fs::create_dir_all(dir.path().join("pleamar/src")).unwrap();
-    let messages = clean_with_origin(dir.path(), Some(ORIGIN), "pkg", &[]);
+    let messages = clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[]);
     assert_eq!(
         messages,
         vec!["deleted 'pleamar/' from the checkout: a service left it there".to_string()]
@@ -112,6 +112,109 @@ fn a_service_source_dir_the_expanded_spec_names_is_kept() {
     .unwrap();
     fs::create_dir_all(dir.path().join("pleamar")).unwrap();
     let named = vec!["pleamar".to_string()];
-    assert!(clean_with_origin(dir.path(), Some(ORIGIN), "pkg", &named).is_empty());
+    assert!(clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &named).is_empty());
     assert!(dir.path().join("pleamar").exists());
+}
+
+/// The cookiecutter case: the origin's spec already skips the test, and the
+/// branch's spec only moves the version on.
+const COOKIE_ORIGIN_CHANGES: &str = "\
+-------------------------------------------------------------------
+Mon Sep 28 12:52:34 UTC 2026 - Andrea Manzini <andrea.manzini@suse.com>
+
+- Update to 2.6.0:
+  * Support more templates.
+";
+
+const COOKIE_ORIGIN_SPEC: &str = "\
+Name: cookiecutter
+Version: 2.6.0
+
+%check
+%pytest -k \"not test_generate_file_verbose_template_syntax_error\"
+";
+
+const COOKIE_SKIP: &str = "-k \"not test_generate_file_verbose_template_syntax_error\"";
+
+fn unpublished_with_flag(flag: &str) -> String {
+    format!(
+        "-------------------------------------------------------------------\n\
+         Wed Nov  4 13:08:52 UTC 2026 - Jane Doe <jane.doe@example.com>\n\
+         \n\
+         - Update to 2.7.1\n\
+         \x20 * Add a template option.\n\
+         \x20 FLAG: tests skipped: {flag}\n"
+    )
+}
+
+#[test]
+fn a_flag_the_origin_spec_already_explains_is_dropped() {
+    let spec = COOKIE_ORIGIN_SPEC.replace("2.6.0", "2.7.1");
+    let changes = unpublished_with_flag(COOKIE_SKIP);
+    let new = without_explained_flags(&changes, COOKIE_ORIGIN_CHANGES, COOKIE_ORIGIN_SPEC, &spec)
+        .expect("the stale flag goes");
+    assert!(!new.contains("FLAG:"), "{new}");
+    assert!(new.contains("* Add a template option."), "{new}");
+    assert!(new.ends_with("* Add a template option.\n"), "{new:?}");
+}
+
+#[test]
+fn a_skip_the_origin_spec_lacks_is_still_flagged() {
+    let spec = format!(
+        "{}%pytest -k \"not test_slow\"\n",
+        COOKIE_ORIGIN_SPEC.replace("2.6.0", "2.7.1")
+    );
+    let changes = unpublished_with_flag(COOKIE_SKIP);
+    let new = without_explained_flags(&changes, COOKIE_ORIGIN_CHANGES, COOKIE_ORIGIN_SPEC, &spec)
+        .expect("the new skip is kept");
+    assert!(
+        new.contains("FLAG: tests skipped: -k \"not test_slow\""),
+        "{new}"
+    );
+    assert!(!new.contains("test_generate_file_verbose"), "{new}");
+}
+
+#[test]
+fn a_flag_in_a_published_entry_is_never_edited() {
+    let spec = COOKIE_ORIGIN_SPEC.replace("2.6.0", "2.6.0");
+    let published = format!(
+        "{}  FLAG: tests skipped: {COOKIE_SKIP}\n",
+        COOKIE_ORIGIN_CHANGES
+    );
+    assert!(without_explained_flags(&published, &published, COOKIE_ORIGIN_SPEC, &spec).is_none());
+}
+
+#[test]
+fn a_blocked_flag_is_kept_whatever_the_spec_says() {
+    let spec = COOKIE_ORIGIN_SPEC.replace("2.6.0", "2.7.1");
+    let changes = format!(
+        "{}  FLAG: a fix turn answered blocked: no network\n",
+        unpublished_with_flag(COOKIE_SKIP)
+    );
+    let new = without_explained_flags(&changes, COOKIE_ORIGIN_CHANGES, COOKIE_ORIGIN_SPEC, &spec)
+        .expect("the stale skip goes");
+    assert!(
+        new.contains("FLAG: a fix turn answered blocked: no network"),
+        "{new}"
+    );
+    assert!(!new.contains("tests skipped"), "{new}");
+}
+
+#[test]
+fn the_flag_is_dropped_from_the_checkout_file() {
+    let dir = checkout("2.7.1", &unpublished_with_flag(COOKIE_SKIP));
+    fs::write(
+        dir.path().join("pkg.spec"),
+        COOKIE_ORIGIN_SPEC.replace("2.6.0", "2.7.1"),
+    )
+    .unwrap();
+    let messages = clean_with_origin(
+        dir.path(),
+        Some(COOKIE_ORIGIN_CHANGES),
+        Some(COOKIE_ORIGIN_SPEC),
+        "pkg",
+        &[],
+    );
+    assert!(messages.iter().any(|m| m.contains("FLAG")), "{messages:?}");
+    assert!(!changes_of(&dir).contains("FLAG:"));
 }

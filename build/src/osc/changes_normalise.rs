@@ -78,7 +78,7 @@ impl Bullet {
 
 /// The entries of a `.changes` text: the text before the first separator
 /// (kept as it is), then each entry from its separator line to the next.
-fn split_entries(text: &str) -> (Vec<&str>, Vec<Vec<&str>>) {
+pub(super) fn split_entries(text: &str) -> (Vec<&str>, Vec<Vec<&str>>) {
     let mut head = Vec::new();
     let mut entries: Vec<Vec<&str>> = Vec::new();
     for line in text.lines() {
