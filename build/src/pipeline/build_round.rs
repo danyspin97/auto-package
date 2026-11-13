@@ -416,7 +416,9 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
             }
             reporter.report(&Event::Warning {
                 step: None,
-                message: format!("{rpm_name}: post-build review skipped: {e}"),
+                message: format!(
+                    "{rpm_name}: post-build review skipped: {e}; the package ships without that review"
+                ),
             });
             return None;
         }

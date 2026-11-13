@@ -297,7 +297,9 @@ impl Workspace {
             }),
             Err(e) => reporter.report(&Event::Warning {
                 step: None,
-                message: format!("not removing the unpacked wheel: {e}"),
+                message: format!(
+                    "could not remove the unpacked wheel: {e}; delete it by hand to free its disk space"
+                ),
             }),
         }
     }

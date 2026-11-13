@@ -368,8 +368,8 @@ fn accept_checked(
         reporter.report(&Event::Warning {
             step: Some(step.id),
             message: format!(
-                "spec comment at line {line_no} references a macro; \
-                 RPM expands it during parse: {}",
+                "spec comment at line {line_no} expands a macro when RPM parses it: {}; \
+                 reword the comment so it names no macro",
                 text.trim()
             ),
         });
