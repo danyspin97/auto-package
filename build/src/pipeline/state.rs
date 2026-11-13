@@ -360,7 +360,9 @@ pub fn reconcile_with_obs(
         match download(&obs) {
             Ok(n) if n > 0 => {
                 // The rpmlint log of what was fetched, as a normal download does.
-                let lint = record_rpmlint_logs(rpms_dir, &obs, &version, &ws).warnings;
+                let record = record_rpmlint_logs(rpms_dir, &obs, &version, &ws);
+                let lint: Vec<String> =
+                    record.findings.into_iter().chain(record.warnings).collect();
                 let what = format!("recorded success: OBS built {version}, fetched {n} RPM(s)");
                 let saved = PkgState::update(&ws, |st| {
                     st.last_built_version = Some(version.clone());

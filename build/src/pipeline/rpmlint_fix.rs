@@ -292,6 +292,9 @@ pub(super) fn rpmlint_fix_round(
         ..
     } = ctx;
     let reporter = *reporter;
+    if all_errors.is_empty() {
+        return None;
+    }
     let gate = RpmlintGate {
         no_agent: config.no_agent,
         local: osc::local_build().is_some(),
@@ -301,16 +304,13 @@ pub(super) fn rpmlint_fix_round(
         budget_usd: config.budget_usd,
         signals: ctx.signals.clone(),
     };
-    let fresh = match rpmlint_ask(&gate, errors, &st.rpmlint_shown) {
-        RpmlintAsk::Build => return None,
-        RpmlintAsk::Spent => {
-            reporter.report(&Event::Warning {
-                step: Some(build_step.id),
-                message: rpmlint_warning(rpm_name, "the fix attempts are spent", errors),
-            });
-            return None;
-        }
-        RpmlintAsk::Ask(fresh) => fresh,
+    let ask = rpmlint_ask(&gate, errors, &st.rpmlint_shown);
+    let why = rpmlint_no_turn_why(config.no_agent, gate.local, errors);
+    if let Some(event) = rpmlint_round_note(Some(build_step.id), rpm_name, all_errors, &ask, why) {
+        reporter.report(&event);
+    }
+    let RpmlintAsk::Ask(fresh) = ask else {
+        return None;
     };
     st.rpmlint_shown
         .extend(errors.iter().map(|e| rpmlint_key(e)));
@@ -382,6 +382,66 @@ pub(super) fn rpmlint_fix_round(
             Some(RoundEnd::Retry)
         }
     }
+}
+
+/// Why no fix turn is asked about the `E:` lines of a green build, as the
+/// warning names it. `asked` is what the round would ask about: empty when an
+/// update leaves every line to the origin.
+pub(super) fn rpmlint_no_turn_why(no_agent: bool, local: bool, asked: &[String]) -> &'static str {
+    if no_agent {
+        "the run has no agent turns"
+    } else if local {
+        "a local build does not run the rpmlint fix turn"
+    } else if asked.is_empty() {
+        "an update leaves the lines the origin's build reports too to the origin"
+    } else {
+        "a fix turn already asked about these lines for this version left them"
+    }
+}
+
+/// The line that says how many `E:` lines a build has and the first three.
+pub(super) fn rpmlint_finding(rpm_name: &str, errors: &[String]) -> String {
+    format!(
+        "rpmlint reports {} error(s) in the RPMs of {rpm_name}: {}",
+        errors.len(),
+        errors
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
+/// What the round tells the run about the `E:` lines of a green build before it
+/// acts. A fix turn follows (`Ask`): a progress line, since the run goes on to
+/// fix them. No turn does: the build ships with them, so a warning names them
+/// and says why (`no_turn_why` for `Build`, the spent attempts for `Spent`).
+/// `None` when the build has no `E:` lines.
+pub(super) fn rpmlint_round_note(
+    step: Option<ap_core::event::StepId>,
+    rpm_name: &str,
+    errors: &[String],
+    ask: &RpmlintAsk,
+    no_turn_why: &str,
+) -> Option<Event> {
+    if errors.is_empty() {
+        return None;
+    }
+    Some(match ask {
+        RpmlintAsk::Ask(_) => Event::Progress {
+            step,
+            message: format!("{}; a fix turn follows", rpmlint_finding(rpm_name, errors)),
+        },
+        RpmlintAsk::Build => Event::Warning {
+            step,
+            message: rpmlint_warning(rpm_name, no_turn_why, errors),
+        },
+        RpmlintAsk::Spent => Event::Warning {
+            step,
+            message: rpmlint_warning(rpm_name, "the fix attempts are spent", errors),
+        },
+    })
 }
 
 /// Why a fix turn's result could not be used, as the warning names it.

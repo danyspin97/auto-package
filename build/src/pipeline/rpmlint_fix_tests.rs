@@ -2,7 +2,7 @@ use super::build_round::{record_rpmlint_logs, revert_warning};
 use super::rpmlint_fix::{
     RpmlintAsk, RpmlintGate, RpmlintTurn, errors_not_in_origin, load_rpmlint_shown,
     persist_rpmlint_shown, rpmlint_after_turn, rpmlint_ask, rpmlint_comment_only_warning,
-    rpmlint_key, split_origin_errors, turn_failure,
+    rpmlint_key, rpmlint_no_turn_why, rpmlint_round_note, split_origin_errors, turn_failure,
 };
 use super::*;
 use crate::pipeline::apply_turn::TurnEffect;
@@ -235,7 +235,8 @@ fn the_stashed_rpmlint_log_gives_its_error_lines_not_its_warnings() {
     .unwrap();
     let record = record_rpmlint_logs(&rpms, "python-cffi", "2.0", &ws);
     assert_eq!(record.errors, lines(&[error]));
-    assert_eq!(record.warnings.len(), 1, "{:?}", record.warnings);
+    assert_eq!(record.findings.len(), 1, "{:?}", record.findings);
+    assert!(record.warnings.is_empty(), "{:?}", record.warnings);
     // A log with no E: line has no errors, and the stash is taken once.
     std::fs::write(
         stash.join("python-cffi.log"),
@@ -243,7 +244,7 @@ fn the_stashed_rpmlint_log_gives_its_error_lines_not_its_warnings() {
     )
     .unwrap();
     let clean = record_rpmlint_logs(&rpms, "python-cffi", "2.0", &ws);
-    assert!(clean.errors.is_empty() && clean.warnings.is_empty());
+    assert!(clean.errors.is_empty() && clean.findings.is_empty());
     assert!(
         record_rpmlint_logs(&rpms, "python-cffi", "2.0", &ws)
             .errors
@@ -331,4 +332,78 @@ fn a_wheel_switch_refused_for_a_security_patch_keeps_the_built_spec() {
     };
     assert!(text.contains("security patch x.patch"), "{text}");
     assert!(text.contains("the spec that built stands"), "{text}");
+}
+
+#[test]
+fn a_fix_turn_that_follows_reports_progress_not_a_warning() {
+    let errors = lines(&[ZERO]);
+    let ask = rpmlint_ask(&open_gate(), &errors, &BTreeSet::new());
+    let note = rpmlint_round_note(None, "python-pywayland", &errors, &ask, "").unwrap();
+    let Event::Progress { message, .. } = note else {
+        panic!("a turn follows, so no warning: {note:?}");
+    };
+    assert!(message.contains("rpmlint reports 1 error(s)"), "{message}");
+    assert!(message.contains("a fix turn follows"), "{message}");
+}
+
+#[test]
+fn a_build_no_turn_can_ask_about_keeps_the_warning_with_its_reason() {
+    let errors = lines(&[CFFI, ZERO]);
+    let no_agent = RpmlintGate {
+        no_agent: true,
+        ..open_gate()
+    };
+    let ask = rpmlint_ask(&no_agent, &errors, &BTreeSet::new());
+    let why = rpmlint_no_turn_why(no_agent.no_agent, no_agent.local, &errors);
+    let note = rpmlint_round_note(None, "python-cffi", &errors, &ask, why).unwrap();
+    let Event::Warning { message, .. } = note else {
+        panic!("no turn, so the errors ship with a warning: {note:?}");
+    };
+    assert!(
+        message
+            .starts_with("python-cffi: shipped with rpmlint errors, the run has no agent turns: "),
+        "{message}"
+    );
+    assert!(
+        message.contains(CFFI) && message.contains(ZERO),
+        "{message}"
+    );
+}
+
+#[test]
+fn spent_attempts_and_already_asked_lines_keep_the_warning() {
+    let errors = lines(&[ZERO]);
+    let used_up = RpmlintGate {
+        attempts: 3,
+        ..open_gate()
+    };
+    let ask = rpmlint_ask(&used_up, &errors, &BTreeSet::new());
+    assert_eq!(ask, RpmlintAsk::Spent);
+    let note = rpmlint_round_note(None, "python-pywayland", &errors, &ask, "x").unwrap();
+    assert!(
+        matches!(&note, Event::Warning { message, .. } if message.contains("the fix attempts are spent")),
+        "{note:?}"
+    );
+    // Already asked about in this version: the same lines, no turn left.
+    let ask = rpmlint_ask(&open_gate(), &errors, &keys_of(&errors));
+    assert_eq!(ask, RpmlintAsk::Build);
+    let why = rpmlint_no_turn_why(false, false, &errors);
+    let note = rpmlint_round_note(None, "python-pywayland", &errors, &ask, why).unwrap();
+    assert!(
+        matches!(&note, Event::Warning { message, .. } if message.contains("already asked about these lines")),
+        "{note:?}"
+    );
+}
+
+#[test]
+fn a_clean_build_or_one_whose_lines_the_origin_reports_has_no_note_for_no_turn() {
+    assert!(rpmlint_round_note(None, "python-cffi", &[], &RpmlintAsk::Build, "x").is_none());
+    // An update that excuses every line asks nothing; the lines still ship.
+    let shipped = lines(&[CFFI]);
+    let why = rpmlint_no_turn_why(false, false, &[]);
+    let note = rpmlint_round_note(None, "python-cffi", &shipped, &RpmlintAsk::Build, why).unwrap();
+    assert!(
+        matches!(&note, Event::Warning { message, .. } if message.contains("the origin")),
+        "{note:?}"
+    );
 }

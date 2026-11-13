@@ -63,8 +63,14 @@ pub(super) fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, P
                 return Ok(end);
             }
             let build_step = build_step.finish(StepOutcome::Ok);
-            let errors = record_rpmlint(config, obs_name, &ctx.ws, reporter);
-            if let Some(end) = rpmlint_fix_round(ctx, st, &build_step, &build_log, &errors) {
+            let record = record_rpmlint_logs(&config.rpms_dir, obs_name, &config.version, &ctx.ws);
+            for message in record.warnings {
+                reporter.report(&Event::Warning {
+                    step: None,
+                    message,
+                });
+            }
+            if let Some(end) = rpmlint_fix_round(ctx, st, &build_step, &build_log, &record.errors) {
                 return Ok(end);
             }
             Ok(RoundEnd::Finished(build_succeeded(ctx, st, build_step)))
@@ -100,9 +106,11 @@ pub(super) fn build_round(ctx: &RunCtx, st: &mut RunState) -> Result<RoundEnd, P
 }
 
 /// Append the rpmlint result of the RPMs just downloaded for this package to
-/// `state/<pkg>/rpmlint.log`, one dated section per run of rpmlint, and warn
-/// about its errors. The log OBS publishes is overwritten with every build, so
-/// this file is the only record of earlier ones. Returns the `E:` lines.
+/// `state/<pkg>/rpmlint.log`, one dated section per run of rpmlint. The log OBS
+/// publishes is overwritten with every build, so this file is the only record
+/// of earlier ones. Returns the `E:` lines. For a download that no fix turn
+/// follows (the reconcile path), its errors are warnings; a build round reports
+/// them itself, see [`rpmlint_fix_round`].
 pub(super) fn record_rpmlint(
     config: &PipelineConfig,
     obs_name: &str,
@@ -110,7 +118,7 @@ pub(super) fn record_rpmlint(
     reporter: &dyn Reporter,
 ) -> Vec<String> {
     let record = record_rpmlint_logs(&config.rpms_dir, obs_name, &config.version, ws);
-    for message in record.warnings {
+    for message in record.findings.into_iter().chain(record.warnings) {
         reporter.report(&Event::Warning {
             step: None,
             message,
@@ -119,9 +127,11 @@ pub(super) fn record_rpmlint(
     record.errors
 }
 
-/// What [`record_rpmlint_logs`] found: the warnings to report, and the rpmlint
-/// `E:` lines of the RPMs (already without the rpmlintrc filters OBS applied).
+/// What [`record_rpmlint_logs`] found: the findings (one line per log with
+/// `E:` lines), the warnings about the record itself, and the rpmlint `E:` lines
+/// of the RPMs (already without the rpmlintrc filters OBS applied).
 pub(super) struct RpmlintRecord {
+    pub(super) findings: Vec<String>,
     pub(super) warnings: Vec<String>,
     pub(super) errors: Vec<String>,
 }
@@ -136,11 +146,13 @@ pub(super) fn record_rpmlint_logs(
     version: &str,
     ws: &Workspace,
 ) -> RpmlintRecord {
+    let mut findings = Vec::new();
     let mut warnings = Vec::new();
     let mut all_errors = Vec::new();
     let logs = osc::take_rpmlint_logs(rpms_dir, obs_name);
     if logs.is_empty() {
         return RpmlintRecord {
+            findings,
             warnings,
             errors: all_errors,
         };
@@ -155,16 +167,7 @@ pub(super) fn record_rpmlint_logs(
         ));
         let errors = osc::rpmlint_errors(log);
         if !errors.is_empty() {
-            warnings.push(format!(
-                "rpmlint reports {} error(s) in the RPMs of {name}: {}",
-                errors.len(),
-                errors
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ));
+            findings.push(rpmlint_finding(name, &errors));
             all_errors.extend(errors);
         }
     }
@@ -178,6 +181,7 @@ pub(super) fn record_rpmlint_logs(
         warnings.push(format!("could not append to {}: {e}", path.display()));
     }
     RpmlintRecord {
+        findings,
         warnings,
         errors: all_errors,
     }
