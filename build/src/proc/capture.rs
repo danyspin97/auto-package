@@ -276,6 +276,20 @@ pub fn capture_with_timeout_env(
     })
 }
 
+/// The error a failed spawn reports. A working directory that does not exist
+/// fails the spawn with the same ENOENT as a missing program, so the directory
+/// is named as the cause when it is the one that is missing.
+fn launch_failure(e: io::Error, cwd: &Path) -> io::Error {
+    if e.kind() == io::ErrorKind::NotFound && !cwd.exists() {
+        io::Error::new(
+            e.kind(),
+            format!("working directory {} does not exist", cwd.display()),
+        )
+    } else {
+        e
+    }
+}
+
 fn capture_unlocked(
     program: &str,
     args: &[impl AsRef<std::ffi::OsStr>],
@@ -321,7 +335,7 @@ fn capture_unlocked(
         .spawn()
         .map_err(|e| ProcessError::Launch {
             program: program.to_string(),
-            source: e,
+            source: launch_failure(e, cwd),
         })?;
     let group = match track_group(child.id()) {
         Ok(g) => g,

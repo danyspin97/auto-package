@@ -188,3 +188,35 @@ fn large_output_does_not_deadlock() {
     .unwrap();
     assert_eq!(out.stdout.len(), 2_000_000);
 }
+
+#[test]
+fn a_missing_working_directory_is_named_as_the_cause() {
+    let dir = Path::new("/ap-test-missing-cwd/none");
+    let err = capture_with_timeout("sh", &["-c", "true"], dir, quiet(), Duration::from_secs(10))
+        .err()
+        .expect("must fail to launch");
+    let text = err.to_string();
+    assert!(
+        text.contains("working directory /ap-test-missing-cwd/none does not exist"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_missing_program_is_still_named_as_the_program() {
+    let err = capture_with_timeout(
+        "ap-no-such-program-for-test",
+        &["x"],
+        Path::new("/"),
+        quiet(),
+        Duration::from_secs(10),
+    )
+    .err()
+    .expect("must fail to launch");
+    let text = err.to_string();
+    assert!(
+        text.starts_with("could not launch ap-no-such-program-for-test: "),
+        "{text}"
+    );
+    assert!(!text.contains("working directory"), "{text}");
+}
