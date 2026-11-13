@@ -12,17 +12,22 @@ use super::changes_normalise::{normalise_checkout, split_entries};
 use super::service_dirs::remove_service_source_dirs;
 use super::*;
 use crate::fix_flags::{FixFlag, from_spec_diff};
+use crate::release_notes::{FILLED, Fill, fill_missing_recap};
+use ap_core::event::Event;
 use std::collections::BTreeSet;
 
 /// Cleans the leftovers of the branch package `pkg` of `project`, checked out
 /// in `checkout`. `named` is what the expanded spec names. Returns one message
 /// per change made, empty when nothing was left to clean. Best effort: an
 /// origin that cannot be read leaves the `.changes` and the flags as they are.
+/// A missing upstream recap of the update is filled in (`no_agent`: as the run
+/// was asked, no model condenses it); what is not found is reported on `emit`.
 pub fn clean_branch_leftovers(
     checkout: &Path,
     project: &str,
     pkg: &str,
     named: &[String],
+    no_agent: bool,
     emit: Emit<'_>,
 ) -> Vec<String> {
     let origin = match link_origin(project, pkg, emit) {
@@ -41,12 +46,20 @@ pub fn clean_branch_leftovers(
     };
     let origin_changes = read("changes");
     let origin_spec = read("spec");
+    let warn = |message: String| {
+        emit.reporter.report(&Event::Warning {
+            step: emit.step,
+            message,
+        })
+    };
     clean_with_origin(
         checkout,
         origin_changes.as_deref(),
         origin_spec.as_deref(),
         pkg,
         named,
+        no_agent,
+        &warn,
     )
 }
 
@@ -73,13 +86,16 @@ pub fn has_explained_flags(
 }
 
 /// [`clean_branch_leftovers`] with the origin's `.changes` and spec texts
-/// given (`None` when the package has no readable origin).
+/// given (`None` when the package has no readable origin). `warn` gets what
+/// the fill of the recap could not do.
 pub(super) fn clean_with_origin(
     checkout: &Path,
     origin_changes: Option<&str>,
     origin_spec: Option<&str>,
     pkg: &str,
     named: &[String],
+    no_agent: bool,
+    warn: &dyn Fn(String),
 ) -> Vec<String> {
     let mut messages = origin_changes
         .map(|text| normalise_checkout(checkout, text, pkg))
@@ -88,6 +104,17 @@ pub(super) fn clean_with_origin(
         && drop_explained_flags(checkout, changes, spec, pkg)
     {
         messages.push("dropped the FLAG lines its origin's spec already explains".to_string());
+    }
+    if let (Some(changes), Some(spec)) = (origin_changes, origin_spec) {
+        match fill_missing_recap(checkout, pkg, changes, spec, no_agent) {
+            Ok(Fill::Written { old, new }) => messages.push(format!("{FILLED} for {old}..{new}")),
+            Ok(Fill::NotFound { old, new, problem }) => warn(format!(
+                "no upstream notes available for {old}..{new}, so the {new} entry keeps none{}",
+                problem.map(|p| format!(" ({p})")).unwrap_or_default()
+            )),
+            Ok(Fill::Nothing) => {}
+            Err(why) => warn(format!("the upstream recap was not filled in: {why}")),
+        }
     }
     for name in remove_service_source_dirs(checkout, named) {
         messages.push(format!(

@@ -36,7 +36,7 @@ fn a_dependency_bullet_of_an_unpublished_update_entry_is_dropped() {
          \x20 * Add a template option.\n\
          - Require binaryornot 0.4.4 and requests 2.23.0 as the new release declares\n",
     );
-    let messages = clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[]);
+    let messages = clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[], false, &|_| {});
     assert_eq!(messages.len(), 1, "{messages:?}");
     let text = changes_of(&dir);
     assert!(!text.contains("Require binaryornot"), "{text}");
@@ -53,7 +53,7 @@ fn a_placeholder_bullet_of_an_unpublished_update_entry_is_dropped() {
          - Update to 2.7.1\n\
          \x20 * No upstream changelog found or provided\n",
     );
-    clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[]);
+    clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[], false, &|_| {});
     let text = changes_of(&dir);
     assert!(!text.contains("No upstream changelog"), "{text}");
     assert!(text.contains("- Update to 2.7.1"), "{text}");
@@ -66,7 +66,15 @@ fn an_origin_entry_is_never_edited() {
         "* Support more templates.\n- Require pytest",
     );
     let dir = checkout("2.6.0", &published);
-    let messages = clean_with_origin(dir.path(), Some(&published), None, "pkg", &[]);
+    let messages = clean_with_origin(
+        dir.path(),
+        Some(&published),
+        None,
+        "pkg",
+        &[],
+        false,
+        &|_| {},
+    );
     assert!(messages.is_empty(), "{messages:?}");
     assert_eq!(changes_of(&dir), published);
 }
@@ -81,7 +89,7 @@ fn no_origin_leaves_the_changes_alone() {
          - Update to 2.7.1\n\
          - Require pytest\n",
     );
-    assert!(clean_with_origin(dir.path(), None, None, "pkg", &[]).is_empty());
+    assert!(clean_with_origin(dir.path(), None, None, "pkg", &[], false, &|_| {}).is_empty());
     assert!(changes_of(&dir).contains("- Require pytest"));
 }
 
@@ -94,7 +102,7 @@ fn a_service_source_dir_the_spec_does_not_name_is_removed() {
     )
     .unwrap();
     fs::create_dir_all(dir.path().join("pleamar/src")).unwrap();
-    let messages = clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[]);
+    let messages = clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[], false, &|_| {});
     assert_eq!(
         messages,
         vec!["deleted 'pleamar/' from the checkout: a service left it there".to_string()]
@@ -112,7 +120,18 @@ fn a_service_source_dir_the_expanded_spec_names_is_kept() {
     .unwrap();
     fs::create_dir_all(dir.path().join("pleamar")).unwrap();
     let named = vec!["pleamar".to_string()];
-    assert!(clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &named).is_empty());
+    assert!(
+        clean_with_origin(
+            dir.path(),
+            Some(ORIGIN),
+            None,
+            "pkg",
+            &named,
+            false,
+            &|_| {}
+        )
+        .is_empty()
+    );
     assert!(dir.path().join("pleamar").exists());
 }
 
@@ -214,7 +233,47 @@ fn the_flag_is_dropped_from_the_checkout_file() {
         Some(COOKIE_ORIGIN_SPEC),
         "pkg",
         &[],
+        false,
+        &|_| {},
     );
     assert!(messages.iter().any(|m| m.contains("FLAG")), "{messages:?}");
     assert!(!changes_of(&dir).contains("FLAG:"));
+}
+
+/// An unpublished update entry with a bare `Update to` bullet, and an origin
+/// that packages 2.6.0 with its own entry. The spec names no forge and the
+/// checkout holds no archive, so the recap has nowhere to be read from.
+#[test]
+fn a_missing_recap_nobody_can_read_is_reported_and_the_entry_stays() {
+    let bare = "-------------------------------------------------------------------\n\
+         Wed Nov  4 13:08:52 UTC 2026 - Jane Doe <jane.doe@example.com>\n\
+         \n\
+         - Update to 2.7.1\n\
+         \n\
+         -------------------------------------------------------------------\n\
+         Mon Sep 28 12:52:34 UTC 2026 - Andrea Manzini <andrea.manzini@suse.com>\n\
+         \n\
+         - Update to 2.6.0:\n\
+         \x20 * Support more templates.\n";
+    let dir = checkout("2.7.1", bare);
+    let origin_spec = "Name: pkg\nVersion: 2.6.0\n";
+    let origin = ORIGIN.to_string();
+    let warnings = std::cell::RefCell::new(Vec::new());
+    let messages = clean_with_origin(
+        dir.path(),
+        Some(&origin),
+        Some(origin_spec),
+        "pkg",
+        &[],
+        true,
+        &|m| warnings.borrow_mut().push(m),
+    );
+    assert!(messages.is_empty(), "{messages:?}");
+    assert_eq!(changes_of(&dir), bare);
+    assert_eq!(warnings.borrow().len(), 1, "{:?}", warnings.borrow());
+    assert!(
+        warnings.borrow()[0].contains("no upstream notes available for 2.6.0..2.7.1"),
+        "{:?}",
+        warnings.borrow()
+    );
 }

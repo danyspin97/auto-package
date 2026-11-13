@@ -3,12 +3,14 @@ use super::*;
 /// Commit the style fixes of `quality::tidy` for `item` into `branch`, without
 /// a build of our own: OBS rebuilds the commit. `ldconfig` says whether the
 /// target defines `%ldconfig_scriptlets`. The rpmlintrc files the spec names
-/// lose their `from Config import *` line in the same commit.
+/// lose their `from Config import *` line in the same commit. `no_agent` is the
+/// run's `--no-agent`, which the upstream recap of the entry is filled in under.
 pub(super) fn tidy_item(
     branch: &str,
     item: &Item,
     ctx: &Ctx<'_>,
     ldconfig: bool,
+    no_agent: bool,
 ) -> Result<TidyDone, String> {
     let _obs_write = ap_build::proc::obs_write();
     let emit = Emit::run(ctx.reporter.as_ref());
@@ -75,6 +77,7 @@ pub(super) fn tidy_item(
     ap_core::fsx::write_atomic(&spec_path, after.as_bytes()).map_err(|e| e.to_string())?;
     let mut cleaned: Vec<String> = Vec::new();
     let mut leftovers = false;
+    let mut recap = false;
     let committed = (|| -> Result<bool, String> {
         for fix in &rpm_fixes {
             ap_core::fsx::write_atomic(&dir.join(&fix.name), fix.after.as_bytes())
@@ -95,10 +98,16 @@ pub(super) fn tidy_item(
         }
         // The leftovers the build commit cleans too, so both leave the same ones.
         let named = osc::spec_source_names(&after);
-        cleaned = osc::clean_branch_leftovers(&dir, branch, &item.pkg, &named, emit);
+        cleaned = osc::clean_branch_leftovers(&dir, branch, &item.pkg, &named, no_agent, emit);
         // Before the bullet is added the `.changes` is the cleanup's alone.
-        leftovers = !cleaned.is_empty()
+        recap = cleaned
+            .iter()
+            .any(|m| m.starts_with(ap_build::release_notes::FILLED));
+        let cleanup = cleaned
+            .iter()
+            .any(|m| !m.starts_with(ap_build::release_notes::FILLED))
             || (!style_changed && changes_differ(&changes_path, changes_before.as_deref()));
+        leftovers = cleanup || recap;
         if !style_changed && !leftovers {
             return Ok(false);
         }
@@ -114,7 +123,8 @@ pub(super) fn tidy_item(
             &commit_message(
                 tidy_changed || !rpm_fixes.is_empty(),
                 provenance_changed,
-                leftovers,
+                cleanup,
+                recap,
             ),
             &commit_files,
             None,
@@ -229,7 +239,7 @@ fn tidy_done(
 }
 
 /// The commit message of a tidy: each change it makes, in order.
-fn commit_message(tidy: bool, provenance: bool, leftovers: bool) -> String {
+fn commit_message(tidy: bool, provenance: bool, cleanup: bool, recap: bool) -> String {
     let mut parts = Vec::new();
     if tidy {
         parts.push("Tidy the spec (auto-package lint)");
@@ -237,8 +247,11 @@ fn commit_message(tidy: bool, provenance: bool, leftovers: bool) -> String {
     if provenance {
         parts.push("Add upstream provenance to patch headers (auto-package lint)");
     }
-    if leftovers {
+    if cleanup {
         parts.push("Clean the branch leftovers (auto-package lint)");
+    }
+    if recap {
+        parts.push("Fill in the upstream recap (auto-package lint)");
     }
     if parts.is_empty() {
         parts.push("Tidy the spec (auto-package lint)");

@@ -201,6 +201,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         &ctx.config.project,
         &ctx.obs_name,
         &named,
+        ctx.config.no_agent,
         Emit::new(ctx.reporter, commit_step.id),
     ) {
         ctx.reporter.report(&Event::Progress {

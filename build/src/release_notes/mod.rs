@@ -10,6 +10,9 @@ mod caps;
 mod changelog;
 #[cfg(test)]
 mod clean_tests;
+mod fill;
+#[cfg(test)]
+mod fill_tests;
 mod markdown;
 #[cfg(test)]
 mod new_package_tests;
@@ -28,6 +31,7 @@ use crate::osc::ReleaseNotes;
 use crate::sources::RepoRelease;
 use crate::version;
 
+pub use fill::{FILLED, Fill, fill_missing_recap};
 use render::Notes;
 
 /// What a recap found: the releases of the update, its own first and then the

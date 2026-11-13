@@ -30,23 +30,27 @@ fn a_named_rpmlintrc_the_checkout_lacks_is_skipped() {
 #[test]
 fn the_commit_says_what_it_changed() {
     assert_eq!(
-        commit_message(true, false, false),
+        commit_message(true, false, false, false),
         "Tidy the spec (auto-package lint)"
     );
     assert_eq!(
-        commit_message(false, true, false),
+        commit_message(false, true, false, false),
         "Add upstream provenance to patch headers (auto-package lint)"
     );
     assert_eq!(
-        commit_message(true, true, false),
+        commit_message(false, false, false, true),
+        "Fill in the upstream recap (auto-package lint)"
+    );
+    assert_eq!(
+        commit_message(true, true, false, false),
         "Tidy the spec (auto-package lint); Add upstream provenance to patch headers (auto-package lint)"
     );
     assert_eq!(
-        commit_message(false, false, true),
+        commit_message(false, false, true, false),
         "Clean the branch leftovers (auto-package lint)"
     );
     assert_eq!(
-        commit_message(true, false, true),
+        commit_message(true, false, true, false),
         "Tidy the spec (auto-package lint); Clean the branch leftovers (auto-package lint)"
     );
 }

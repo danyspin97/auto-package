@@ -111,7 +111,7 @@ impl<'a, 'c> BuildWork<'a, 'c> {
             if job.mechanical {
                 let target = osc::choose_repository(branch, a.distro.as_deref(), &a.arch).0;
                 let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&target);
-                match tidy_item(branch, &item, ctx, ldconfig) {
+                match tidy_item(branch, &item, ctx, ldconfig, a.no_agent) {
                     Ok(done) => {
                         skip = super::tidy::tidy_skip(done).map(str::to_string);
                         Ok(())
