@@ -16,6 +16,7 @@ pub fn patch_names(spec: &str) -> Vec<String> {
     patch_tags(spec)
         .iter()
         .filter_map(|raw| expand_simple(spec, raw))
+        .map(|name| crate::spec::web_address_file(&name))
         .filter(|name| is_plain_name(name))
         .collect()
 }
@@ -35,7 +36,7 @@ pub(super) fn patch_tags(spec: &str) -> Vec<String> {
     spec.lines()
         .filter_map(|line| {
             let patch = crate::spec::parse_source_line(line, &["patch"], str::to_string)?;
-            patch.url.split_whitespace().next().map(str::to_string)
+            patch.value.split_whitespace().next().map(str::to_string)
         })
         .collect()
 }

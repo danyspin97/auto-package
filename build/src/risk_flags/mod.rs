@@ -29,6 +29,8 @@ mod fix;
 mod fix_tests;
 mod flags;
 #[cfg(test)]
+mod name_tests;
+#[cfg(test)]
 mod tests;
 
 pub use analysis::*;
