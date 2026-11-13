@@ -446,6 +446,7 @@ pub(super) fn checkout_stage(
             .canonicalize()
             .unwrap_or_else(|_| spec_path.clone());
         warn_if_err(reporter, "updating the spec link", ws.link_spec(&abs));
+        warn_if_err(reporter, "updating the package link", ws.link_package(&abs));
         migrate_wheel_provenance(checkout_dir, ws, rpm_name, reporter);
 
         // A checkout dir is reused across runs (see `osc::checkout`), and

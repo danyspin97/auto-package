@@ -6,6 +6,8 @@
 //! The osc working copy (`<work-dir>/<project>/<rpm-name>/`) holds ONLY
 //! the spec and the tarball so `osc status` stays clean.
 
+mod package_link;
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
