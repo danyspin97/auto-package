@@ -398,18 +398,19 @@ fn the_flags_and_recap_of_an_older_entry_do_not_come_back() {
 
 #[test]
 fn a_newer_entry_that_names_another_version_too_is_still_merged() {
-    // The newest entry names 5.3 as well: its 5.3 bullet goes, the entry stays
-    // a 5.4 one, and the older 5.4 entry is not dropped with it.
+    // The newest entry names 5.3 as well: that older release's bullet is kept
+    // under the 5.4 one, the entry stays a 5.4 one, and the older 5.4 entry is
+    // not dropped with it.
     let newer = entry(
         "Wed Nov  4 13:08:52 UTC 2026 - A <a@b.c>",
         "- Update to 5.4\n- Update to 5.3\n  * old recap\n- Fix the build",
     );
     let older = entry(HEADER, "- Update to 5.4\n- Refresh b.patch");
     let out = normalise_unpublished_entries("", &format!("{newer}{older}"), "5.4", "pkg").unwrap();
-    assert!(!out.contains("5.3"), "{out}");
-    assert!(!out.contains("old recap"), "{out}");
     assert!(
-        out.contains("- Update to 5.4\n- Refresh b.patch\n- Fix the build\n"),
+        out.contains(
+            "- Update to 5.4\n- Update to 5.3\n  * old recap\n- Refresh b.patch\n- Fix the build\n"
+        ),
         "{out}"
     );
     assert_eq!(out.matches("Update to 5.4").count(), 1, "{out}");

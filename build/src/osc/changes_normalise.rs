@@ -5,7 +5,10 @@
 //! the spec's, or when the origin already publishes that version. The exception
 //! is an older release than the spec's: its entry is kept, as an entry of its
 //! own (a submit carries every unpublished update up to the spec's version); a
-//! newer one, or one that cannot be ordered against the spec's, goes. The newest
+//! newer one, or one that cannot be ordered against the spec's, goes. Inside an
+//! entry, an `Update to` bullet of an older release is the recap of the jump:
+//! it is kept as it is, in order, unless the origin publishes it; a newer one
+//! goes. The newest
 //! entry of the file is kept, with a warning, when only its version is another
 //! release. The update entries of one version are merged into one, under the
 //! newest one's header line: the flags and recap lines of its update bullet
@@ -17,67 +20,13 @@
 //! or by its header line when it was edited) is never touched. No model call.
 
 use super::changes::{is_changes_separator, newest_changes_file};
+use super::changes_normalise_blocks::{Bullet, body_start, split_blocks};
 use super::*;
 use crate::patch_check::refresh_bullet;
 use crate::request_review::changes_checks::{
     has_forbidden_text, is_dependency_bullet, looks_like_version, mismatch, update_target,
 };
 use std::collections::BTreeSet;
-
-/// One bullet of an entry body: the lines as written, the first without its
-/// `- `.
-struct Bullet {
-    lines: Vec<String>,
-}
-
-impl Bullet {
-    fn head(&self) -> &str {
-        self.lines[0].trim()
-    }
-
-    /// The bullet's text, its continuation lines joined on it.
-    fn text(&self) -> String {
-        let mut text = self.head().to_string();
-        for l in &self.lines[1..] {
-            text.push(' ');
-            text.push_str(l.trim());
-        }
-        text
-    }
-
-    /// The patch a `Refresh <patch>` bullet names, `None` for any other: a
-    /// single name that is a patch file (`.patch` or `.diff`).
-    fn refreshed(&self) -> Option<&str> {
-        let name = self.head().strip_prefix("Refresh ")?.trim();
-        let patch = name.ends_with(".patch") || name.ends_with(".diff");
-        (self.lines.len() == 1 && patch && !name.contains(char::is_whitespace)).then_some(name)
-    }
-
-    /// The patches an already grouped `Refresh patches:` bullet lists.
-    fn grouped(&self) -> Option<Vec<&str>> {
-        (self.head() == "Refresh patches:").then(|| {
-            self.lines[1..]
-                .iter()
-                .filter_map(|l| l.trim().strip_prefix("* "))
-                .map(str::trim)
-                .collect()
-        })
-    }
-
-    /// The continuation lines of a grouped `Refresh patches:` bullet that are
-    /// not `* ` items, kept after the group as they are written.
-    fn group_notes(&self) -> Vec<String> {
-        if self.head() != "Refresh patches:" {
-            return Vec::new();
-        }
-        self.lines[1..]
-            .iter()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty() && !l.starts_with("* "))
-            .map(|l| format!("  {l}"))
-            .collect()
-    }
-}
 
 /// The entries of a `.changes` text: the text before the first separator
 /// (kept as it is), then each entry from its separator line to the next.
@@ -139,16 +88,27 @@ fn update_rest(head: &str) -> Option<String> {
     (!rest.is_empty()).then(|| rest.to_string())
 }
 
-/// Whether an `Update to` bullet names another release than `version`.
+/// Whether an `Update to` bullet names a newer release than `version`, or one
+/// that cannot be ordered against it: such a bullet is no part of the entry.
+/// An older release is the recap of the jump, kept (see [`is_older`]).
 fn is_foreign_update(bullet: &Bullet, version: &str) -> bool {
-    update_target(bullet.head())
-        .is_some_and(|t| looks_like_version(&t) && mismatch(&t, version) == Some(true))
+    update_target(bullet.head()).is_some_and(|t| {
+        looks_like_version(&t) && mismatch(&t, version) == Some(true) && !is_older(&t, version)
+    })
+}
+
+/// Whether an `Update to` bullet names an older release than `version` that
+/// the origin already publishes: a repeat of published history.
+fn is_published_older(bullet: &Bullet, version: &str, published: &[String]) -> bool {
+    update_target(bullet.head()).is_some_and(|t| {
+        is_older(&t, version) && published.iter().any(|p| mismatch(&t, p).is_none())
+    })
 }
 
 /// Whether `release` is an older release than `version`, in the generic order
 /// (`Scheme::Generic`: the spec's scheme is not known here). `false` when the
 /// two cannot be ordered, so such an entry is dropped as before.
-fn is_older(release: &str, version: &str) -> bool {
+pub(super) fn is_older(release: &str, version: &str) -> bool {
     crate::version::cmp(release, version, crate::version::Scheme::Generic)
         == Some(std::cmp::Ordering::Less)
 }
@@ -278,6 +238,7 @@ pub(super) fn normalise_with_notes(
                 members,
                 own.as_deref().unwrap_or(version),
                 package,
+                &published_versions,
             )
         })
         .collect();
@@ -330,36 +291,6 @@ fn is_update_entry(entry: &[&str]) -> bool {
         .any(|l| l.starts_with("- ") && update_target(&l[2..]).is_some())
 }
 
-/// The index of the first bullet of an entry: the separator, the header line
-/// and the blank lines before the bullets come before it. The entry's length
-/// when it has no bullet.
-fn body_start(entry: &[&str]) -> usize {
-    entry
-        .iter()
-        .skip(2)
-        .position(|l| l.starts_with("- "))
-        .map_or(entry.len(), |i| i + 2)
-}
-
-/// The lines of an entry's body (from its first bullet) that belong to an
-/// `Update to` bullet, its continuation lines included, and the others.
-fn split_blocks(entry: &[&str]) -> (Vec<String>, Vec<String>) {
-    let mut update = Vec::new();
-    let mut other = Vec::new();
-    let mut in_update = false;
-    for line in &entry[body_start(entry)..] {
-        if let Some(rest) = line.strip_prefix("- ") {
-            in_update = update_target(rest.trim()).is_some();
-        }
-        if in_update {
-            update.push(line.to_string());
-        } else {
-            other.push(line.to_string());
-        }
-    }
-    (update, other)
-}
-
 /// The lines of a group of unpublished update entries for one version, as one
 /// entry. `members` are indexes into `entries`, newest first; `version` is the
 /// group's own release (the spec's Version for a group of it). The header of
@@ -376,6 +307,7 @@ fn merged_entry(
     members: &[usize],
     version: &str,
     package: &str,
+    published: &[String],
 ) -> Option<Vec<String>> {
     let newest = &entries[members[0]];
     let body = body_start(newest);
@@ -383,19 +315,34 @@ fn merged_entry(
     if members.len() == 1 {
         lines.extend(newest[body..].iter().map(|l| l.to_string()));
     } else {
-        lines.extend(split_blocks(newest).0);
-        for &m in members.iter().rev() {
-            lines.extend(split_blocks(&entries[m]).1);
+        // The newest's release bullet, then the older releases' bullets of
+        // every member newest first (each kept as it is), then the other
+        // bullets, oldest member first.
+        let parts: Vec<_> = members
+            .iter()
+            .map(|&m| split_blocks(&entries[m], version))
+            .collect();
+        lines.extend(parts[0].0.iter().cloned());
+        for p in &parts {
+            lines.extend(p.1.iter().cloned());
+        }
+        for p in parts.iter().rev() {
+            lines.extend(p.2.iter().cloned());
         }
     }
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    normalised_entry(&refs, version, package)
+    normalised_entry(&refs, version, package, published)
 }
 
 /// The lines of an unpublished update entry, normalised; `None` when nothing
 /// is left of it. `version` is the release the entry is for: an `Update to`
 /// bullet for another one goes.
-fn normalised_entry(entry: &[&str], version: &str, package: &str) -> Option<Vec<String>> {
+fn normalised_entry(
+    entry: &[&str],
+    version: &str,
+    package: &str,
+    published: &[String],
+) -> Option<Vec<String>> {
     let body_from = body_start(entry);
     let mut bullets: Vec<Bullet> = Vec::new();
     for line in &entry[body_from..] {
@@ -419,7 +366,8 @@ fn normalised_entry(entry: &[&str], version: &str, package: &str) -> Option<Vec<
     }
     // An `Update to` bullet for another release than the entry's own is no
     // part of this entry (a bullet with its lines goes with it).
-    bullets.retain(|b| !is_foreign_update(b, version));
+    bullets
+        .retain(|b| !is_foreign_update(b, version) && !is_published_older(b, version, published));
     let mut kept: Vec<Bullet> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     // The `Update to` bullets kept, with the version each names: a repeat of
@@ -450,10 +398,17 @@ fn normalised_entry(entry: &[&str], version: &str, package: &str) -> Option<Vec<
             kept.push(Bullet { lines: Vec::new() });
         } else if is_update {
             let target = update_target(b.head()).unwrap_or_default();
-            let same = updates
-                .iter()
-                .find(|(t, _)| mismatch(t, &target).is_none())
-                .map(|&(_, at)| at);
+            // An older release's bullet is kept as it is: it is never merged
+            // into another one, nor into the release's own bullet.
+            let older = is_older(&target, version);
+            let same = if older {
+                None
+            } else {
+                updates
+                    .iter()
+                    .find(|(t, _)| mismatch(t, &target).is_none())
+                    .map(|&(_, at)| at)
+            };
             match same {
                 Some(at) => {
                     let mut extra: Vec<String> = Vec::new();
@@ -466,7 +421,9 @@ fn normalised_entry(entry: &[&str], version: &str, package: &str) -> Option<Vec<
                     }
                 }
                 None => {
-                    updates.push((target, kept.len()));
+                    if !older {
+                        updates.push((target, kept.len()));
+                    }
                     kept.push(b);
                 }
             }

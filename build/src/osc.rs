@@ -89,6 +89,7 @@ mod changes_flag_lines;
 pub use changes_dates::*;
 pub use changes_flag_lines::*;
 mod changes_normalise;
+mod changes_normalise_blocks;
 pub use changes_normalise::*;
 mod changes_drop;
 pub use changes_drop::*;
