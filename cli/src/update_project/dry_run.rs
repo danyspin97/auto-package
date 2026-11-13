@@ -47,9 +47,11 @@ pub(super) fn say_dry_run(
         ));
         for i in ready {
             let how = if mechanical.contains(&i.pkg) {
-                "style fixes committed as they are"
+                "style fixes committed as they are (no build, no agent pass)"
             } else if a.no_agent {
                 "needs the agent (--no-agent is set), would be skipped"
+            } else if i.findings.is_empty() {
+                "rebuilt by the pipeline, then the agent's review pass (no findings)"
             } else {
                 "rebuilt by the pipeline, the agent fixing the findings"
             };

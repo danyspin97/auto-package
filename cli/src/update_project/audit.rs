@@ -39,6 +39,7 @@ impl Audit {
         let (tx, items) = std::sync::mpsc::channel();
         let (source, distro, arch) = (a.source.clone(), a.distro.clone(), a.arch.clone());
         let (only, exclude) = (a.only.clone(), a.exclude.clone());
+        let agent = !a.no_agent;
         let (branch, continues) = (branch.to_string(), super::existing_lint::applies(a));
         let handle = std::thread::spawn(move || {
             let say = |message: String| {
@@ -154,11 +155,13 @@ impl Audit {
                         update::Decision::Skipped(_) => (None, String::new()),
                     };
                     let mut go_on = true;
-                    // A report-only finding alone has nothing to fix.
-                    if findings.iter().any(|f| !f.kind.is_report_only()) {
+                    if sent_to_pipeline(&findings, agent) {
                         match ecosystem {
                             Some(ecosystem) => {
-                                let style_only = !quality::needs_pipeline(&findings);
+                                // Only a package with a fix to make is style-only; a
+                                // package with no findings is reviewed by the agent.
+                                let style_only =
+                                    fixable(&findings) && !quality::needs_pipeline(&findings);
                                 let item = Item {
                                     pkg: pkg.to_string(),
                                     origin: source.clone(),
@@ -222,6 +225,18 @@ pub(super) fn nothing_found(candidates: usize, absent: usize) -> Option<bool> {
     (candidates == absent).then_some(absent > 0)
 }
 
+/// Whether any finding is one the pipeline can fix (not report-only).
+fn fixable(findings: &[quality::Finding]) -> bool {
+    findings.iter().any(|f| !f.kind.is_report_only())
+}
+
+/// Whether an audited package goes to the pipeline: one with a finding to fix,
+/// or one with no finding at all when an agent runs, for its review pass. A
+/// package whose only findings are report-only is only reported.
+pub(super) fn sent_to_pipeline(findings: &[quality::Finding], agent: bool) -> bool {
+    fixable(findings) || (agent && findings.is_empty())
+}
+
 /// The findings an item hands the agent, one line each. Report-only findings
 /// are left out: nothing in the recipe fixes them, so they are only reported.
 fn fixable_lines(findings: &[quality::Finding]) -> Vec<String> {
@@ -264,6 +279,35 @@ mod tests {
         assert_eq!(nothing_found(1, 0), None);
         // One found beside an absent one is found too.
         assert_eq!(nothing_found(2, 1), None);
+    }
+
+    #[test]
+    fn a_package_without_findings_takes_the_agent_pass_only_when_an_agent_runs() {
+        let none: [Finding; 0] = [];
+        assert!(
+            sent_to_pipeline(&none, true),
+            "a clean package gets its review pass"
+        );
+        assert!(
+            !sent_to_pipeline(&none, false),
+            "--no-agent keeps the package out"
+        );
+        let report_only = [Finding {
+            kind: Kind::RpmlintrcName,
+            detail: "y.rpmlintrc".to_string(),
+        }];
+        assert!(
+            !sent_to_pipeline(&report_only, true),
+            "a report-only finding is only reported"
+        );
+        let style = [Finding {
+            kind: Kind::SpecStyle,
+            detail: "a style slip".to_string(),
+        }];
+        assert!(
+            sent_to_pipeline(&style, false),
+            "a fixable finding is sent either way"
+        );
     }
 
     #[test]

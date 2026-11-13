@@ -118,14 +118,19 @@ pub(super) fn review_stage(
     let run_turn = match patching {
         // A request is asked of a package that may have been reviewed before.
         Some(_) => true,
-        None => review_turn_wanted(
-            need_spec,
-            st.update.is_some(),
-            checkout,
-            build_log_nonempty,
-            already_reviewed,
-            rpm_name,
-        ),
+        // A `lint` package with no problem to fix has no turn before its build:
+        // its one agent pass is the post-build review (`lint_review`).
+        None => {
+            !config.lint_review
+                && review_turn_wanted(
+                    need_spec,
+                    st.update.is_some(),
+                    checkout,
+                    build_log_nonempty,
+                    already_reviewed,
+                    rpm_name,
+                )
+        }
     };
     // A source archive without its git submodules cannot be built by any spec
     // edit: when the wheel exists, switch to it now instead of paying a turn
