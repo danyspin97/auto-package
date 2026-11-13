@@ -145,7 +145,11 @@ mod ci_retry;
 mod ci_retry_tests;
 mod publish;
 pub use publish::*;
+mod service_dirs;
+pub use service_dirs::*;
 mod rpmlint_sources;
+#[cfg(test)]
+mod service_dirs_tests;
 pub use rpmlint_sources::*;
 mod recipe_files;
 use recipe_files::recipe_file_unused;

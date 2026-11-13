@@ -208,14 +208,23 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     // The quilt series the agent's turns read is scratch while OBS has none: it
     // is moved out before the plan, so the plan does not report it as a stray.
     stash_scratch_series(&ctx.checkout_dir, ctx.ws.dir());
+    // What the expanded spec names is what `%prep` reads.
+    let named = osc::spec_source_names(&expanded);
+    // A directory a service run left in the checkout (`cargo_vendor` `src`) is
+    // not part of the package: it is removed before the plan judges the checkout.
+    for name in osc::remove_service_source_dirs(&ctx.checkout_dir, &named) {
+        ctx.reporter.report(&Event::Warning {
+            step: Some(commit_step.id),
+            message: format!("deleted '{name}/' from the checkout: a service left it there"),
+        });
+    }
     let plan = osc::publish_plan(&ctx.checkout_dir);
     if let Some(why) = osc::filter_claim_without_rpmlintrc(&ctx.checkout_dir, &plan.files) {
         commit_step.finish(StepOutcome::Failed);
         return Err(ctx.failed(why));
     }
-    // What the expanded spec names is what `%prep` reads. A plan that leaves
-    // one of those files out is refused before anything is removed or sent.
-    let named = osc::spec_source_names(&expanded);
+    // A plan that leaves one of the files the spec names out is refused before
+    // anything is removed or sent.
     let left_out = osc::named_but_skipped(&named, &plan.skipped);
     if !left_out.is_empty() {
         commit_step.finish(StepOutcome::Failed);
