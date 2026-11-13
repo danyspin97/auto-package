@@ -499,3 +499,24 @@ fn parse_header_expands_a_define_referenced_from_epoch() {
     let spec = "%define ep 3\nName: foo\nEpoch: %{ep}\nVersion: 1.0\n";
     assert_eq!(parse_header(spec).unwrap().epoch.as_deref(), Some("3"));
 }
+
+#[test]
+fn a_web_address_is_named_by_its_fragment_and_else_its_last_segment() {
+    use crate::spec::web_address_file as file;
+    // The line of a patch whose URL ends in a commit id: the fragment names the file.
+    let line = "Patch:  https://github.com/cokelaer/easydev/commit/8cf50c9177936e771e158ea9b249b4aa5e2cc1ee.patch#/fix-version.patch";
+    let value = parse_source_line(line, &["patch"], |v| v.to_string()).unwrap();
+    assert_eq!(
+        value.value,
+        "https://github.com/cokelaer/easydev/commit/8cf50c9177936e771e158ea9b249b4aa5e2cc1ee.patch#/fix-version.patch"
+    );
+    assert_eq!(file(&value.value), "fix-version.patch");
+    assert_eq!(file("https://h/x.patch#n.patch"), "n.patch");
+    // Without a usable fragment the last segment of the address is the file.
+    assert_eq!(file("https://h/a/x.patch"), "x.patch");
+    assert_eq!(file("https://h/x.patch#"), "x.patch");
+    assert_eq!(file("https://h/x.patch#/"), "x.patch");
+    assert_eq!(file("https://h/x.patch#/a/b"), "x.patch");
+    // A value that is not a web address is left as it is.
+    assert_eq!(file("foo-1.0.patch"), "foo-1.0.patch");
+}

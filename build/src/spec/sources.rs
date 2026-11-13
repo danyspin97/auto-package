@@ -25,6 +25,8 @@ pub struct SourceLine {
     pub url: String,
     /// The text after the first `#`, without its leading `/`.
     pub rename: Option<String>,
+    /// The value after the macros were expanded, fragment included.
+    pub value: String,
 }
 
 impl SourceLine {
@@ -68,6 +70,7 @@ pub fn parse_source_line(
         index,
         url: url.to_string(),
         rename,
+        value: expanded,
     })
 }
 
@@ -248,16 +251,24 @@ pub fn adopt_sources_from_tree(
     copied
 }
 
-/// The file a web address names: its last path component, as a source of the
-/// package is named. Any other value is returned as it is.
+/// The file a web address names in the package, as rpm and OBS name it: the
+/// `#/<file>` or `#<file>` fragment when it is a plain name, else the last path
+/// component of the address. `value` is the whole value, fragment included.
+/// Any other value is returned as it is.
 pub fn web_address_file(value: &str) -> String {
     let web = (value.starts_with("http://") || value.starts_with("https://"))
         && !value.contains(char::is_whitespace);
-    if web {
-        value.rsplit('/').next().unwrap_or(value).to_string()
-    } else {
-        value.to_string()
+    if !web {
+        return value.to_string();
     }
+    let (address, rename) = match value.split_once('#') {
+        Some((address, rename)) => (address, rename.trim_start_matches('/')),
+        None => (value, ""),
+    };
+    if !rename.is_empty() && !rename.contains('/') {
+        return rename.to_string();
+    }
+    address.rsplit('/').next().unwrap_or(address).to_string()
 }
 
 /// A `PatchN:` value with the spec's `%{name}` and `%{version}` (or `%name`,
