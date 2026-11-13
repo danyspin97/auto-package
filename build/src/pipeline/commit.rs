@@ -191,12 +191,16 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     // The entry is rewritten once every turn has added its bullets, so it
     // reads as the net change against what OBS holds (no model call).
     osc::rewrite_unpublished_entry(&ctx.checkout_dir, &baseline);
-    // A package may hold unpublished entries of an earlier run (an update or
-    // a lint): they are normalised against its origin's.
-    for message in osc::normalise_unpublished_changes(
+    // What the expanded spec names is what `%prep` reads.
+    let named = osc::spec_source_names(&expanded);
+    // Leftovers of earlier runs (an update, a lint) are cleaned before the plan
+    // judges the checkout: unpublished entries normalised against the origin,
+    // and the directories a service left in the checkout.
+    for message in osc::clean_branch_leftovers(
         &ctx.checkout_dir,
         &ctx.config.project,
         &ctx.obs_name,
+        &named,
         Emit::new(ctx.reporter, commit_step.id),
     ) {
         ctx.reporter.report(&Event::Warning {
@@ -208,16 +212,6 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     // The quilt series the agent's turns read is scratch while OBS has none: it
     // is moved out before the plan, so the plan does not report it as a stray.
     stash_scratch_series(&ctx.checkout_dir, ctx.ws.dir());
-    // What the expanded spec names is what `%prep` reads.
-    let named = osc::spec_source_names(&expanded);
-    // A directory a service run left in the checkout (`cargo_vendor` `src`) is
-    // not part of the package: it is removed before the plan judges the checkout.
-    for name in osc::remove_service_source_dirs(&ctx.checkout_dir, &named) {
-        ctx.reporter.report(&Event::Warning {
-            step: Some(commit_step.id),
-            message: format!("deleted '{name}/' from the checkout: a service left it there"),
-        });
-    }
     let plan = osc::publish_plan(&ctx.checkout_dir);
     if let Some(why) = osc::filter_claim_without_rpmlintrc(&ctx.checkout_dir, &plan.files) {
         commit_step.finish(StepOutcome::Failed);

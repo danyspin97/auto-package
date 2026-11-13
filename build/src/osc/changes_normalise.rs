@@ -495,9 +495,6 @@ pub fn normalise_unpublished_changes(
     pkg: &str,
     emit: Emit<'_>,
 ) -> Vec<String> {
-    let Some(file) = newest_changes_file(checkout_dir) else {
-        return Vec::new();
-    };
     let Ok(Some(origin)) = link_origin(project, pkg, emit) else {
         return Vec::new();
     };
@@ -509,6 +506,16 @@ pub fn normalise_unpublished_changes(
     ) else {
         return Vec::new();
     };
+    normalise_checkout(checkout_dir, &origin_text, pkg)
+}
+
+/// [`normalise_unpublished_changes`] with the origin's `.changes` text given:
+/// the newest `.changes` of `checkout_dir`, normalised against it and the
+/// checkout's spec Version.
+pub(super) fn normalise_checkout(checkout_dir: &Path, origin_text: &str, pkg: &str) -> Vec<String> {
+    let Some(file) = newest_changes_file(checkout_dir) else {
+        return Vec::new();
+    };
     let version = fs::read_dir(checkout_dir)
         .into_iter()
         .flatten()
@@ -518,7 +525,7 @@ pub fn normalise_unpublished_changes(
         .find_map(|p| fs::read_to_string(p).ok())
         .and_then(|t| crate::spec::parse_header(&t))
         .map(|h| h.version);
-    normalise_file(&file, &origin_text, version.as_deref(), pkg)
+    normalise_file(&file, origin_text, version.as_deref(), pkg)
 }
 
 /// [`normalise_unpublished_entries`] on the file `file`, written back when it
