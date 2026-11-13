@@ -41,6 +41,8 @@ pub(super) struct PreGate {
     pub(super) agent: Vec<String>,
     /// The ids of the findings the tool does not fix and that stop the package
     /// from being ready (see `ready::stops`): what `--dry-run` says would be refused.
+    /// Build results are not among them: the pre-pass does not build, and the
+    /// ready check judges the branch's build once it has one.
     pub(super) refusals: Vec<String>,
 }
 
@@ -165,11 +167,16 @@ pub(super) fn classify<'a>(findings: impl IntoIterator<Item = &'a Finding>) -> P
             FindingRoute::Agent => gate.agent.push(line),
             _ => {}
         }
-        if !matches!(routed, FindingRoute::Tool(_)) && ready::stops(f) {
+        if !matches!(routed, FindingRoute::Tool(_)) && ready::stops(f) && !is_build_state(f) {
             gate.refusals.push(f.id.to_string());
         }
     }
     gate
+}
+
+/// Whether a finding is the state of the branch's build (`build.*`).
+fn is_build_state(f: &Finding) -> bool {
+    f.id.starts_with("build.")
 }
 
 fn not_in_pre_pass(_: &ActionInputs) -> Result<Candidate, String> {
@@ -209,15 +216,21 @@ mod tests {
     fn a_maintainer_finding_is_refused_and_a_note_is_not() {
         let found = [
             finding(ids::REQUEST_COMPETING, Severity::Warning),
-            finding(ids::BUILD_FAILS_IN_TARGET_TOO, Severity::Blocker),
             finding(ids::VERSION_NOT_CHECKED, Severity::Note),
         ];
         let gate = classify(found.iter());
         assert!(gate.tool.is_empty() && gate.agent.is_empty());
-        assert_eq!(
-            gate.refusals,
-            [ids::REQUEST_COMPETING, ids::BUILD_FAILS_IN_TARGET_TOO]
-        );
+        assert_eq!(gate.refusals, [ids::REQUEST_COMPETING]);
+    }
+
+    #[test]
+    fn a_build_state_is_not_refused_before_the_build() {
+        // The branch's build results are judged after its build, not in the pre-pass.
+        let found = [
+            finding(ids::BUILD_PENDING, Severity::Note),
+            finding(ids::BUILD_FAILS_IN_TARGET_TOO, Severity::Blocker),
+        ];
+        assert!(classify(found.iter()).refusals.is_empty());
     }
 
     #[test]
