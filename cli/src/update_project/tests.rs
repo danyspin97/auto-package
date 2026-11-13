@@ -544,3 +544,29 @@ fn an_only_name_is_unmatched_only_when_the_filter_selects_nothing() {
     let excluded = ["python-excluded".to_string()];
     assert!(only_unmatched(&excluded, &listed).is_empty());
 }
+
+#[test]
+fn the_unmatched_warning_names_the_closest_listed_packages() {
+    let listed = [
+        "python-Authlib",
+        "python-pydantic-core",
+        "python-whois",
+        "rust-zed",
+    ];
+    // A near spelling, and a shorter name the listed one contains.
+    assert_eq!(
+        closest_listed("python-authlb", &listed),
+        vec!["python-Authlib"]
+    );
+    assert_eq!(closest_listed("authlib", &listed), vec!["python-Authlib"]);
+    assert!(closest_listed("python-foo", &listed).is_empty());
+    let msg = unmatched_message("python-authlb", "Base:System", &listed);
+    assert_eq!(
+        msg,
+        "python-authlb: matched no package in Base:System (compared with 4 names; closest: python-Authlib)"
+    );
+    assert_eq!(
+        unmatched_message("python-foo", "Base:System", &listed),
+        "python-foo: matched no package in Base:System (compared with 4 names)"
+    );
+}

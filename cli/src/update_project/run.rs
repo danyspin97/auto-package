@@ -408,6 +408,59 @@ pub(super) fn warn_unmatched_only(ctx: &Ctx<'_>, a: &UpdateProjectArgs, checked:
     let mut listed: Vec<&str> = listed.iter().map(String::as_str).collect();
     listed.sort_unstable();
     for name in only_unmatched(&unchecked, &listed) {
-        ctx.warn(format!("{name}: matched no package"));
+        ctx.warn(unmatched_message(name, &a.source, &listed));
     }
+}
+
+/// The warning for an `--only` name that no package of `source` is: how many
+/// names were compared, and the closest of them, which are the likely spelling.
+pub fn unmatched_message(name: &str, source: &str, listed: &[&str]) -> String {
+    let closest = closest_listed(name, listed);
+    let hint = if closest.is_empty() {
+        String::new()
+    } else {
+        format!("; closest: {}", closest.join(", "))
+    };
+    format!(
+        "{name}: matched no package in {source} (compared with {} names{hint})",
+        listed.len()
+    )
+}
+
+/// Up to three listed names nearest to `name`, nearest first. Distance is
+/// counted between the [`osc::project_key`]s, so case and separators do not
+/// count; a name containing the other (at least four characters) is near too.
+pub(super) fn closest_listed<'a>(name: &str, listed: &[&'a str]) -> Vec<&'a str> {
+    let key = osc::project_key(name);
+    let limit = (key.chars().count() / 4).max(2);
+    let mut near: Vec<(usize, &'a str)> = listed
+        .iter()
+        .filter_map(|l| {
+            let lk = osc::project_key(l);
+            let contained =
+                lk.len() >= 4 && key.len() >= 4 && (lk.contains(&key) || key.contains(&lk));
+            let d = edit_distance(&key, &lk);
+            (d <= limit || contained).then_some((d, *l))
+        })
+        .collect();
+    near.sort();
+    near.into_iter().take(3).map(|(_, l)| l).collect()
+}
+
+/// The Levenshtein distance between two strings, by characters.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diag = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let next = (diag + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(row[j + 1] + 1);
+            diag = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()]
 }
