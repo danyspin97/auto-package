@@ -153,3 +153,38 @@ fn a_comment_with_a_typo_fixed_upstream_is_proven_but_a_code_change_is_not() {
     let only_comment = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,3 @@\n before_line = 1;\n+# Look in each of the implemntations for a version file.\n after_line = 2;\n";
     assert!(!already_in_tarball(&tar, only_comment.as_bytes(), 1));
 }
+
+#[test]
+fn every_hunk_dead_takes_an_applied_hunk_and_a_gone_file_only_when_allowed() {
+    let (_dir, tar) = one_file("int keep_me = 1;\nint answer = 42;\n");
+    let applied = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n int keep_me = 1;\n-int answer = 41;\n+int answer = 42;\n";
+    let gone =
+        "--- a/gone.txt\n+++ b/gone.txt\n@@ -1 +1 @@\n-import old_module\n+import new_module\n";
+    let mixed = format!("{applied}{gone}");
+    // The applied hunk is in the archive and the other file is gone: dead when
+    // a gone file counts, not when it does not (a security patch).
+    assert!(every_hunk_dead_in_tarball(&tar, mixed.as_bytes(), 1, true));
+    assert!(!every_hunk_dead_in_tarball(
+        &tar,
+        mixed.as_bytes(),
+        1,
+        false
+    ));
+    // A hunk on a file that is there, whose added line is absent, keeps the patch.
+    let unapplied = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n int keep_me = 1;\n-int answer = 41;\n+int answer = 43;\n";
+    let refused = format!("{unapplied}{gone}");
+    assert!(!every_hunk_dead_in_tarball(
+        &tar,
+        refused.as_bytes(),
+        1,
+        true
+    ));
+    // Every hunk applied is the InTarball case, with or without gone files allowed.
+    assert!(every_hunk_dead_in_tarball(
+        &tar,
+        applied.as_bytes(),
+        1,
+        false
+    ));
+    assert!(!every_hunk_dead_in_tarball(&tar, b"", 1, true));
+}

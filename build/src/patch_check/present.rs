@@ -75,7 +75,32 @@ pub fn targets_absent_in_tarball(tarball: &Path, diff: &[u8], level: u32) -> boo
     let Some((_scratch, root)) = unpack_targets(tarball, &hunks) else {
         return false;
     };
-    targets_of(&hunks)
+    hunks.iter().all(|h| hunk_gone(&root, h))
+}
+
+/// Whether every hunk of `diff` is dead in the new archive `tarball`: its change
+/// is in the archive (see [`already_in_tarball`]), or every file it changes is
+/// gone from it. A hunk whose files are gone counts only when `files_gone` is
+/// set: a security patch is never dropped for its files being gone. Same `level`
+/// and false cases as [`already_in_tarball`].
+pub fn every_hunk_dead_in_tarball(
+    tarball: &Path,
+    diff: &[u8],
+    level: u32,
+    files_gone: bool,
+) -> bool {
+    let hunks = hunks(&String::from_utf8_lossy(diff), level);
+    let Some((_scratch, root)) = unpack_targets(tarball, &hunks) else {
+        return false;
+    };
+    hunks
+        .iter()
+        .all(|h| hunk_in_tree(&root, h) || (files_gone && hunk_gone(&root, h)))
+}
+
+/// Whether every file `hunk` changes is gone from the tree at `root`.
+fn hunk_gone(root: &Path, hunk: &Hunk) -> bool {
+    targets_of(std::slice::from_ref(hunk))
         .iter()
         .all(|t| std::fs::symlink_metadata(root.join(t)).is_err())
 }
