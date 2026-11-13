@@ -530,3 +530,17 @@ fn a_request_a_new_one_supersedes_is_not_a_duplicate() {
     );
     assert!(request::first_open_request(&both[..1], Some("1394662")).is_none());
 }
+
+#[test]
+fn an_only_name_is_unmatched_only_when_the_filter_selects_nothing() {
+    // OBS spells the packages its own way; `--only` names come in any case or
+    // separator, and the warning must agree with the filter on each.
+    let listed = ["python-Authlib", "python-pydantic_core", "python-excluded"];
+    let only = ["python-authlib", "Python_Pydantic-Core", "python-missing"].map(String::from);
+    assert!(wanted_by(&only, &[], "python-Authlib"));
+    assert!(wanted_by(&only, &[], "python-pydantic_core"));
+    assert_eq!(only_unmatched(&only, &listed), vec!["python-missing"]);
+    // An excluded package is a package found, so it is not reported missing.
+    let excluded = ["python-excluded".to_string()];
+    assert!(only_unmatched(&excluded, &listed).is_empty());
+}

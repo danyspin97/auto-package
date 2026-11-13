@@ -364,3 +364,50 @@ pub fn wanted_by(only: &[String], exclude: &[String], listed: &str) -> bool {
     let pkg = up::branch_name(listed);
     (only.is_empty() || up::name_listed(only, pkg)) && !up::name_listed(exclude, pkg)
 }
+
+/// The `--only` names that no listed source package is the same project as, by
+/// the rule [`wanted_by`] filters with: up to case and separators, as
+/// [`osc::find_listed`] reads them. `listed` is the whole listing, excluded
+/// packages included: an excluded package is still a package found.
+pub fn only_unmatched<'a>(only: &'a [String], listed: &[&str]) -> Vec<&'a str> {
+    only.iter()
+        .filter(|n| {
+            matches!(
+                osc::find_listed(n, listed.iter().copied()),
+                osc::Listed::Absent
+            )
+        })
+        .map(String::as_str)
+        .collect()
+}
+
+/// Warns for each `--only` name that no package of the source is the same
+/// project as. `checked` holds the packages the sweep or audit reached: a name
+/// one of them matches is not warned about, and the listing is read again only
+/// for the names none of them matches.
+pub(super) fn warn_unmatched_only(ctx: &Ctx<'_>, a: &UpdateProjectArgs, checked: &[String]) {
+    let unchecked: Vec<String> = a
+        .only
+        .iter()
+        .filter(|n| {
+            !checked
+                .iter()
+                .any(|c| up::name_listed(std::slice::from_ref(n), up::branch_name(c)))
+        })
+        .cloned()
+        .collect();
+    if unchecked.is_empty() {
+        return;
+    }
+    // The plan read this listing a moment ago; if it cannot be read again, no
+    // name can be told apart from a missing one, so nothing is warned.
+    let emit = Emit::run(ctx.reporter.as_ref());
+    let Ok(listed) = osc::list_source_package_names(&a.source, emit) else {
+        return;
+    };
+    let mut listed: Vec<&str> = listed.iter().map(String::as_str).collect();
+    listed.sort_unstable();
+    for name in only_unmatched(&unchecked, &listed) {
+        ctx.warn(format!("{name}: matched no package"));
+    }
+}

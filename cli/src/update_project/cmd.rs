@@ -506,9 +506,7 @@ fn prepare(
             }
         };
         report.maintainer.extend(plan.maintainer.iter().cloned());
-        for name in a.only.iter().filter(|n| !plan.names.contains(n)) {
-            ctx.warn(format!("{name}: matched no package"));
-        }
+        warn_unmatched_only(ctx, a, &plan.names);
         if !plan.unreadable.is_empty() {
             // Packages already branched and prepared are still built before the error is returned.
             if !a.dry_run {
@@ -539,9 +537,7 @@ fn prepare(
                 return Err(eyre!("{e}"));
             }
         };
-        for name in a.only.iter().filter(|n| !end.matched.contains(n)) {
-            ctx.warn(format!("{name}: matched no package"));
-        }
+        warn_unmatched_only(ctx, a, &end.matched);
         if !end.unreadable.is_empty() {
             // Packages already branched and prepared are still built before the error is returned.
             if !a.dry_run {
