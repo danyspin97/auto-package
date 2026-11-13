@@ -1,7 +1,9 @@
 //! The minimum a source declares, written on an update's added dependency, through
 //! the validation passes (convention 75).
 
-use super::normalize_spec_text;
+use super::{minimum_gaps, normalize_spec_text};
+use ap_core::event::Event;
+use ap_core::sink::Reporter;
 
 /// configupdater 3.2 (the origin) and the 4.1.1 update the agent wrote, with
 /// hatchling and hatch-vcs named and no bound (the case this rule is for).
@@ -52,4 +54,49 @@ fn a_fresh_spec_is_not_given_minimums_by_this_rule() {
     let source = source();
     let out = normalize_spec_text(UPDATED, false, None, Some(source.path()), "x").text;
     assert!(!out.contains(">= 1.27"), "{out}");
+}
+
+#[test]
+fn an_inherited_line_without_its_minimum_is_reported_once() {
+    use super::super::UpdateMode;
+    use std::collections::BTreeSet;
+
+    struct Collect(std::sync::Mutex<Vec<String>>);
+    impl Reporter for Collect {
+        fn report(&self, event: &Event) {
+            if let Event::Warning { message, .. } = event {
+                self.0.lock().unwrap().push(message.clone());
+            }
+        }
+    }
+
+    let origin = "Name: python-ConfigUpdater\nVersion: 4.0\n\
+        BuildRequires:  %{python_module hatchling}\n";
+    let spec = "Name: python-ConfigUpdater\nVersion: 4.1.1\n\
+        BuildRequires:  %{python_module hatchling}\n";
+    let source = source();
+    let mut update = Some(UpdateMode {
+        origin_spec: Some(origin.to_string()),
+        reported: BTreeSet::new(),
+    });
+    let reporter = Collect(std::sync::Mutex::new(Vec::new()));
+    minimum_gaps(
+        spec,
+        &mut update,
+        Some(source.path()),
+        &reporter,
+        "python-x",
+    );
+    minimum_gaps(
+        spec,
+        &mut update,
+        Some(source.path()),
+        &reporter,
+        "python-x",
+    );
+    let warned = reporter.0.lock().unwrap().clone();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].contains("hatchling >= 1.27"), "{warned:?}");
+    // The line is the origin's: nothing is written to the spec by this report.
+    assert!(!spec.contains(">="));
 }

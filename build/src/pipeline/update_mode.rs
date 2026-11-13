@@ -261,3 +261,37 @@ pub(super) fn normalize_spec_text(
     // say which directories the package needs, whatever the origin has.
     passes.apply("own_new_dirs", crate::spec_tidy::dir_owners::own_new_dirs)
 }
+
+/// Warns, once per run, about the origin's unchanged dependency lines that name a
+/// package upstream declares a minimum for, while the line has none (convention
+/// 75). Such a line is the origin's to change, so it is reported, not written.
+pub(super) fn minimum_gaps(
+    current: &str,
+    update: &mut Option<UpdateMode>,
+    source: Option<&Path>,
+    reporter: &dyn Reporter,
+    rpm_name: &str,
+) {
+    let (Some(update), Some(source)) = (update.as_mut(), source) else {
+        return;
+    };
+    let Some(origin) = update.origin_spec.as_deref() else {
+        return;
+    };
+    let gaps = crate::spec::inherited_minimum_gaps(
+        current,
+        origin,
+        &crate::spec::UpstreamMinimums::read(source),
+    );
+    let fresh = newly_reported(&mut update.reported, gaps);
+    if !fresh.is_empty() {
+        reporter.report(&Event::Warning {
+            step: None,
+            message: format!(
+                "{rpm_name}: the origin's spec has no minimum on {} that upstream declares; \
+                 the line is the origin's, so it is left as it is (convention 75)",
+                fresh.join(", ")
+            ),
+        });
+    }
+}

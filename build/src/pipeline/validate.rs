@@ -78,6 +78,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                 ws.notes(),
             );
         }
+        minimum_gaps(&passes.text, &mut st.update, source, reporter, rpm_name);
     }
 
     // A patch that does not apply to the unpacked source is never dropped for
