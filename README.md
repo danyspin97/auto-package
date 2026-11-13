@@ -412,6 +412,15 @@ would also touch an inherited problem. Stray files, old
 archives and the quilt `series` are removed by the pipeline's commit after its
 build; the commit without a build does not remove them.
 
+`lint` also fills a missing recap: an unpublished `Update to <version>` entry
+with no notes under its bullet gets the recap the update writes (the notes of
+the releases between the origin's version and the spec's, one bullet per
+release when several), in the same cleanup and with the same `--no-agent`
+rule. A published entry, and an entry whose bullet already has notes, are left
+alone. When no notes can be found the entry keeps none, nothing is written in
+its place, and the package is not ready (`changes.no-upstream-notes`), with the
+reason in the run's output.
+
 After the build, each package that carries branch work gets a ready check: its
 branch is reviewed against its origin once more (with downloads and the live
 lookups, no model call), and the verdict is kept in the package's state
