@@ -157,13 +157,15 @@ impl DepLedger<'_> {
                         message: if step == RepeatStep::Instruct {
                             format!(
                                 "dependency {dep_rpm} failed again with the same reason \
-                                 ({reason}); its next attempt is told to try a different \
-                                 approach"
+                                 ({}); its next attempt is told to try a different \
+                                 approach",
+                                one_line(&reason)
                             )
                         } else {
                             format!(
-                                "dependency {dep_rpm} failed to build ({reason}); \
-                                 self.retrying the package that needs it"
+                                "dependency {dep_rpm} failed to build ({}); \
+                                 retrying the package that needs it",
+                                one_line(&reason)
                             )
                         },
                     });

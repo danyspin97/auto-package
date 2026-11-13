@@ -43,6 +43,17 @@ pub(super) struct RepeatMemory {
 /// different, and only the instructed attempts failing again stop it (see
 /// `RetryRecord`). Transient, disk, quota, busy and agent-side failures are
 /// retried up to the cap, since their next attempt may well differ.
+/// `text` on one line, at most 300 characters: a failure reason can carry a
+/// build's or a patch check's whole output, which a warning or progress line
+/// cannot print.
+pub(super) fn one_line(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(300) {
+        Some((at, _)) => format!("{}...", &flat[..at]),
+        None => flat,
+    }
+}
+
 pub(super) fn identical_stop_applies(kind: FailureKind) -> bool {
     kind == FailureKind::Other
 }
@@ -333,13 +344,15 @@ impl Frontier<'_> {
                         step: None,
                         message: if step == RepeatStep::Instruct {
                             format!(
-                                "{rpm_name} failed again with the same reason ({reason}); \
-                                 its next attempt is told to try a different approach"
+                                "{rpm_name} failed again with the same reason ({}); \
+                                 its next attempt is told to try a different approach",
+                                one_line(&reason)
                             )
                         } else {
                             format!(
                                 "{rpm_name} failed (attempt {count}/{limit}): \
-                                 {reason}; retrying next round"
+                                 {}; retrying next round",
+                                one_line(&reason)
                             )
                         },
                     });
