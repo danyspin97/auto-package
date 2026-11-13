@@ -287,3 +287,24 @@ fn an_agent_round_refused_the_wheel_blocks_a_second_ask_without_a_lookup() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A turn that ends with a `VersionChanged` failure is the package's failure
+/// through the ladder: no rung runs after it, and the kind is kept.
+#[test]
+fn a_version_change_in_a_ladder_turn_ends_the_package_with_its_kind() {
+    let lookups = std::cell::Cell::new(0);
+    let case = run_case_with(
+        "open-webui-thing",
+        false,
+        &[],
+        blocked("first turn blocked"),
+        vec![Err(FailureKind::VersionChanged)],
+        &lookups,
+        Some(("%check failed", "Fix the tests")),
+    );
+    let Err(PipelineResult::Failed { kind, .. }) = &case.result else {
+        panic!("the package must fail: {:?}", case.result);
+    };
+    assert_eq!(*kind, FailureKind::VersionChanged);
+    assert!(super::agent::ends_package(*kind));
+}

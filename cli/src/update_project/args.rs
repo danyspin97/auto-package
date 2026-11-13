@@ -333,6 +333,9 @@ pub struct BranchBuild {
     /// `lint`: what the quality checks found, handed to the agent as
     /// the problem to fix in the existing recipe.
     pub improve: Option<String>,
+    /// `lint`: the package is reviewed after its build against the spec the run
+    /// started with (its recipe is kept), with or without findings.
+    pub lint: bool,
     /// `update`: the version the package is at, shown beside the new one.
     pub from_version: Option<String>,
     /// `update`: the upstream tag the new version stands for, when it is not

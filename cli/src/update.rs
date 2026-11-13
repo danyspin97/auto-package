@@ -369,6 +369,7 @@ fn cmd_update(
             rpm_name: Some(ap_build::update_project::branch_name(&c.rpm_name).to_string()),
             resolver: None,
             improve: None,
+            lint: false,
             from_version: None,
             upstream_tag: None,
             update: true,

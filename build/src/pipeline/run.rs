@@ -384,6 +384,9 @@ pub(super) struct RunState {
     pub(super) relaxed_from_spec: Option<String>,
     /// The post-build review ran (or was ruled out) for this run.
     pub(super) post_review_done: bool,
+    /// The spec a `lint_review` build kept, as it was checked out before any
+    /// turn: the post-build review's baseline when no generated spec exists.
+    pub(super) run_start_spec: Option<String>,
     /// Set while the build of an edit made after a green build (the post-build
     /// review or an rpmlint fix turn) is pending: what to put back when that
     /// build does not succeed.
@@ -479,6 +482,7 @@ fn run_stages(
         last_failure_shape: None,
         relaxed_from_spec: None,
         post_review_done: false,
+        run_start_spec: None,
         post_review_revert: None,
         rpmlint_shown: Default::default(),
         update: None,

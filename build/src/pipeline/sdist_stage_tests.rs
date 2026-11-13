@@ -221,6 +221,7 @@ pub(super) fn with_checkout_as<R>(
         last_failure_shape: None,
         relaxed_from_spec: None,
         post_review_done: false,
+        run_start_spec: None,
         post_review_revert: None,
         rpmlint_shown: Default::default(),
         update: None,

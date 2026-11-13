@@ -176,8 +176,9 @@ pub(super) fn post_build_review_prompt() -> &'static str {
              fix: the build is green and must stay green. Any edit costs a full rebuild, and \
              a rebuild that fails throws your edit away, so edit only for a clear, safe win.\n\
              \n\
-             The Context below holds the diff of the spec against the generated one (what \
-             the earlier turns changed) and the warnings of the build. Look for: debug \
+             The Context below holds the diff of the spec against the generated one, or for \
+             a kept recipe against the spec the run started with (what the earlier turns \
+             changed; `(none)` when nothing did), and the warnings of the build. Look for: debug \
              leftovers added to diagnose a failure (`config.log` dumps, `ls`/`cat`/`set -x` \
              lines, `|| true` that hides errors); a workaround of a failed attempt that the \
              journal shows was a wrong guess and that the build does not need; a deselected \

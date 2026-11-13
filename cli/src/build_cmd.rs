@@ -200,6 +200,7 @@ pub(crate) fn cmd_build(
         unbuildable_deps: Vec::new(),
         request_text: typed,
         branch_build: branch.is_some(),
+        lint_review: branch.is_some_and(|b| b.lint),
     };
 
     let mut config = config;

@@ -135,6 +135,10 @@ pub struct PipelineConfig {
     /// backport): a plain `build` of the package does not reproduce it, so the
     /// failure suggests no rerun command.
     pub branch_build: bool,
+    /// Set for a `lint` build: the post-build review diffs the spec against the
+    /// one the run started with (a kept recipe has no generated spec), and runs
+    /// even when that diff is empty.
+    pub lint_review: bool,
 }
 mod state;
 pub use state::*;
@@ -276,6 +280,8 @@ use patch_apply::*;
 mod carried_origin_tests;
 #[cfg(test)]
 mod generate_service_tests;
+#[cfg(test)]
+mod lint_review_tests;
 mod sdist_stage;
 #[cfg(test)]
 mod sdist_stage_tests;

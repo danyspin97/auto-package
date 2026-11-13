@@ -283,6 +283,21 @@ pub(super) fn post_review_ruled_out(
     already_done || update || no_agent || out_of_budget
 }
 
+/// What the post-build review diffs the spec against: the generated spec, else
+/// the spec the run started with (a kept recipe of a `lint` build), else nothing.
+pub(super) fn review_baseline(generated: Option<String>, run_start: Option<&str>) -> String {
+    generated
+        .or_else(|| run_start.map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Whether the post-build review has a turn to take: the spec is not empty, and
+/// it changed, unless the build is a `lint` review, which takes its turn on an
+/// unchanged spec too (a package without findings is still reviewed).
+pub(super) fn review_wanted(spec_empty: bool, diff_empty: bool, lint_review: bool) -> bool {
+    !spec_empty && (!diff_empty || lint_review)
+}
+
 /// One cheap clean-up turn on a spec that has just built, when the agent
 /// changed it on the way (a fix attempt or the pre-build review). `Some` is
 /// the round to run next: the turn edited the spec, so it is built again, and
@@ -311,17 +326,26 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
         return None;
     }
     let good = strip_and_rewrite(spec_path);
-    let generated = std::fs::read_to_string(ws.dir().join("spec.generated")).unwrap_or_default();
-    let diff = unified_diff(&generated, &good);
+    let generated = std::fs::read_to_string(ws.dir().join("spec.generated")).ok();
+    let baseline = review_baseline(generated, st.run_start_spec.as_deref());
+    let diff = unified_diff(&baseline, &good);
     // Nothing the agent changed: the spec is the generated one and was vetted.
-    if good.trim().is_empty() || diff.trim().is_empty() {
+    // A `lint` review runs on an unchanged spec too (see `review_wanted`).
+    if !review_wanted(
+        good.trim().is_empty(),
+        diff.trim().is_empty(),
+        config.lint_review,
+    ) {
         return None;
     }
-    let diff: String = diff
-        .lines()
-        .take(POST_REVIEW_DIFF_LINES)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let diff: String = if diff.trim().is_empty() {
+        "(none)".to_string()
+    } else {
+        diff.lines()
+            .take(POST_REVIEW_DIFF_LINES)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let warnings = std::fs::read_to_string(build_log)
         .map(|l| build_warnings_extract(&l))
         .unwrap_or_default();
@@ -335,7 +359,9 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
         .rev()
         .collect();
     let context = format!(
-        "Changes the earlier turns made to the generated spec (`-` removed, `+` added):\n{}\n\
+        "Changes the earlier turns made to the spec (`-` removed, `+` added), against the \
+         generated spec or, for a kept recipe, the spec the run started with; `(none)` when \
+         nothing changed:\n{}\n\
          Warnings of the build (a capped extract; the log itself is not needed):\n{}\n\
          End of the attempt journal:\n{}",
         crate::agent::fenced_data(&diff),

@@ -484,6 +484,7 @@ fn branch_build(update: bool, improve: Option<&str>) -> BranchBuild {
         rpm_name: Some("fortune".into()),
         resolver: None,
         improve: improve.map(str::to_string),
+        lint: false,
         from_version: None,
         upstream_tag: None,
         update,

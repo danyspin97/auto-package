@@ -332,6 +332,9 @@ pub(super) fn generate_spec_stage(
                 return Err(ctx.failed_text(true, format!("reading the spec: {e}")));
             }
         };
+        // A kept recipe has no generated spec for the post-build review to diff
+        // against: it diffs against the spec the run started with (`lint`).
+        st.run_start_spec = config.lint_review.then(|| spec_text.clone());
         let is_maturin = spec_text.contains("maturin");
         let is_rust = spec_text.contains("cargo_build");
         (top, is_maturin, false, is_rust)

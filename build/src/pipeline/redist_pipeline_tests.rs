@@ -86,6 +86,7 @@ fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {
         unbuildable_deps: Vec::new(),
         request_text: None,
         branch_build: false,
+        lint_review: false,
         run_id: "test".into(),
         source_urls: Default::default(),
         python_flavors: Default::default(),
