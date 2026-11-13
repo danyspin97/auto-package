@@ -337,11 +337,17 @@ What it checks, per package:
   or `gh` login, 1000 with one); a rate limit stops the rest of the invocation's
   calls.
 
-Style slips are fixed deterministically and committed without a build. Every
-other finding sends the package through the ordinary pipeline at its current
+Style slips are fixed deterministically and committed without a build. A
+package whose findings are only style slips gets no agent pass. Every other
+finding sends the package through the ordinary pipeline at its current
 version, with the findings handed to the agent as the problem to fix in the
-existing recipe (so `--no-agent` skips those). A package whose source
-auto-package does not recognise is only reported. Takes the options of
+existing recipe (so `--no-agent` skips those). A package with no findings at
+all also goes through the pipeline (a build in the branch project, so a run
+over a large project builds every package), and the agent takes one clean-up review
+pass over its built spec, even when the spec is unchanged; the review diffs
+against the spec the run started with. `--no-agent` leaves such a package
+alone, as before. A package whose source auto-package does not recognise is
+only reported. Takes the options of
 `update`, except `--update-deps`; `--in-place` cannot be combined with
 `--submit` or `--branch-project`.
 
