@@ -25,6 +25,7 @@ mod humanise_tests;
 mod logs;
 mod model;
 mod parse;
+mod progress_section;
 mod render;
 #[cfg(test)]
 mod tests;

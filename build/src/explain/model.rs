@@ -13,6 +13,8 @@ pub(super) const EVIDENCE_LINES: usize = 5;
 pub(super) const LOG_ERROR_LINES: usize = 8;
 
 pub(super) const NOTES_LINES: usize = 60;
+/// How many progress lines `explain` prints; the rest stay in run.jsonl.
+pub(super) const PROGRESS_LINES: usize = 40;
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 pub struct Explanation {
@@ -32,6 +34,10 @@ pub struct Explanation {
     pub ladder: Ladder,
     pub cost: Cost,
     pub warnings: Vec<WarningLine>,
+    /// The progress lines the run narrated for the package: routine actions and
+    /// status, which are not problems. Folded like the warnings, and shown after
+    /// them.
+    pub progress: Vec<WarningLine>,
     pub skipped: Vec<String>,
     pub notes: Notes,
     /// Things the report cannot tell, said plainly.

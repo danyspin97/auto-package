@@ -15,7 +15,8 @@ It reads the files below and prints, with no model and no network: how the
 version was chosen, the outcome and the last build-log errors, every attempt
 (step, agent turn, the agent's reasoning and evidence, spec +N -M, OBS result,
 cost, time), flaky-test verdicts, cost against the budget, the warnings that
-mattered, the package notes, and a list of what it cannot tell. `--run` picks
+mattered, the routine actions and progress lines the run narrated (capped; the
+rest is in run.jsonl), the package notes, and a list of what it cannot tell. `--run` picks
 an older run (default: the latest run that touched the package); `--json` is
 the same data for `jq`. The report counts a package's tries (its builds started
 in the run). Without a package, `auto-package explain --run <id>` lists the tries

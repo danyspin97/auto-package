@@ -118,6 +118,29 @@ fn a_failed_package_is_explained_from_its_files() {
 }
 
 #[test]
+fn progress_lines_are_routine_and_folded_apart_from_the_warnings() {
+    let t = fixture(&[
+        r#"{"pkg":"foo","event":"progress","step":1,"message":"removed foo.patch: quilt reports it already applied"}"#,
+        r#"{"pkg":"foo","event":"progress","step":1,"message":"removed foo.patch: quilt reports it already applied"}"#,
+        r#"{"pkg":"foo","event":"progress","step":1,"message":"OBS build: building, 1m00s"}"#,
+        r#"{"pkg":"foo","event":"progress","step":1,"message":"OBS build: building, 2m00s"}"#,
+    ]);
+    let d = t.path();
+    let ex = explain(&query(d)).unwrap();
+    // The routine lines are not warnings: only the status polls are, as before.
+    assert_eq!(ex.warnings.len(), 1);
+    assert_eq!(ex.progress.len(), 2, "{:?}", ex.progress);
+    assert_eq!(
+        ex.progress[0].message,
+        "removed foo.patch: quilt reports it already applied"
+    );
+    assert_eq!(ex.progress[0].count, 2);
+    assert!(ex.progress[1].message.contains("2 OBS status lines"));
+    let text = plain(&render(&ex, 80));
+    assert!(text.contains("Routine actions and progress"), "{text}");
+}
+
+#[test]
 fn a_failed_turn_counts_as_a_turn_and_its_cost() {
     let t = fixture(&[
         r#"{"pkg":"foo","event":"failed_turn_usage","step":1,"usage":{"input_tokens":9,"output_tokens":40,"cost_usd":0.0532}}"#,

@@ -169,6 +169,41 @@ pub(super) fn warnings(p: &Parsed) -> Vec<WarningLine> {
     out
 }
 
+/// The progress lines of the package: repeats are counted and the OBS status
+/// lines are folded into one, as the warnings are. These are what the run did
+/// on purpose or went on to fix; a warning is for what is still wrong.
+pub(super) fn progress(p: &Parsed) -> Vec<WarningLine> {
+    let mut out: Vec<WarningLine> = Vec::new();
+    let mut polls: Option<(usize, String)> = None;
+    for (step, m) in &p.progress {
+        if m.starts_with("OBS build") {
+            let n = polls.as_ref().map_or(0, |(n, _)| *n);
+            polls = Some((n + 1, m.clone()));
+            continue;
+        }
+        match out.iter_mut().find(|w| &w.message == m) {
+            Some(w) => w.count += 1,
+            None => out.push(WarningLine {
+                step: *step,
+                message: m.clone(),
+                count: 1,
+            }),
+        }
+    }
+    if let Some((n, last)) = polls {
+        out.push(WarningLine {
+            step: None,
+            message: if n > 1 {
+                format!("{last} ({n} OBS status lines; the last is shown)")
+            } else {
+                last
+            },
+            count: 1,
+        });
+    }
+    out
+}
+
 pub(super) fn unknowns(ex: &Explanation, has_state: bool) -> Vec<String> {
     let mut u = vec![
         "The agent's reasoning and evidence are the model's own summary of its turn, not a proof of what it intended or of why the build then behaved as it did.".to_string(),

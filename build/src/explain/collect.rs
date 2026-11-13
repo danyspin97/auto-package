@@ -196,6 +196,7 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
         }),
     };
     ex.warnings = warnings(&p);
+    ex.progress = progress(&p);
     ex.skipped = p.skipped.clone();
     let run_notes =
         std::fs::read_to_string(dir.join("state").join(pkg).join("notes.md")).unwrap_or_default();
@@ -237,6 +238,7 @@ pub(super) struct Parsed {
     pub(super) attempts: Vec<Attempt>,
     pub(super) skipped: Vec<String>,
     pub(super) warnings: Vec<(Option<u64>, String)>,
+    pub(super) progress: Vec<(Option<u64>, String)>,
     pub(super) rejected: Vec<(Option<u64>, String)>,
     pub(super) finished: Option<Value>,
     pub(super) build_log: Option<String>,

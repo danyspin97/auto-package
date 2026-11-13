@@ -173,6 +173,11 @@ pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
                     p.warnings.push((step, m.to_string()));
                 }
             }
+            "progress" => {
+                if let Some(m) = v["message"].as_str() {
+                    p.progress.push((step, m.to_string()));
+                }
+            }
             "package_finished" => p.finished = Some(v),
             _ => {}
         }

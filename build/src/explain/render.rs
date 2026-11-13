@@ -78,14 +78,14 @@ impl Out {
     fn blank(&mut self) {
         self.lines.push(Vec::new());
     }
-    fn heading(&mut self, text: &str) {
+    pub(super) fn heading(&mut self, text: &str) {
         if !self.lines.is_empty() {
             self.blank();
         }
         self.lines.push(vec![span(text, Kind::Heading)]);
     }
     /// Wrapped text with a hanging indent: `first` starts the first line.
-    fn para(&mut self, indent: usize, first: &str, kind: Kind, text: &str) {
+    pub(super) fn para(&mut self, indent: usize, first: &str, kind: Kind, text: &str) {
         let pad = " ".repeat(indent);
         let hang = " ".repeat(first.chars().count());
         let avail = self.width.saturating_sub(indent + first.chars().count());
@@ -493,6 +493,8 @@ pub fn render(ex: &Explanation, width: usize) -> Vec<Line> {
             o.para(2, "! ", Kind::Warn, &t);
         }
     }
+
+    progress_section::progress_section(&mut o, &ex.progress);
 
     o.heading("Notes kept");
     if !ex.notes.run_note_headings.is_empty() {
