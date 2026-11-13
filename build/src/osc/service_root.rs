@@ -26,7 +26,7 @@ pub(crate) fn has_services_root(xml: &str) -> bool {
 /// then runs no service, and the run goes on.
 pub(crate) fn warn_if_no_root(xml: &[u8], package: &str, emit: Emit<'_>) {
     if !has_services_root(&String::from_utf8_lossy(xml)) {
-        emit.reporter.report(&Event::Warning {
+        emit.reporter.report(&Event::Progress {
             step: emit.step,
             message: format!(
                 "the _service of {package} has no <services> element: no service runs"

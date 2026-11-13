@@ -201,7 +201,7 @@ pub(super) fn switch_for_missing_submodules(
             }
             other => {
                 step.finish(ap_core::event::StepOutcome::Failed);
-                reporter.report(&Event::Warning {
+                reporter.report(&Event::Progress {
                     step: None,
                     message: format!(
                         "{rpm_name}: the source archive lacks its git submodules and the \

@@ -99,7 +99,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     match osc::name_unnamed_rpmlintrcs(&ctx.checkout_dir, &written) {
         Ok((added, left_out)) => {
             for name in &added {
-                ctx.reporter.report(&Event::Warning {
+                ctx.reporter.report(&Event::Progress {
                     step: Some(commit_step.id),
                     message: format!(
                         "{}: named '{name}' in its spec: the package publishes its filter",
@@ -146,7 +146,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     let restored =
         osc::restore_named_sources(&ctx.checkout_dir, Emit::new(ctx.reporter, commit_step.id));
     for name in &restored {
-        ctx.reporter.report(&Event::Warning {
+        ctx.reporter.report(&Event::Progress {
             step: Some(commit_step.id),
             message: format!("restored '{name}' from OBS: the spec names it as a source"),
         });
@@ -165,7 +165,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         &ctx.checkout_dir,
         Emit::new(ctx.reporter, commit_step.id),
     ) {
-        ctx.reporter.report(&Event::Warning {
+        ctx.reporter.report(&Event::Progress {
             step: Some(commit_step.id),
             message: format!(
                 "{}: restored '{name}' from the package this one was branched from: the spec uses it",
@@ -174,7 +174,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         });
     }
     for name in osc::drop_unused_recipe_files(&ctx.checkout_dir) {
-        ctx.reporter.report(&Event::Warning {
+        ctx.reporter.report(&Event::Progress {
             step: Some(commit_step.id),
             message: format!(
                 "{}: dropped '{name}': the spec does not use it",
@@ -203,7 +203,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         &named,
         Emit::new(ctx.reporter, commit_step.id),
     ) {
-        ctx.reporter.report(&Event::Warning {
+        ctx.reporter.report(&Event::Progress {
             step: Some(commit_step.id),
             message: format!("{}: {message}", ctx.rpm_name),
         });
@@ -229,7 +229,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         )));
     }
     for name in &plan.skipped {
-        ctx.reporter.report(&Event::Warning {
+        ctx.reporter.report(&Event::Progress {
             step: Some(commit_step.id),
             message: format!(
                 "not committing '{name}': it is not part of the package \
@@ -244,13 +244,13 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         Emit::new(ctx.reporter, commit_step.id),
     );
     for name in &removed {
-        ctx.reporter.report(&Event::Warning {
+        ctx.reporter.report(&Event::Progress {
             step: Some(commit_step.id),
             message: format!("removing '{name}' from OBS: the package does not use it"),
         });
     }
     for name in osc::discard_untracked_archives(&ctx.checkout_dir, &plan.skipped, &named) {
-        ctx.reporter.report(&Event::Warning {
+        ctx.reporter.report(&Event::Progress {
             step: Some(commit_step.id),
             message: format!("deleted '{name}' from the checkout: the package does not use it"),
         });

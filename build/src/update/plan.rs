@@ -406,7 +406,7 @@ pub fn plan_each_watched(
     names.sort();
     let (names, dropped) = spellings::one_spelling_each(names);
     for (dropped, kept) in dropped {
-        emit.reporter.report(&Event::Warning {
+        emit.reporter.report(&Event::Progress {
             step: emit.step,
             message: format!("{project} lists {dropped} and {kept}: only {kept} is checked"),
         });

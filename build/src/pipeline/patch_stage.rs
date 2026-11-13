@@ -175,7 +175,7 @@ pub(super) fn remove_proven_patches(
     let mut lines = Vec::new();
     for name in names {
         let _ = std::fs::remove_file(ctx.checkout_dir.join(name));
-        ctx.reporter.report(&Event::Warning {
+        ctx.reporter.report(&Event::Progress {
             step: Some(step),
             message: format!(
                 "{}: removed {name}: quilt reports it already applied in the {} sources \

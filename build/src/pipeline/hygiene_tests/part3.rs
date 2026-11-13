@@ -146,6 +146,16 @@ fn the_first_unmet_condition_fails_the_patch_and_the_second_switches_to_the_whee
     assert_eq!(spec, SPLIT_SPEC);
 }
 
+struct Reported(std::sync::Mutex<Vec<String>>);
+
+impl Reporter for Reported {
+    fn report(&self, event: &Event) {
+        if let Event::Warning { message, .. } | Event::Progress { message, .. } = event {
+            self.0.lock().unwrap().push(message.clone());
+        }
+    }
+}
+
 #[test]
 fn a_failed_wheel_lookup_leaves_the_spec_to_the_review_turn() {
     let root = tempfile::tempdir().unwrap();
@@ -162,7 +172,8 @@ fn a_failed_wheel_lookup_leaves_the_spec_to_the_review_turn() {
     std::fs::write(&spec_path, original).unwrap();
     let run = ap_core::run::RunDir::allocate(&root.path().join("work")).unwrap();
     let pkg_run = run.pkg("python-foo");
-    let warnings = Warnings(Default::default());
+    // The line is progress now: the test collects both kinds.
+    let warnings = Reported(Default::default());
     let ctx = RunCtx {
         config: &config,
         pkg_run: &pkg_run,

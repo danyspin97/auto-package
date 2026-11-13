@@ -306,7 +306,7 @@ fn apply_turn_outcome_with(
                     snap.restore_changes_files(reporter, Some(step));
                 }
                 for name in osc::drop_empty_rpmlintrc(checkout_dir) {
-                    reporter.report(&Event::Warning {
+                    reporter.report(&Event::Progress {
                         step: Some(step.id),
                         message: format!("{rpm_name}: dropped the empty '{name}'"),
                     });

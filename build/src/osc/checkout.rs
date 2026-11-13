@@ -272,7 +272,7 @@ pub(super) fn discard_unfinished_checkout(checkout_dir: &Path, emit: Emit<'_>) {
                     ap_core::diag!("  could not remove {}: {e}", osc_dir.display());
                 }
                 prune_unfinished_asides(checkout_dir, Some(&aside), None);
-                emit.reporter.report(&Event::Warning {
+                emit.reporter.report(&Event::Progress {
                     step: emit.step,
                     message: format!(
                         "{} is an unfinished checkout with untracked files; moved to {} and checking it out again",
@@ -286,7 +286,7 @@ pub(super) fn discard_unfinished_checkout(checkout_dir: &Path, emit: Emit<'_>) {
         return;
     }
     match fs::remove_dir_all(checkout_dir) {
-        Ok(()) => emit.reporter.report(&Event::Warning {
+        Ok(()) => emit.reporter.report(&Event::Progress {
             step: emit.step,
             message: format!(
                 "{} is the remains of a checkout osc never finished; checking it out again",
@@ -459,7 +459,7 @@ fn osc_up_recovering(checkout_dir: &Path, emit: Emit<'_>) -> Result<Captured, Er
             // If the move fails the checkout is not usable: that is the
             // error to report, not a retry that will hit the same conflict.
             let backup = move_aside(checkout_dir, name)?;
-            emit.reporter.report(&Event::Warning {
+            emit.reporter.report(&Event::Progress {
                 step: emit.step,
                 message: format!(
                     "osc up: untracked local '{name}' conflicted with a newer revision's \

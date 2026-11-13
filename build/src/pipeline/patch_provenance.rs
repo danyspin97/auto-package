@@ -345,7 +345,7 @@ fn drop_merged(
     drop_series_lines(&ctx.checkout_dir, &names);
     let _ = std::fs::remove_file(ctx.checkout_dir.join(name));
     *spec = without;
-    ctx.reporter.report(&Event::Warning {
+    ctx.reporter.report(&Event::Progress {
         step: None,
         message: format!(
             "{}: removed {name}: merged upstream in {tag}, and the packaged release has it",

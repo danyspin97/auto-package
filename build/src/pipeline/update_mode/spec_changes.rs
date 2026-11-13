@@ -129,7 +129,7 @@ pub(in crate::pipeline) fn report_changes(
     );
     for change in changes {
         let (removed, added) = (quoted(&change.removed), quoted(&change.added));
-        reporter.report(&Event::Warning {
+        reporter.report(&Event::Progress {
             step,
             message: format!(
                 "{rpm_name}: {} changed the spec: removed {removed}, added {added}",
@@ -185,11 +185,11 @@ mod tests {
     }
 
     #[test]
-    fn a_change_is_warned_about_and_left_in_the_journal() {
+    fn a_change_is_reported_and_left_in_the_journal() {
         struct Collect(std::sync::Mutex<Vec<String>>);
         impl Reporter for Collect {
             fn report(&self, event: &Event) {
-                if let Event::Warning { message, .. } = event {
+                if let Event::Progress { message, .. } = event {
                     self.0.lock().unwrap().push(message.clone());
                 }
             }

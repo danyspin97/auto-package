@@ -372,7 +372,7 @@ pub(super) fn review_stage(
                 }
             });
             for name in osc::drop_unused_recipe_files(checkout_dir) {
-                reporter.report(&Event::Warning {
+                reporter.report(&Event::Progress {
                     step: Some(review_step.id),
                     message: format!("{rpm_name}: dropped '{name}': the spec does not use it"),
                 });

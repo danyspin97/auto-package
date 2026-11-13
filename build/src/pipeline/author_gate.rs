@@ -78,7 +78,7 @@ pub(super) fn settle_authors(
 ) -> Result<(), PipelineResult> {
     let author = author_or_stop(&ctx.rpm_name, host_author(Some(&ctx.checkout_dir)))?;
     for file in osc::repair_unpublished_authors(&ctx.checkout_dir, Some(baseline), &author) {
-        ctx.reporter.report(&Event::Warning {
+        ctx.reporter.report(&Event::Progress {
             step: Some(step),
             message: format!(
                 "{}: the author of the new entry in {file} was not a name and an address; set to {author}",
