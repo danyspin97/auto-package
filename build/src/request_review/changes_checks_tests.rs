@@ -258,3 +258,14 @@ fn todo_a_macro_or_the_package_name_in_a_bullet_is_a_note() {
     let e = with_entry("- Update to 2.10.4\n  * Fixed cracklib bug\n- Fix a crash");
     assert!(changes_findings(&ctx(Some(OLD), Some(&e))).is_empty());
 }
+
+#[test]
+fn a_require_bullet_without_a_dependency_word_is_a_dependency_bullet() {
+    use super::changes_checks::is_dependency_bullet;
+    assert!(is_dependency_bullet(
+        "Require binaryornot 0.4.4 and requests 2.23.0 as the new release declares"
+    ));
+    assert!(!is_dependency_bullet(
+        "Fix the install path of the man pages"
+    ));
+}

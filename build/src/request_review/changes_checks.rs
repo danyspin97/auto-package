@@ -221,10 +221,13 @@ const DEPENDENCY_WORDS: [&str; 7] = [
 /// bullet: it starts with a dependency verb and speaks of a requirement.
 pub(crate) fn is_dependency_bullet(text: &str) -> bool {
     let verb = text.split_whitespace().next().unwrap_or("").to_lowercase();
-    DEPENDENCY_VERBS.contains(&verb.as_str())
-        && DEPENDENCY_WORDS
-            .iter()
-            .any(|w| text.to_lowercase().contains(w))
+    // A bullet that starts with `Require` names a requirement, whatever else
+    // it says (`Require foo 1.2 as the new release declares`).
+    verb == "require"
+        || DEPENDENCY_VERBS.contains(&verb.as_str())
+            && DEPENDENCY_WORDS
+                .iter()
+                .any(|w| text.to_lowercase().contains(w))
 }
 
 /// Whether a bullet holds `TODO`, a macro or the package name (convention 40).
