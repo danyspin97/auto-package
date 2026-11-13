@@ -325,3 +325,40 @@ fn a_recap_bullet_outside_the_jump_is_a_mismatch() {
         assert_eq!(m.severity, Severity::Blocker, "{stray}");
     }
 }
+
+/// The two housekeeping bullets convention 40 gives no bullet to are recognised,
+/// and a bullet that names a host, a project or a skipped test is not.
+#[test]
+fn housekeeping_bullets_are_recognised_and_others_are_not() {
+    use super::changes_checks::is_housekeeping_bullet;
+    assert!(is_housekeeping_bullet(
+        "Fix the source archive name to the lowercase name PyPI uses for this release"
+    ));
+    assert!(is_housekeeping_bullet(
+        "Use the lowercase archive name PyPI uses for this release"
+    ));
+    assert!(is_housekeeping_bullet(
+        "Drop the mock import workaround in %check, which the tests no longer need"
+    ));
+    assert!(is_housekeeping_bullet("Remove the sed workaround in %prep"));
+    // A host, a project or a skipped test is a change, whatever its verb.
+    assert!(!is_housekeeping_bullet(
+        "Fix the source archive host to files.pythonhosted.org"
+    ));
+    assert!(!is_housekeeping_bullet(
+        "Fix the source archive name to a new project"
+    ));
+    assert!(!is_housekeeping_bullet(
+        "Drop the workaround that skipped test_foo in %check"
+    ));
+    assert!(!is_housekeeping_bullet(
+        "Drop the workaround in %check and deselect test_foo"
+    ));
+    assert!(!is_housekeeping_bullet(
+        "Add a deselect for test_foo in %check"
+    ));
+    assert!(!is_housekeeping_bullet("Update to 2.0.0"));
+    assert!(!is_housekeeping_bullet(
+        "Drop the workaround for the old build"
+    ));
+}

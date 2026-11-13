@@ -231,6 +231,49 @@ pub(crate) fn is_dependency_bullet(text: &str) -> bool {
                 .any(|w| text.to_lowercase().contains(w))
 }
 
+/// Words that make a bullet say more than a housekeeping edit: a host, a project,
+/// a skipped or deselected test.
+const HOUSEKEEPING_NOT: [&str; 17] = [
+    "host",
+    "url",
+    "mirror",
+    "server",
+    "github",
+    "http",
+    "project",
+    "repository",
+    "fork",
+    "domain",
+    "skip",
+    "deselect",
+    "ignore",
+    "xfail",
+    "disable",
+    "exclude",
+    "not ",
+];
+
+/// Whether a bullet says one of the two housekeeping edits convention 40 gives no
+/// bullet: the archive name of the release, `Fix the source archive name ...` or
+/// `Use the lowercase archive name ...`, or a workaround removed from the build
+/// sections, `Drop the ... workaround in %check`. A bullet that names a host, a
+/// project or a skipped test is no such edit.
+pub(crate) fn is_housekeeping_bullet(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    // An `Update to` bullet of any release is a release's recap, never housekeeping.
+    if lower.starts_with("update to") || HOUSEKEEPING_NOT.iter().any(|w| lower.contains(w)) {
+        return false;
+    }
+    let archive = lower.starts_with("fix the source archive name")
+        || (lower.starts_with("use the lowercase") && lower.contains("archive"));
+    let workaround = (lower.starts_with("drop the ") || lower.starts_with("remove the "))
+        && lower.contains("workaround")
+        && ["%check", "%prep", "%build"]
+            .iter()
+            .any(|s| lower.contains(s));
+    archive || workaround
+}
+
 /// Whether a bullet holds `TODO`, a macro or the package name (convention 40).
 pub(crate) fn has_forbidden_text(text: &str, package: &str) -> bool {
     let by_name = text

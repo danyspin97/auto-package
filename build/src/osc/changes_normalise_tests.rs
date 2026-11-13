@@ -506,3 +506,42 @@ fn a_crlf_file_keeps_its_trailing_blank_lines_as_crlf() {
     assert!(out.ends_with("- Fix the build\r\n\r\n"), "{out:?}");
     assert!(!out.replace("\r\n", "").contains('\n'), "{out:?}");
 }
+
+/// A housekeeping bullet of an unpublished update entry goes; a bullet that
+/// names a skipped test stays, and the `Update to` bullet stays.
+#[test]
+fn a_housekeeping_bullet_goes_from_an_update_entry() {
+    let branch = format!(
+        "{SEP}{HEADER}\n\n- Update to 5.4\n\
+         - Fix the source archive name to the lowercase name PyPI uses for this release\n\
+         - Drop the mock import workaround in %check, which the tests no longer need\n\
+         - Drop the workaround that skipped test_foo in %check\n\n"
+    );
+    let out = normalise_unpublished_entries(ORIGIN, &branch, "5.4", "debugedit").unwrap();
+    assert!(!out.contains("Fix the source archive name"), "{out}");
+    assert!(!out.contains("Drop the mock import workaround"), "{out}");
+    assert!(
+        out.contains("Drop the workaround that skipped test_foo"),
+        "{out}"
+    );
+    assert!(out.contains("- Update to 5.4"), "{out}");
+}
+
+/// Housekeeping bullets go from an entry that also holds several `Update to X:`
+/// release bullets; those release bullets, with their recap lines, stay.
+#[test]
+fn housekeeping_goes_and_every_update_to_bullet_stays() {
+    let branch = format!(
+        "{SEP}{HEADER}\n\n- Update to 5.4:\n  * New option.\n\
+         - Update to 5.3.1:\n  * Old fix.\n\
+         - Fix the source archive name to the lowercase name PyPI uses for this release\n\
+         - Drop the mock import workaround in %check, which the tests no longer need\n\n"
+    );
+    let out = normalise_unpublished_entries(ORIGIN, &branch, "5.4", "debugedit").unwrap();
+    assert!(!out.contains("Fix the source archive name"), "{out}");
+    assert!(!out.contains("Drop the mock import workaround"), "{out}");
+    assert!(out.contains("- Update to 5.4:"), "{out}");
+    assert!(out.contains("  * New option."), "{out}");
+    assert!(out.contains("- Update to 5.3.1:"), "{out}");
+    assert!(out.contains("  * Old fix."), "{out}");
+}

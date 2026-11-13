@@ -24,7 +24,8 @@ use super::changes_normalise_blocks::{Bullet, body_start, split_blocks};
 use super::*;
 use crate::patch_check::refresh_bullet;
 use crate::request_review::changes_checks::{
-    has_forbidden_text, is_dependency_bullet, looks_like_version, mismatch, update_target,
+    has_forbidden_text, is_dependency_bullet, is_housekeeping_bullet, looks_like_version, mismatch,
+    update_target,
 };
 use std::collections::BTreeSet;
 
@@ -379,7 +380,11 @@ fn normalised_entry(
     for b in bullets {
         let is_update = update_target(b.head()).is_some();
         let text = b.text();
-        if !is_update && (is_dependency_bullet(&text) || has_forbidden_text(&text, package)) {
+        if !is_update
+            && (is_dependency_bullet(&text)
+                || has_forbidden_text(&text, package)
+                || is_housekeeping_bullet(&text))
+        {
             continue;
         }
         let named: Vec<&str> = match (b.refreshed(), b.grouped()) {
