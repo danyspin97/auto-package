@@ -16,6 +16,10 @@ fn the_refresh_prompt_names_the_targets_absent_proof() {
         "{prompt}"
     );
     assert!(
+        prompt.contains("every hunk is dead (each hunk is in the new archive as above, or every file it changes is absent from it, never for a security patch)"),
+        "{prompt}"
+    );
+    assert!(
         prompt.contains("A change already upstream with different surrounding text is removed too"),
         "{prompt}"
     );
@@ -30,6 +34,10 @@ fn convention_111_names_the_targets_absent_proof() {
             "every file the patch changes is gone from the archive: the patch is removed, \
              never a security patch."
         ),
+        "{flat}"
+    );
+    assert!(
+        flat.contains("every hunk is dead (each hunk is in the new archive by the rule above, or every file it changes is gone from the archive, which never counts for a security patch)"),
         "{flat}"
     );
     assert!(

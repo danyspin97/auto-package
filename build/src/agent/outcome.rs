@@ -309,7 +309,10 @@ pub(super) fn refresh_patches_task() -> &'static str {
      each hunk has a substantive line (the pipeline checks this form itself). Or, when every \
      file the patch changes is absent from the new archive (quilt says `can't find file to \
      patch` for every hunk): remove the patch; the pipeline checks it itself and never accepts \
-     it for a security patch. A change already upstream with different surrounding text is \
+     it for a security patch. Or, when quilt says the patch fails and every hunk is dead (each \
+     hunk is in the new archive as above, or every file it changes is absent from it, never for a \
+     security patch): remove the patch; the pipeline checks each hunk itself. A change already \
+     upstream with different surrounding text is \
      removed too: the pipeline proves it by the patched lines. Only then remove it: its \
      `PatchN:` line, its `%patchN` line if any, and its file (`cd source && quilt delete -r \
      <name>`). The pipeline checks that proof and rolls back a removal without it.\n\

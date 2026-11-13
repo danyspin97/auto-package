@@ -1,9 +1,9 @@
 //! The proof a patch removal needs. A patch an edit removes is kept unless its
 //! change is already in the new sources: quilt reports it `can be
-//! reverse-applied`, or quilt reports it does not apply and each hunk's added
-//! lines are in the new archive, or every file it patches is gone from the new
-//! archive (not for a security patch). Every other removal is refused, one quilt
-//! did not check included.
+//! reverse-applied`, or quilt reports it does not apply and every hunk is dead
+//! in the new archive: its added lines are in it, or every file it changes is
+//! gone from it (not for a security patch). Every other removal is refused, one
+//! quilt did not check included.
 //!
 //! A patch the edit keeps declared but stops applying (see
 //! [`disabled_patches`](crate::patch_check::disabled_patches)) is judged the
