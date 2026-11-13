@@ -1,6 +1,7 @@
 //! Turning the notes of releases into the lines of a `.changes` recap: the
 //! bullets of the notes, cleaned, or the link-only form when they are too many.
 
+use super::caps::cut;
 use super::markdown::{is_rule, strip_comments, strip_emoji, strip_links};
 use super::routine::is_routine;
 use crate::sources::RepoRelease;
@@ -52,12 +53,7 @@ pub(super) fn classify(releases: &[RepoRelease]) -> Notes {
             return Notes::None;
         }
         if bullets.len() <= MAX_BULLETS {
-            return Notes::Bullets(
-                bullets
-                    .iter()
-                    .map(|b| plain_cut(b, MAX_BULLET_CHARS))
-                    .collect(),
-            );
+            return Notes::Bullets(bullets.iter().map(|b| cut(b, MAX_BULLET_CHARS)).collect());
         }
     }
     let text: String = with_notes
@@ -136,16 +132,6 @@ fn tidy(item: &str) -> String {
         .filter(|w| !is_rule(w))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// `text` cut to `max` characters, the `...` included, as the single-release
-/// form has always cut its bullets.
-fn plain_cut(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let cut: String = text.chars().take(max - 3).collect();
-    format!("{}...", cut.trim_end())
 }
 
 /// The recap lines for `bullets`: each a `* ` item, wrapped to the width of a

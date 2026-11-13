@@ -54,17 +54,23 @@ pub(super) fn rank(line: &str) -> u8 {
     }
 }
 
-/// `text` cut to `limit` characters, the `...` included, at the last word
-/// boundary that fits; `text` as it is when it fits already.
+/// `text` as a bullet of at most `limit` characters, the `...` included. A
+/// text that fits is kept. A longer one is cut at its last sentence end that
+/// fits, else at the last word boundary that fits, with `...` after it. A cut
+/// never ends on a dangling `,`, `;`, `:` or a joining word (see [`undangle`]).
 pub(super) fn cut(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
+    let text = text.trim();
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= limit {
+        return undangle(text);
     }
-    let head: String = text.chars().take(limit.saturating_sub(3)).collect();
-    let whole_word = text
-        .chars()
-        .nth(head.chars().count())
-        .is_some_and(char::is_whitespace);
+    if let Some(end) = sentence_end_within(&chars, limit) {
+        return chars[..=end].iter().collect();
+    }
+    let head: String = chars[..limit.saturating_sub(3)].iter().collect();
+    let whole_word = chars
+        .get(limit.saturating_sub(3))
+        .is_some_and(|c| c.is_whitespace());
     let kept = if whole_word {
         head.as_str()
     } else {
@@ -73,7 +79,50 @@ pub(super) fn cut(text: &str, limit: usize) -> String {
             _ => head.as_str(),
         }
     };
-    format!("{}...", kept.trim_end())
+    format!("{}...", undangle(kept))
+}
+
+/// The index of the last `.` within the first `limit` characters that ends a
+/// sentence: a `.` followed by a space or by the end of the text, after a word
+/// of two letters or more (`e.g.` and `v1.2` are not sentence ends).
+fn sentence_end_within(chars: &[char], limit: usize) -> Option<usize> {
+    (0..limit.min(chars.len())).rev().find(|&i| {
+        chars[i] == '.' && chars.get(i + 1).is_none_or(|c| c.is_whitespace()) && {
+            let word: String = chars[..i]
+                .iter()
+                .rev()
+                .take_while(|c| !c.is_whitespace())
+                .collect();
+            word.chars().count() >= 2 && !word.contains('.')
+        }
+    })
+}
+
+/// `text` without a dangling end: trailing `,`, `;` or `:` and a last word
+/// that joins to what would follow (`and`, `or`, `but`) are dropped, so that
+/// the bullet reads as a whole sentence or phrase.
+pub(super) fn undangle(text: &str) -> String {
+    let mut s = text.trim_end().to_string();
+    loop {
+        let before = s.len();
+        while s.ends_with([',', ';', ':']) {
+            s.pop();
+            s = s.trim_end().to_string();
+        }
+        if let Some(at) = s.rfind(char::is_whitespace) {
+            let last = &s[at + 1..];
+            if ["and", "or", "but"]
+                .iter()
+                .any(|w| last.eq_ignore_ascii_case(w))
+            {
+                s.truncate(at);
+                s = s.trim_end().to_string();
+            }
+        }
+        if s.len() == before {
+            return s;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -86,6 +135,30 @@ mod tests {
         assert_eq!(cut("alpha beta", 100), "alpha beta");
         assert_eq!(cut("abcdefghij", 6), "abc...");
         assert!(cut(&"word ".repeat(50), 100).chars().count() <= 100);
+    }
+
+    #[test]
+    fn a_cut_at_a_sentence_end_that_fits_keeps_the_sentence() {
+        let long = "First one. Second part is long enough to need cutting for the limit here";
+        assert_eq!(cut(long, 60), "First one.");
+        assert_eq!(
+            cut("Use e.g. this option, then more words here", 20),
+            "Use e.g. this..."
+        );
+    }
+
+    #[test]
+    fn a_cut_never_ends_on_a_dangling_mark_or_joining_word() {
+        assert_eq!(cut("alpha, beta gamma", 11), "alpha...");
+        assert_eq!(cut("alpha and beta gamma", 12), "alpha...");
+        assert_eq!(cut("Add a thing,", 100), "Add a thing");
+        assert_eq!(cut("Add a thing and", 100), "Add a thing");
+        assert_eq!(cut("Keep x; then", 100), "Keep x; then");
+        let text = "Preserve constructor signatures on deprecated classes, including in Sphinx autodoc, instead of displaying the warning wrapper's generic arguments.";
+        let got = cut(text, 100);
+        assert!(got.chars().count() <= 100, "{got}");
+        assert!(got.ends_with("..."), "{got}");
+        assert!(!got.contains(",..."), "{got}");
     }
 
     #[test]
