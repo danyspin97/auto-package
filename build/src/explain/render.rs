@@ -299,7 +299,8 @@ pub fn render(ex: &Explanation, width: usize) -> Vec<Line> {
             "newest entry in the checkout's .changes",
         );
         for l in &oc.changelog {
-            o.para(4, "", Kind::Plain, l);
+            let body = l.trim_start();
+            o.para(4 + l.len() - body.len(), "", Kind::Plain, body);
         }
     }
 

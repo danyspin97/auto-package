@@ -326,7 +326,11 @@ pub(super) fn latest_changes_entry(path: &Path) -> Vec<String> {
         .take_while(|l| !l.starts_with("-----"))
         .filter(|l| !l.trim().is_empty())
         .take(14)
-        .map(|l| truncate(l, 200))
+        .map(|l| {
+            // The nested bullets of an entry are indented: keep that lead.
+            let body = l.trim_start();
+            format!("{}{}", &l[..l.len() - body.len()], truncate(body, 200))
+        })
         .collect()
 }
 
