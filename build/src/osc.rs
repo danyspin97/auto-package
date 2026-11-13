@@ -122,6 +122,9 @@ mod osc_error_text_tests;
 mod unfinished_checkout_tests;
 
 #[cfg(test)]
+mod checkout_into_tests;
+
+#[cfg(test)]
 mod sandbox_spec_dir_tests;
 
 #[cfg(test)]

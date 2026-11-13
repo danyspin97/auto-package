@@ -209,6 +209,7 @@ pub fn checkout(
     static CHECKOUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = CHECKOUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
+    create_into_dir(into_dir)?;
     let out = proc::capture_with_timeout(
         "osc",
         &["co", &format!("{project}/{pkg_name}")],
@@ -230,6 +231,14 @@ pub fn checkout(
     }
 
     Ok(checkout_dir)
+}
+
+/// Make `into_dir` (and its parents) so that `osc co` can run in it. A working
+/// directory that does not exist makes the spawn fail, and the failure would
+/// read as a missing `osc`.
+pub(super) fn create_into_dir(into_dir: &Path) -> Result<(), Error> {
+    fs::create_dir_all(into_dir)
+        .map_err(|e| Error::NotActionable(format!("could not create {}: {e}", into_dir.display())))
 }
 
 /// The lock for one checkout directory, created on first use and kept for the
