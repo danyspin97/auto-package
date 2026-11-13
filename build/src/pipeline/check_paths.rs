@@ -42,7 +42,7 @@ pub(crate) fn patch_created_paths(spec: &str, checkout: &Path) -> Vec<String> {
         .lines()
         .filter_map(|l| crate::spec::parse_source_line(l, &["patch"], str::to_string))
     {
-        let name = expand_patch_name(&patch.url, spec);
+        let name = expand_patch_name(&patch.value, spec);
         if Path::new(&name).file_name() != Some(name.as_ref()) {
             continue;
         }

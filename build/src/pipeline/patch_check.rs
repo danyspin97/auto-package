@@ -52,7 +52,7 @@ pub(crate) fn stale_patches(
         };
         // Expanded as try_patches expands it (`foo-%{version}.patch`), so the
         // file the spec really names is judged.
-        let name = expand_patch_name(&patch.url, spec);
+        let name = expand_patch_name(&patch.value, spec);
         if name.is_empty()
             || name.contains('%')
             || Path::new(&name).file_name() != Some(name.as_ref())
@@ -208,7 +208,7 @@ pub(super) fn try_patches(spec_path: &Path, spec: &str) -> Result<PatchCheck, St
     let patches: Vec<(String, String)> = spec
         .lines()
         .filter_map(|l| crate::spec::parse_source_line(l, &["patch"], str::to_string))
-        .map(|patch| (patch.index.to_string(), patch.url.trim().to_string()))
+        .map(|patch| (patch.index.to_string(), patch.value.trim().to_string()))
         .collect();
     if patches.is_empty() || !spec.contains("%autosetup") {
         return Ok(PatchCheck::default());
@@ -535,7 +535,7 @@ pub(super) fn patch_escape_offender(
         let Some(patch) = crate::spec::parse_source_line(line, &["patch"], str::to_string) else {
             continue;
         };
-        let name = expand_patch_name(&patch.url, spec);
+        let name = expand_patch_name(&patch.value, spec);
         // A name with a directory part is not a file of this checkout.
         if Path::new(&name).file_name() == Some(name.as_ref()) {
             names.push(name);

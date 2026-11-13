@@ -233,7 +233,7 @@ fn scan(spec: &str) -> Scan {
         if let Some(patch) = crate::spec::parse_source_line(line, &["patch"], str::to_string) {
             out.declarations.push(Declaration {
                 number: patch.index.to_string(),
-                name: crate::pipeline::expand_patch_name(patch.url.trim(), spec),
+                name: crate::pipeline::expand_patch_name(patch.value.trim(), spec),
                 guards: stack.guards(),
                 skipped,
             });

@@ -79,3 +79,18 @@ fn a_new_missing_path_next_to_an_inherited_one_is_introduced_alone() {
     assert!(introduced[0].contains("test/b/new.test"));
     assert!(!introduced[0].contains("test/a/old.test"));
 }
+
+#[test]
+fn a_patch_renamed_by_its_fragment_is_read_under_that_name() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("fix-version.patch"),
+        "--- /dev/null\n+++ b/test/parquet/a.test\n@@ -0,0 +1 @@\n+x\n",
+    )
+    .unwrap();
+    let spec = "Name: foo\nVersion: 1\nPatch:  https://github.com/o/r/commit/8cf50c9177936e771e158ea9b249b4aa5e2cc1ee.patch#/fix-version.patch\n%prep\n%autosetup -p1\n";
+    assert_eq!(
+        patch_created_paths(spec, dir.path()),
+        vec!["test/parquet/a.test"]
+    );
+}
