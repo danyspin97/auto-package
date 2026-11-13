@@ -1,6 +1,21 @@
 //! Why a package failed: the kinds a pipeline stage returns, and the rules
 //! that depend on them. Callers decide from the kind, never from the reason.
 
+use ap_core::event::{Event, StepId};
+use ap_core::sink::Reporter;
+
+/// The warning of a failed agent turn. A turn the user's stop killed is not
+/// warned about: the run's summary says the run was interrupted.
+pub(super) fn warn_turn_failure(reporter: &dyn Reporter, step: StepId, message: String) {
+    if crate::proc::interrupted() {
+        return;
+    }
+    reporter.report(&Event::Warning {
+        step: Some(step),
+        message,
+    });
+}
+
 /// Why a package failed. Callers decide what to retry, count and give up on
 /// from this, never from the wording of `reason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -25,6 +40,11 @@ pub enum FailureKind {
     /// The disk is full (`ENOSPC`). Handled like `Transient`, and told apart
     /// so the user can free space and retry the package.
     DiskFull,
+    /// The user stopped the run (Ctrl-C) while this package's work was under
+    /// way, so its child was killed or its turn cut short. Not a failure of
+    /// the package: recorded as `interrupted`, never retried, counted or
+    /// warned about. Only set while [`crate::proc::interrupted`] holds.
+    Interrupted,
     /// A patch turn ran but did not make the dependent's shipping condition
     /// true. The package's own condition counters bound the repeats (a second
     /// patch turn, then the upstream wheel), so the caller re-queues the

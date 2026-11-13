@@ -478,7 +478,11 @@ pub(super) fn recorded_outcome(result: &PipelineResult) -> Option<(&'static str,
         } => None,
         PipelineResult::Failed {
             reason,
-            kind: FailureKind::AgentUnavailable | FailureKind::Transient | FailureKind::DiskFull,
+            kind:
+                FailureKind::AgentUnavailable
+                | FailureKind::Transient
+                | FailureKind::DiskFull
+                | FailureKind::Interrupted,
             ..
         } => Some(("interrupted", reason.clone())),
         PipelineResult::Failed {

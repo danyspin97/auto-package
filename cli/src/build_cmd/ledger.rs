@@ -84,6 +84,12 @@ impl DepLedger<'_> {
                     }
                     self.pending_deps.extend(more);
                 }
+                // The user's stop ended it: not a failure to retry, count or
+                // warn about (the run's summary says it was interrupted).
+                PipelineResult::Failed {
+                    kind: FailureKind::Interrupted,
+                    ..
+                } => {}
                 PipelineResult::Failed { reason, kind, .. } => {
                     // A dependency OBS or the pipeline failed is run
                     // again through the normal pipeline when the package

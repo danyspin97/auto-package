@@ -165,6 +165,10 @@ impl HumanSink {
                         "{}",
                         format!("- skipped: {reason}").if_supports_color(Stderr, |t| t.dimmed()),
                     ),
+                    PackageOutcome::Interrupted => format!(
+                        "{}",
+                        "- interrupted".if_supports_color(Stderr, |t| t.dimmed()),
+                    ),
                 };
                 Some(format!(
                     "{outcome_colored}  {} {}",

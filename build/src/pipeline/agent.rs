@@ -461,10 +461,7 @@ pub(super) fn agent_turn(
                 crate::agent::max_agent_turns(ctx.task),
             );
             let kind = turn_failure_kind(&e);
-            reporter.report(&Event::Warning {
-                step: Some(step.id),
-                message: message.clone(),
-            });
+            warn_turn_failure(reporter, step.id, message.clone());
             return Err((message, kind));
         }
     };

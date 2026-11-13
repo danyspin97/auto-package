@@ -39,6 +39,9 @@ pub(super) enum PkgStatus {
     /// Excluded by OBS for this repository and arch: nothing was built, and
     /// the reason is in the detail pane.
     Skipped,
+    /// Stopped by the user's interrupt while it was being built: not a
+    /// failure, and the package can be run again.
+    Interrupted,
 }
 
 impl PkgStatus {
@@ -60,6 +63,7 @@ impl PkgStatus {
             PkgStatus::Failed => "failed",
             PkgStatus::NoSpace => "failed (no space)",
             PkgStatus::Skipped => "skipped",
+            PkgStatus::Interrupted => "interrupted",
         }
     }
 
@@ -80,6 +84,7 @@ impl PkgStatus {
             PkgStatus::AlreadyBuilt => "✔",
             PkgStatus::MissingDeps => "◇",
             PkgStatus::Skipped => "⊘",
+            PkgStatus::Interrupted => "■",
             PkgStatus::Failed | PkgStatus::NoSpace => "✗",
         }
     }
@@ -98,6 +103,7 @@ impl PkgStatus {
             PkgStatus::Failed => Color::Red,
             PkgStatus::NoSpace => Color::LightRed,
             PkgStatus::Skipped => Color::DarkGray,
+            PkgStatus::Interrupted => Color::Yellow,
         }
     }
 }
@@ -148,7 +154,7 @@ impl PkgStatus {
             PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt => Stage::Done,
             PkgStatus::Failed | PkgStatus::NoSpace => Stage::Failed,
             PkgStatus::MissingDeps => Stage::Waiting,
-            PkgStatus::Skipped | PkgStatus::CheckSkipped => Stage::Skipped,
+            PkgStatus::Skipped | PkgStatus::CheckSkipped | PkgStatus::Interrupted => Stage::Skipped,
         }
     }
 
@@ -165,7 +171,7 @@ impl PkgStatus {
             PkgStatus::NeedsUpdate => 3,
             PkgStatus::Failed | PkgStatus::NoSpace => 4,
             PkgStatus::Succeeded | PkgStatus::BuiltLocally | PkgStatus::AlreadyBuilt => 5,
-            PkgStatus::Skipped | PkgStatus::CheckSkipped => 6,
+            PkgStatus::Skipped | PkgStatus::CheckSkipped | PkgStatus::Interrupted => 6,
             PkgStatus::UpToDate => 7,
         }
     }
@@ -244,6 +250,7 @@ impl PkgStatus {
                     PkgStatus::Failed
                 }
                 PackageOutcome::Skipped { .. } => PkgStatus::Skipped,
+                PackageOutcome::Interrupted => PkgStatus::Interrupted,
             },
         }
     }

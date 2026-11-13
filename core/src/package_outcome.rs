@@ -39,4 +39,7 @@ pub enum PackageOutcome {
     Skipped {
         reason: String,
     },
+    /// The user stopped the run while the package was being built: it is not a
+    /// failure, and it can be run again (its state reads `interrupted`).
+    Interrupted,
 }

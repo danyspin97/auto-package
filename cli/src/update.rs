@@ -288,6 +288,10 @@ pub(super) fn package_outcome(result: &PipelineResult) -> PackageOutcome {
             note: note.clone(),
         },
         PipelineResult::Failed {
+            kind: FailureKind::Interrupted,
+            ..
+        } => PackageOutcome::Interrupted,
+        PipelineResult::Failed {
             reason,
             kind: FailureKind::Excluded,
             ..

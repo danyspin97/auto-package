@@ -64,6 +64,8 @@ pub(super) fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     // never reached them): otherwise `osc`/`claude` outlive this process.
     // Sets the shutdown flag first, so polling loops and the scheduler stop
     // on their next check. A baseline restore is spared: it puts OBS back.
+    // The interrupt is recorded first: a failure the kill causes reads it.
+    ap_build::proc::request_interrupt();
     ap_build::proc::kill_all_groups();
     // The TUI leaves raw mode and the alternate screen on; restore them before
     // printing anything, or it lands in that state. Done before the wait, so

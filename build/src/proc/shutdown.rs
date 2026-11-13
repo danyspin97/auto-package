@@ -152,6 +152,22 @@ pub fn shutting_down() -> bool {
     SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Set by [`request_interrupt`]: the user stopped the run (Ctrl-C, SIGTERM).
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that the user stopped the run. Called before [`kill_all_groups`], so
+/// a child that dies of that kill sees the flag when its failure is read.
+/// Unlike [`abort_run`] this is not a run that cannot continue.
+pub fn request_interrupt() {
+    INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Whether the user stopped the run (see [`request_interrupt`]). A failure
+/// that follows from the stop is an interruption, not the package's failure.
+pub fn interrupted() -> bool {
+    INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// SIGKILL every child still running, except a baseline restore's: that one
 /// is let finish (see [`wait_for_obs_writes`]). For process shutdown (Ctrl-C,
 /// quit).

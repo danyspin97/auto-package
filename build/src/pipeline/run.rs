@@ -192,6 +192,25 @@ fn restore_stale_baseline(
     Ok((baseline, undone))
 }
 
+/// A failure that the user's stop caused, once `interrupted`, is an
+/// interruption: the package is recorded as `interrupted`, not as failed. A
+/// failure the stop cannot have caused (a maintainer's decision, a skip, a spent
+/// budget) keeps its kind.
+pub(super) fn interrupt_settled(result: PipelineResult, interrupted: bool) -> PipelineResult {
+    match result {
+        PipelineResult::Failed { rpm_name, kind, .. } if interrupted && reported_as_abort(kind) => {
+            PipelineResult::Failed {
+                rpm_name,
+                reason: "interrupted".to_string(),
+                kind: FailureKind::Interrupted,
+                remedy: None,
+                note: None,
+            }
+        }
+        result => result,
+    }
+}
+
 /// Settles a finished run: marks what it built, restores the OBS baseline,
 /// records why it ended, and runs the notes and release steps for a build.
 fn finish_package(
@@ -208,6 +227,9 @@ fn finish_package(
     ) {
         mark_settled(&config.rpm_name);
     }
+    // The user's stop came first: a failure it caused is an interruption, and
+    // the abort mapping below leaves it alone (`Interrupted` is not an abort).
+    let result = interrupt_settled(result, crate::proc::interrupted());
     // Once the run is aborted, whatever else was in flight died of the abort
     // (killed children, refused spawns): report it as the abort, not as the
     // package's own failure.

@@ -198,6 +198,12 @@ fn finish(pkg: String, mut acc: Acc) -> Option<PkgTries> {
         Some(
             PackageOutcome::NeedsMaintainer { reason, .. } | PackageOutcome::Skipped { reason },
         ) => (TriesOutcome::NotBuilt, Some(reason.clone()), acc.shape()),
+        // Stopped by the user: no result, and not a failure of the package.
+        Some(PackageOutcome::Interrupted) => (
+            TriesOutcome::NoResult,
+            Some("interrupted by the user".into()),
+            acc.shape(),
+        ),
         None if tries > 0 => (
             TriesOutcome::NoResult,
             Some("no package_finished: the run was interrupted or is still going".into()),

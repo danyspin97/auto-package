@@ -77,3 +77,57 @@ fn an_environment_failure_is_recorded_as_a_failed_package() {
         commit::recorded_outcome(&failed(FailureKind::Other))
     );
 }
+
+#[test]
+fn a_failure_the_user_stop_caused_is_an_interruption() {
+    for kind in [
+        FailureKind::Other,
+        FailureKind::AgentFailed,
+        FailureKind::Transient,
+        FailureKind::DiskFull,
+    ] {
+        let settled = run::interrupt_settled(failed(kind), true);
+        let PipelineResult::Failed { kind, reason, .. } = settled else {
+            panic!("{kind:?} stays a failure");
+        };
+        assert_eq!(kind, FailureKind::Interrupted, "{kind:?}");
+        assert_eq!(reason, "interrupted");
+    }
+}
+
+#[test]
+fn a_failure_the_stop_cannot_have_caused_keeps_its_kind() {
+    for kind in [
+        FailureKind::NeedsMaintainer,
+        FailureKind::Excluded,
+        FailureKind::BrokenOutside,
+        FailureKind::Exhausted,
+    ] {
+        let settled = run::interrupt_settled(failed(kind), true);
+        assert!(
+            matches!(settled, PipelineResult::Failed { kind: k, .. } if k == kind),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn without_a_stop_a_failure_keeps_its_kind() {
+    let settled = run::interrupt_settled(failed(FailureKind::AgentFailed), false);
+    assert!(matches!(
+        settled,
+        PipelineResult::Failed {
+            kind: FailureKind::AgentFailed,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn an_interrupted_package_is_recorded_as_interrupted_not_failed() {
+    let interrupted = failed(FailureKind::Interrupted);
+    assert_eq!(
+        commit::recorded_outcome(&interrupted).map(|(outcome, _)| outcome),
+        Some("interrupted")
+    );
+}

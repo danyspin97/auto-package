@@ -373,7 +373,8 @@ impl TuiState {
                     PackageOutcome::Built
                     | PackageOutcome::BuiltLocally
                     | PackageOutcome::AlreadyBuilt
-                    | PackageOutcome::MissingDeps { .. } => {
+                    | PackageOutcome::MissingDeps { .. }
+                    | PackageOutcome::Interrupted => {
                         state.step = None;
                         state.fail_reason = None;
                     }
@@ -390,6 +391,7 @@ impl TuiState {
                         format!("needs a maintainer: {reason}")
                     }
                     PackageOutcome::Skipped { reason } => format!("skipped: {reason}"),
+                    PackageOutcome::Interrupted => "interrupted".to_string(),
                 };
                 state.add_log(outcome_level(outcome), msg);
             }
@@ -439,7 +441,7 @@ fn outcome_level(outcome: &PackageOutcome) -> LogLevel {
         PackageOutcome::MissingDeps { .. } | PackageOutcome::NeedsMaintainer { .. } => {
             LogLevel::Warn
         }
-        PackageOutcome::Skipped { .. } => LogLevel::Info,
+        PackageOutcome::Skipped { .. } | PackageOutcome::Interrupted => LogLevel::Info,
         _ => LogLevel::Success,
     }
 }
