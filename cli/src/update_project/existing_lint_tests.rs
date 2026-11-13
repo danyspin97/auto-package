@@ -6,8 +6,9 @@ fn args(extra: &[&str]) -> UpdateProjectArgs {
     let mut argv = vec!["auto-package", "lint", "--project", "Base:System"];
     argv.extend_from_slice(extra);
     match Cli::try_parse_from(argv).unwrap().command {
-        Commands::Lint(mut a) => {
+        Commands::Lint(lint) => {
             // `lint` sets it when it runs.
+            let mut a = lint.update;
             a.improve = true;
             a
         }
@@ -177,5 +178,27 @@ fn a_git_source_names_no_version_and_is_kept() {
     assert_eq!(
         (it.old_version.as_str(), it.new_version.as_str()),
         ("5.4", "5.4")
+    );
+}
+
+#[test]
+fn lint_takes_fix_and_update_does_not() {
+    let lint = Cli::try_parse_from(["auto-package", "lint", "--project", "Base:System", "--fix"]);
+    match lint.unwrap().command {
+        Commands::Lint(lint) => assert!(lint.fix),
+        _ => panic!("not lint"),
+    }
+    let update = Cli::try_parse_from([
+        "auto-package",
+        "update",
+        "--project",
+        "Base:System",
+        "--fix",
+    ]);
+    assert!(update.is_err(), "update takes no --fix");
+    let plain = args(&[]);
+    assert!(
+        !plain.fix_inherited,
+        "a lint without --fix keeps the whole-package check"
     );
 }

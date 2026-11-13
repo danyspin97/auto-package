@@ -41,7 +41,7 @@ fn allow_host_repeats_on_build_update_and_lint() {
     let Commands::Lint(args) = lint.command else {
         panic!("not a lint");
     };
-    assert_eq!(args.allow_host.allow_host, ["c.example.org"]);
+    assert_eq!(args.update.allow_host.allow_host, ["c.example.org"]);
 
     let update = parse(&[
         "auto-package",

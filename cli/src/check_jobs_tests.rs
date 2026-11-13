@@ -5,7 +5,8 @@ use clap::Parser;
 
 fn jobs(args: &[&str]) -> Result<Option<usize>, clap::Error> {
     match Cli::try_parse_from(args)?.command {
-        Commands::Update(a) | Commands::Lint(a) => Ok(a.check_jobs),
+        Commands::Update(a) => Ok(a.check_jobs),
+        Commands::Lint(a) => Ok(a.update.check_jobs),
         _ => panic!("not update or lint"),
     }
 }

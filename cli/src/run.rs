@@ -575,9 +575,11 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
         Commands::Keyring { command } => match command {
             keyring::KeyringCommand::Accept(args) => keyring::accept_command(&args)?,
         },
-        Commands::Lint(mut args) => {
+        Commands::Lint(lint) => {
+            let mut args = lint.update;
             args.allow_host.apply()?;
             args.improve = true;
+            args.fix_inherited = lint.fix;
             update_project::run(args, summary)?
         }
         Commands::Notes { name, notes_dir } => crate::notes_cmd::notes_command(&name, &notes_dir)?,

@@ -45,6 +45,7 @@ impl Audit {
             super::existing_lint::applies(a),
             a.in_place,
         );
+        let fix_inherited = a.fix_inherited;
         let handle = std::thread::spawn(move || {
             let say = |message: String| {
                 reporter.report(&Event::Progress {
@@ -111,12 +112,47 @@ impl Audit {
                         }
                     };
                     ldconfig_left |= ap_build::spec_tidy::hygiene::ldconfig_left(&spec, ldconfig);
-                    let mut findings = quality::audit_spec(&spec, ldconfig);
                     let ecosystem_of = match &c.decision {
                         update::Decision::Update { ecosystem, .. }
                         | update::Decision::UpToDate { ecosystem, .. } => Some(ecosystem),
                         update::Decision::Skipped(_) => None,
                     };
+                    // A package with unpublished work on its branch is audited as that
+                    // work: what its origin's spec has too is inherited, not fixed.
+                    let carrying = super::leftovers::carry(
+                        &source,
+                        &branch,
+                        pkg,
+                        in_place,
+                        continues,
+                        ecosystem_of,
+                        emit,
+                    );
+                    let (mut findings, inherited) = match &carrying {
+                        Some(carry) => {
+                            match audit_work(carry, pkg, ldconfig, fix_inherited, emit) {
+                                Ok(split) => split,
+                                Err(why) => {
+                                    warn(format!(
+                                        "{pkg}: its branch work was not compared with {}, so all of its findings are checked: {why}",
+                                        carry.origin
+                                    ));
+                                    (quality::audit_spec(&spec, ldconfig), Vec::new())
+                                }
+                            }
+                        }
+                        None => (quality::audit_spec(&spec, ldconfig), Vec::new()),
+                    };
+                    if let Some(carry) = &carrying {
+                        for f in &inherited {
+                            say(format!(
+                                "{pkg}: inherited from {}, not fixed (lint --fix fixes it): {}: {}",
+                                carry.origin,
+                                f.kind.label(),
+                                f.detail
+                            ));
+                        }
+                    }
                     findings.extend(super::provenance::provenance_findings(
                         &source,
                         pkg,
@@ -160,19 +196,10 @@ impl Audit {
                     };
                     // A package with unpublished work on its branch is checked against
                     // its origin first: its branch leftovers are the tool's to clean.
-                    let carrying = super::leftovers::carry(
-                        &source,
-                        &branch,
-                        pkg,
-                        in_place,
-                        continues,
-                        ecosystem_of,
-                        emit,
-                    );
-                    let gate = match carrying {
+                    let gate = match &carrying {
                         Some(carry) => {
                             let obs = ap_build::request_review::fetch::LiveRequestObs { emit };
-                            super::leftovers::pre_gate(&obs, &carry, pkg, ldconfig, emit)
+                            super::leftovers::pre_gate(&obs, carry, pkg, ldconfig, emit)
                                 .unwrap_or_else(|why| {
                                     warn(format!(
                                         "{pkg}: its branch work was not checked before the build: {why}"
@@ -182,11 +209,17 @@ impl Audit {
                         }
                         None => Default::default(),
                     };
+                    // A carrying package whose only findings are inherited has nothing of
+                    // its own for the agent's review pass.
+                    let review = agent && !(findings.is_empty() && !inherited.is_empty());
+                    // A tidy rewrites every finding of its kind, inherited ones too.
+                    let tidy_blocked = inherited.iter().any(|f| f.kind.is_mechanical());
                     let mut go_on = true;
-                    if sent_to_pipeline(&findings, agent, &gate) {
+                    if sent_to_pipeline(&findings, review, &gate) {
                         match ecosystem {
                             Some(ecosystem) => {
-                                let style_only = is_style_only(&findings, &gate, agent);
+                                let style_only =
+                                    is_style_only(&findings, &gate, review, tidy_blocked);
                                 let mut lines = fixable_lines(&findings);
                                 lines.extend(gate.agent.iter().cloned());
                                 let item = Item {
@@ -273,14 +306,66 @@ pub(super) fn sent_to_pipeline(
 
 /// Whether a sent package is committed without a build: its findings are style
 /// slips or the pre-pass found branch leftovers for the tool, and no agent is
-/// needed for them (with an agent, the pre-pass's agent findings need one).
+/// needed for them (with an agent, the pre-pass's agent findings need one). A
+/// tidy also rewrites the inherited style findings of a package, so it is
+/// not used when `tidy_blocked`.
 pub(super) fn is_style_only(
     findings: &[quality::Finding],
     gate: &super::leftovers::PreGate,
     agent: bool,
+    tidy_blocked: bool,
 ) -> bool {
     let agent_needed = agent && !gate.agent.is_empty();
-    !agent_needed && !quality::needs_pipeline(findings) && (fixable(findings) || gate.has_tool())
+    !agent_needed
+        && !tidy_blocked
+        && !quality::needs_pipeline(findings)
+        && (fixable(findings) || gate.has_tool())
+}
+
+/// The audit of a package with unpublished work, against its origin: the work's
+/// findings, split into those the origin's spec has too (inherited, returned
+/// second) and the rest. With `fix_all`, nothing is inherited.
+fn audit_work(
+    carry: &super::leftovers::Carry,
+    pkg: &str,
+    ldconfig: bool,
+    fix_all: bool,
+    emit: Emit<'_>,
+) -> Result<(Vec<quality::Finding>, Vec<quality::Finding>), String> {
+    let work = update::spec_for_package(&carry.work, pkg, emit).map_err(|e| e.to_string())?;
+    let current = quality::audit_spec(&work, ldconfig);
+    if fix_all {
+        return Ok((current, Vec::new()));
+    }
+    let origin = update::spec_for_package(&carry.origin, &carry.origin_pkg, emit)
+        .map_err(|e| e.to_string())?;
+    Ok(split_inherited(
+        current,
+        &quality::audit_spec(&origin, ldconfig),
+    ))
+}
+
+/// Splits `current` into the findings `origin` has no finding of (first) and
+/// those it has too (second). A finding matches on its kind and its detail;
+/// the `line N:` of a hygiene finding is left out, since an edit moves lines.
+pub(super) fn split_inherited(
+    current: Vec<quality::Finding>,
+    origin: &[quality::Finding],
+) -> (Vec<quality::Finding>, Vec<quality::Finding>) {
+    let key = |f: &quality::Finding| (f.kind, without_line(&f.detail).to_string());
+    let inherited: std::collections::BTreeSet<_> = origin.iter().map(key).collect();
+    current
+        .into_iter()
+        .partition(|f| !inherited.contains(&key(f)))
+}
+
+/// `detail` without its `line N: ` prefix.
+fn without_line(detail: &str) -> &str {
+    detail
+        .strip_prefix("line ")
+        .and_then(|rest| rest.split_once(": "))
+        .filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(detail, |(_, text)| text)
 }
 
 /// The findings an item hands the agent, one line each. Report-only findings
@@ -371,7 +456,7 @@ mod tests {
                 "a tool fix sends the package (agent {agent})"
             );
             assert!(
-                is_style_only(&none, &leftover, agent),
+                is_style_only(&none, &leftover, agent, false),
                 "a tool fix is committed by the tidy path (agent {agent})"
             );
         }
@@ -386,11 +471,11 @@ mod tests {
         };
         assert!(sent_to_pipeline(&none, false, &mixed));
         assert!(
-            is_style_only(&none, &mixed, false),
+            is_style_only(&none, &mixed, false, false),
             "--no-agent: the tool's cleanup is committed through the tidy path"
         );
         assert!(
-            !is_style_only(&none, &mixed, true),
+            !is_style_only(&none, &mixed, true, false),
             "with an agent, the agent's findings go to the build instead"
         );
         assert!(sent_to_pipeline(&none, true, &mixed));
@@ -416,5 +501,50 @@ mod tests {
             finding(Kind::RpmlintrcName, "y.rpmlintrc"),
         ];
         assert_eq!(fixable_lines(&findings), ["style: a style slip"]);
+    }
+
+    #[test]
+    fn a_tidy_is_not_used_when_an_inherited_style_finding_would_be_rewritten() {
+        let style = [Finding {
+            kind: Kind::SpecStyle,
+            detail: "a style slip".to_string(),
+        }];
+        let tool = PreGate {
+            tool: vec!["files.leftover: old.tar.gz".to_string()],
+            agent: Vec::new(),
+        };
+        assert!(is_style_only(&style, &tool, false, false));
+        assert!(!is_style_only(&style, &tool, false, true));
+        assert!(!is_style_only(&[], &tool, false, true));
+    }
+
+    #[test]
+    fn a_finding_the_origin_has_too_is_inherited_and_a_new_one_is_not() {
+        let finding = |kind, detail: &str| Finding {
+            kind,
+            detail: detail.to_string(),
+        };
+        let origin = [
+            finding(Kind::SpecStyle, "a style slip"),
+            finding(Kind::SpecHygiene, "line 4: old construct; fix: drop it"),
+        ];
+        let current = vec![
+            finding(Kind::SpecStyle, "a style slip"),
+            finding(Kind::SpecHygiene, "line 9: old construct; fix: drop it"),
+            finding(Kind::SpecStyle, "a new slip"),
+            finding(Kind::NoCheck, "the spec has no %check"),
+        ];
+        let (new, inherited) = split_inherited(current, &origin);
+        let details = |v: &[Finding]| v.iter().map(|f| f.detail.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            details(&inherited),
+            ["a style slip", "line 9: old construct; fix: drop it"],
+            "the same finding, moved by an edit, is inherited"
+        );
+        assert_eq!(
+            details(&new),
+            ["a new slip", "the spec has no %check"],
+            "a finding the origin lacks is new"
+        );
     }
 }

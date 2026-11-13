@@ -27,6 +27,11 @@ pub struct UpdateProjectArgs {
     #[arg(skip)]
     pub improve: bool,
 
+    /// Set by `lint --fix`: also fix the problems a package's origin has too,
+    /// in a package that carries unpublished work on its branch.
+    #[arg(skip)]
+    pub fix_inherited: bool,
+
     /// Only update these packages (comma separated).
     #[arg(long, value_delimiter = ',')]
     pub only: Vec<String>,
@@ -321,6 +326,20 @@ pub struct UpdateProjectArgs {
     /// instead of reviewing the recipe.
     #[arg(skip)]
     pub fix_task: Option<Arc<ap_build::bugfix::FixTask>>,
+}
+
+/// The arguments of `lint`: the project's, and `--fix`, which `update` does not take.
+#[derive(clap::Args, Clone)]
+pub struct LintArgs {
+    #[command(flatten)]
+    pub update: UpdateProjectArgs,
+
+    /// Also fix the problems that the origin's spec has too, in a package that
+    /// carries unpublished work on its branch. Without it those problems are
+    /// listed as inherited and left as they are. A package with no unpublished
+    /// work is always checked as a whole, with or without this flag.
+    #[arg(long, default_value_t = false)]
+    pub fix: bool,
 }
 
 /// What `update` changes about how one package is built.

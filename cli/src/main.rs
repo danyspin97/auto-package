@@ -260,8 +260,14 @@ enum Commands {
     /// built in a branch project and, with `--submit`, sent back as requests;
     /// with `--in-place` they are committed into the project itself. `--dry-run`
     /// only prints the audit.
+    ///
+    /// A package with unpublished work on its branch is checked against its
+    /// origin: its findings the origin's spec has too are inherited, listed
+    /// and not fixed, unless `--fix` is given. Its branch leftovers (a
+    /// dependency bullet, a leftover file, a stale FLAG line) are cleaned and
+    /// committed without a build.
     #[command(mut_arg("source", |a| a.long("project").value_name("PROJECT")))]
-    Lint(update_project::UpdateProjectArgs),
+    Lint(update_project::LintArgs),
 
     /// Fix one reported bug in a package of a project, in a branch project.
     ///
