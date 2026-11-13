@@ -224,6 +224,7 @@ impl TuiState {
                 self.run_outcome = Some(outcome.clone());
                 let level = match outcome {
                     RunOutcome::Success => LogLevel::Success,
+                    RunOutcome::Interrupted => LogLevel::Warn,
                     _ => LogLevel::Error,
                 };
                 self.add_global_log(

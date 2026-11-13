@@ -19,6 +19,8 @@ pub enum RunOutcome {
     Success,
     Failed,
     Aborted,
+    /// The user stopped the run. What it left unfinished is not a failure.
+    Interrupted,
 }
 
 impl std::fmt::Display for RunOutcome {
@@ -27,6 +29,7 @@ impl std::fmt::Display for RunOutcome {
             RunOutcome::Success => write!(f, "Success"),
             RunOutcome::Failed => write!(f, "Failed"),
             RunOutcome::Aborted => write!(f, "Aborted"),
+            RunOutcome::Interrupted => write!(f, "Interrupted"),
         }
     }
 }

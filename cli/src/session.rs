@@ -30,6 +30,41 @@ impl std::fmt::Display for NotSubmitted {
 
 impl std::error::Error for NotSubmitted {}
 
+/// Whether an update run is open: started and not yet ended. Its builds stop
+/// on an interrupt, and the run writes its summary once they have, so the
+/// interrupt handler waits for it (see [`OpenRun`]).
+static OPEN_RUN: (std::sync::Mutex<bool>, std::sync::Condvar) =
+    (std::sync::Mutex::new(false), std::sync::Condvar::new());
+
+/// How long an interrupt waits for an open run to end. Its children are
+/// killed, so it ends at once in the normal case; this only bounds a step that
+/// does not look at the stop.
+const RUN_WIND_DOWN: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Marks an update run open until it drops, after it wrote its end event.
+pub(crate) struct OpenRun;
+
+impl OpenRun {
+    pub(crate) fn open() -> Self {
+        *OPEN_RUN.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        OpenRun
+    }
+}
+
+impl Drop for OpenRun {
+    fn drop(&mut self) {
+        *OPEN_RUN.0.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        OPEN_RUN.1.notify_all();
+    }
+}
+
+/// Waits up to [`RUN_WIND_DOWN`] for an open update run to end.
+fn wait_for_open_run() {
+    let (lock, cvar) = &OPEN_RUN;
+    let open = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = cvar.wait_timeout_while(open, RUN_WIND_DOWN, |open| *open);
+}
+
 /// The longest an interrupted run waits for the OBS writes still in progress
 /// (package runs, restores, update commits). A restore is one `osc addremove`
 /// and one `osc ci`, each capped by the restore timeout, so this covers a
@@ -73,6 +108,8 @@ pub(super) fn handle_interrupt(tui_active: bool, memory: &MemorySink) -> ! {
     if tui_active {
         tui::restore_terminal();
     }
+    // An update run writes its summary once its stopped builds have ended.
+    wait_for_open_run();
     let writing = ap_build::proc::obs_writes_in_flight();
     if writing > 0 {
         ap_core::sink::print_line(&obs_wait_line(RESTORE_WAIT.as_secs(), writing));
@@ -314,5 +351,31 @@ pub(super) fn start_tui(
             ));
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod open_run_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn an_interrupt_does_not_wait_when_no_update_run_is_open() {
+        let start = Instant::now();
+        wait_for_open_run();
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn an_interrupt_waits_for_an_open_run_to_write_its_end() {
+        let open = OpenRun::open();
+        let start = Instant::now();
+        let ends = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(open);
+        });
+        wait_for_open_run();
+        ends.join().unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(90));
     }
 }

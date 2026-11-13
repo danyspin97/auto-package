@@ -13,6 +13,7 @@ impl HumanSink {
         match event {
             Event::RunFinished { outcome, .. } => match outcome {
                 RunOutcome::Success => LogLevel::Info,
+                RunOutcome::Interrupted => LogLevel::Warn,
                 _ => LogLevel::Error,
             },
             Event::BuildFailed { .. } => LogLevel::Error,
@@ -75,6 +76,11 @@ impl HumanSink {
                         "{}",
                         "✓ run finished"
                             .if_supports_color(Stderr, |t| t.style(Style::new().green().bold()))
+                    ),
+                    RunOutcome::Interrupted => format!(
+                        "{}",
+                        "- run interrupted"
+                            .if_supports_color(Stderr, |t| t.style(Style::new().yellow().bold()))
                     ),
                     _ => format!(
                         "{}",

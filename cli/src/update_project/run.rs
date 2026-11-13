@@ -232,14 +232,25 @@ pub(super) fn run_on(
 
     let start = Instant::now();
     let mut report = Report::default();
+    let open = crate::session::OpenRun::open();
     let result = cmd_update_project(&a, &branch_project, &ctx, &mut report);
     if let Some(t) = &ctx.tui_ctrl {
         t.work_finished();
     }
     let failed = up::any_failed(&report.results);
+    let interrupted = ap_build::proc::interrupted();
+    // What an interrupt left is one line, not a warning per package.
+    if interrupted && let Some(line) = up::interrupt_summary(&report.results) {
+        reporter.report(&Event::Progress {
+            step: None,
+            message: line,
+        });
+    }
 
     reporter.report(&Event::RunFinished {
-        outcome: if result.is_ok() && !failed {
+        outcome: if interrupted {
+            RunOutcome::Interrupted
+        } else if result.is_ok() && !failed {
             RunOutcome::Success
         } else {
             RunOutcome::Failed
@@ -247,6 +258,8 @@ pub(super) fn run_on(
         elapsed: start.elapsed(),
         usage: memory.usage(),
     });
+    // The run has written its end: an interrupt that waits for it may go on.
+    drop(open);
     if !a.dry_run {
         *summary = Some(format!(
             "{}{}{}{}",

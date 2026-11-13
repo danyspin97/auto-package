@@ -132,6 +132,19 @@ fn a_failed_turn_counts_as_a_turn_and_its_cost() {
 }
 
 #[test]
+fn a_run_the_user_stopped_says_it_was_interrupted() {
+    let t = fixture(&[
+        r#"{"pkg":"foo","event":"package_finished","version":"2.0","outcome":"Interrupted"}"#,
+        r#"{"event":"run_finished","outcome":"Interrupted","elapsed":70000}"#,
+    ]);
+    let ex = explain(&query(t.path())).unwrap();
+    assert_eq!(ex.run_info.finished.as_deref(), Some("Interrupted"));
+    let text = plain(&render(&ex, 80));
+    assert!(text.contains("Interrupted after"), "{text}");
+    assert!(!text.contains("not finished"), "{text}");
+}
+
+#[test]
 fn an_interrupted_run_says_so_and_invents_no_outcome() {
     let t = fixture(&[]);
     let ex = explain(&query(t.path())).unwrap();

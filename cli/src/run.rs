@@ -534,7 +534,9 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                     };
                     // Sum usage from all AgentReply events recorded during the run.
                     reporter.report(&Event::RunFinished {
-                        outcome: if failed {
+                        outcome: if ap_build::proc::interrupted() {
+                            RunOutcome::Interrupted
+                        } else if failed {
                             RunOutcome::Failed
                         } else {
                             RunOutcome::Success
