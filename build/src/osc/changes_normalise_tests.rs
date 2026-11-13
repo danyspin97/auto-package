@@ -46,11 +46,11 @@ Mon Sep 28 12:52:34 UTC 2026 - Andrea Manzini <andrea.manzini@suse.com>
 - Add BuildRequires on gcc, gcc-c++, and make.
 ";
 
-fn entry(header: &str, body: &str) -> String {
+pub(super) fn entry(header: &str, body: &str) -> String {
     format!("{SEP}{header}\n\n{body}\n")
 }
 
-const HEADER: &str = "Mon Nov  2 16:38:10 UTC 2026 - A <a@b.c>";
+pub(super) const HEADER: &str = "Mon Nov  2 16:38:10 UTC 2026 - A <a@b.c>";
 
 #[test]
 fn a_stale_entry_and_a_duplicate_of_a_published_one_are_dropped() {
@@ -425,11 +425,12 @@ fn the_newest_entry_is_kept_with_a_warning_when_it_is_another_release() {
     let (text, notes) = normalise_with_notes("", &newer, "5.3", "pkg");
     assert_eq!(text, None);
     assert_eq!(notes.stale_newest.as_deref(), Some("5.4"));
-    // An older entry for another release is dropped, the newest one stays.
-    let (text, _) = normalise_with_notes("", &format!("{newer}{older}"), "5.3", "pkg");
-    let text = text.unwrap();
-    assert!(text.contains("Refresh n.patch"), "{text}");
-    assert!(!text.contains("5.2"), "{text}");
+    // An older release than the spec's is kept below it, and the newest one
+    // stays: 5.2 is older than 5.3, so its entry is not stale. Both already
+    // have their final shape, so nothing changes.
+    let (text, notes) = normalise_with_notes("", &format!("{newer}{older}"), "5.3", "pkg");
+    assert_eq!(text, None);
+    assert_eq!(notes.stale_newest.as_deref(), Some("5.4"));
 }
 
 #[test]

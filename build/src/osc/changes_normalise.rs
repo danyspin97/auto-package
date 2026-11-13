@@ -2,7 +2,10 @@
 //! entry the origin's `.changes` does not hold is this tool's own work, not
 //! published history, and may be rewritten. An update entry (one with an
 //! `Update to <version>` bullet) goes when its version is another release than
-//! the spec's, or when the origin already publishes that version; the newest
+//! the spec's, or when the origin already publishes that version. The exception
+//! is an older release than the spec's: its entry is kept, as an entry of its
+//! own (a submit carries every unpublished update up to the spec's version); a
+//! newer one, or one that cannot be ordered against the spec's, goes. The newest
 //! entry of the file is kept, with a warning, when only its version is another
 //! release. The update entries of one version are merged into one, under the
 //! newest one's header line: the flags and recap lines of its update bullet
@@ -142,6 +145,14 @@ fn is_foreign_update(bullet: &Bullet, version: &str) -> bool {
         .is_some_and(|t| looks_like_version(&t) && mismatch(&t, version) == Some(true))
 }
 
+/// Whether `release` is an older release than `version`, in the generic order
+/// (`Scheme::Generic`: the spec's scheme is not known here). `false` when the
+/// two cannot be ordered, so such an entry is dropped as before.
+fn is_older(release: &str, version: &str) -> bool {
+    crate::version::cmp(release, version, crate::version::Scheme::Generic)
+        == Some(std::cmp::Ordering::Less)
+}
+
 /// What a normalisation did beyond the text, for the run's warnings.
 #[derive(Debug, Default, PartialEq)]
 pub struct Notes {
@@ -220,7 +231,8 @@ pub(super) fn normalise_with_notes(
         }
         // Staleness is judged per entry, on its first `Update to` version. The
         // newest entry of the file is never dropped for it: it is kept, and
-        // reported.
+        // reported. An older release than the spec's is kept too, grouped
+        // below as the release it is.
         let primary = versions.first().cloned();
         if let Some(p) = primary
             .as_deref()
@@ -229,10 +241,12 @@ pub(super) fn normalise_with_notes(
             if i == 0 {
                 notes.stale_newest = Some(p.to_string());
                 fates.push(Fate::Keep);
-            } else {
-                fates.push(Fate::Drop);
+                continue;
             }
-            continue;
+            if !is_older(p, version) {
+                fates.push(Fate::Drop);
+                continue;
+            }
         }
         let same_release = |g: &Option<String>| match (g, &primary) {
             (Some(g), Some(p)) => mismatch(p, g).is_none(),
@@ -257,7 +271,15 @@ pub(super) fn normalise_with_notes(
         .any(|(e, f)| matches!(f, Fate::Member(_)) && e.iter().any(|l| is_placeholder(l)));
     let merged: Vec<Option<Vec<String>>> = groups
         .iter()
-        .map(|members| merged_entry(&entries, members, version, package))
+        .zip(&group_versions)
+        .map(|(members, own)| {
+            merged_entry(
+                &entries,
+                members,
+                own.as_deref().unwrap_or(version),
+                package,
+            )
+        })
         .collect();
     let mut out: Vec<String> = head.iter().map(|l| l.to_string()).collect();
     for (i, (entry, fate)) in entries.iter().zip(&fates).enumerate() {
@@ -339,7 +361,8 @@ fn split_blocks(entry: &[&str]) -> (Vec<String>, Vec<String>) {
 }
 
 /// The lines of a group of unpublished update entries for one version, as one
-/// entry. `members` are indexes into `entries`, newest first. The header of
+/// entry. `members` are indexes into `entries`, newest first; `version` is the
+/// group's own release (the spec's Version for a group of it). The header of
 /// the newest member comes first, then its update bullet, then the other
 /// bullets of all the members, oldest first. The flags and recap lines of an
 /// update bullet are the newest entry's alone: the rewrites of this run touch
@@ -370,7 +393,8 @@ fn merged_entry(
 }
 
 /// The lines of an unpublished update entry, normalised; `None` when nothing
-/// is left of it.
+/// is left of it. `version` is the release the entry is for: an `Update to`
+/// bullet for another one goes.
 fn normalised_entry(entry: &[&str], version: &str, package: &str) -> Option<Vec<String>> {
     let body_from = body_start(entry);
     let mut bullets: Vec<Bullet> = Vec::new();
@@ -393,8 +417,8 @@ fn normalised_entry(entry: &[&str], version: &str, package: &str) -> Option<Vec<
             b.lines.pop();
         }
     }
-    // An `Update to` bullet for another release than `version` is no part of
-    // this entry (a bullet with its lines goes with it).
+    // An `Update to` bullet for another release than the entry's own is no
+    // part of this entry (a bullet with its lines goes with it).
     bullets.retain(|b| !is_foreign_update(b, version));
     let mut kept: Vec<Bullet> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
