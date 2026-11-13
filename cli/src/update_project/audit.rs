@@ -6,7 +6,7 @@ use super::*;
 /// is audited, with whether its findings are all style slips, which are
 /// committed without a build.
 pub(super) struct Audit {
-    pub(super) items: std::sync::mpsc::Receiver<(Item, bool)>,
+    pub(super) items: std::sync::mpsc::Receiver<(Item, Route)>,
     handle: std::thread::JoinHandle<Result<AuditEnd, String>>,
 }
 
@@ -241,8 +241,12 @@ impl Audit {
                                     requires: Vec::new(),
                                     findings: lines,
                                 };
+                                let route = Route {
+                                    style_only,
+                                    tool: gate.tool_names(),
+                                };
                                 // A closed channel means the run gave up.
-                                go_on = tx.send((item, style_only)).is_ok();
+                                go_on = tx.send((item, route)).is_ok();
                                 sent += 1;
                             }
                             None => say(format!(
@@ -253,7 +257,7 @@ impl Audit {
                     audits.push(quality::PackageAudit {
                         pkg: pkg.to_string(),
                         findings,
-                        pre_pass: pre_pass_lines(&gate),
+                        pre_pass: gate.report_lines(),
                     });
                     go_on
                 },
@@ -291,19 +295,6 @@ impl Audit {
 /// purpose (no spec, a maintainer's call).
 pub(super) fn nothing_found(candidates: usize, absent: usize) -> Option<bool> {
     (candidates == absent).then_some(absent > 0)
-}
-
-/// The pre-pass findings of a package as the report lists them: the tool's and
-/// the agent's, and each stop that is not already listed as an agent finding.
-fn pre_pass_lines(gate: &super::leftovers::PreGate) -> Vec<String> {
-    let mut lines: Vec<String> = gate.tool.iter().chain(&gate.agent).cloned().collect();
-    lines.extend(
-        gate.refusals
-            .iter()
-            .filter(|id| !gate.agent.iter().any(|l| l.starts_with(&format!("{id}: "))))
-            .cloned(),
-    );
-    lines
 }
 
 /// Whether any finding is one the pipeline can fix (not report-only).
@@ -570,23 +561,6 @@ mod tests {
             details(&new),
             ["a new slip", "the spec has no %check"],
             "a finding the origin lacks is new"
-        );
-    }
-
-    #[test]
-    fn the_pre_pass_lists_each_finding_once() {
-        let gate = PreGate {
-            tool: vec!["changes.dependency-bullet: x".to_string()],
-            agent: vec!["spec.style: y".to_string()],
-            refusals: vec!["spec.style".to_string(), "request.competing".to_string()],
-        };
-        assert_eq!(
-            pre_pass_lines(&gate),
-            [
-                "changes.dependency-bullet: x",
-                "spec.style: y",
-                "request.competing"
-            ]
         );
     }
 }

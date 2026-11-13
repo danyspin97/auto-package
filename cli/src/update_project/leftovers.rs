@@ -51,6 +51,31 @@ impl PreGate {
     pub(super) fn has_tool(&self) -> bool {
         !self.tool.is_empty()
     }
+
+    /// The names of the tool's findings (`changes.dependency-bullet`, `FLAG`).
+    pub(super) fn tool_names(&self) -> Vec<String> {
+        self.tool
+            .iter()
+            .map(|l| {
+                l.split_once(": ")
+                    .map_or(l.as_str(), |(name, _)| name)
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The pre-pass findings as the report lists them: the tool's and the agent's,
+    /// and each stop that is not already listed as an agent finding.
+    pub(super) fn report_lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self.tool.iter().chain(&self.agent).cloned().collect();
+        lines.extend(
+            self.refusals
+                .iter()
+                .filter(|id| !self.agent.iter().any(|l| l.starts_with(&format!("{id}: "))))
+                .cloned(),
+        );
+        lines
+    }
 }
 
 /// Whether `pkg` carries unpublished work, and what it is compared with.
@@ -246,5 +271,23 @@ mod tests {
     fn a_clean_branch_has_nothing_to_send() {
         let none: [Finding; 0] = [];
         assert!(!classify(none.iter()).has_tool());
+    }
+
+    #[test]
+    fn the_report_lists_each_pre_pass_finding_once() {
+        let gate = PreGate {
+            tool: vec!["changes.dependency-bullet: x".to_string()],
+            agent: vec!["spec.style: y".to_string()],
+            refusals: vec!["spec.style".to_string(), "request.competing".to_string()],
+        };
+        assert_eq!(
+            gate.report_lines(),
+            [
+                "changes.dependency-bullet: x",
+                "spec.style: y",
+                "request.competing"
+            ]
+        );
+        assert_eq!(gate.tool_names(), ["changes.dependency-bullet"]);
     }
 }

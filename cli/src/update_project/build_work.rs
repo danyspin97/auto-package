@@ -286,7 +286,7 @@ impl Work for BuildWork<'_, '_> {
 /// and the next unit starts from nothing, also when this one has no items.
 pub(super) fn hand_over(
     ready: &mut Vec<Job>,
-    mechanical: &HashSet<String>,
+    routes: &Routes,
     builds: &mut Builds<'_, '_, '_, '_>,
     report: &Report,
 ) {
@@ -297,7 +297,7 @@ pub(super) fn hand_over(
     let mut batch = std::mem::take(ready);
     batch.sort_by_key(|j| j.item.dependency_of.is_none());
     for job in &mut batch {
-        job.mechanical = mechanical.contains(&job.item.pkg);
+        job.mechanical = routes.mechanical(&job.item.pkg);
     }
     builds.submit(batch, report.results.len());
 }

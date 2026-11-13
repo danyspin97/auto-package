@@ -8,7 +8,7 @@ pub(super) fn say_dry_run(
     branch: &str,
     branch_exists: bool,
     ready: &[Item],
-    mechanical: &HashSet<String>,
+    routes: &Routes,
     ctx: &Ctx<'_>,
     report: &mut Report,
 ) {
@@ -46,14 +46,32 @@ pub(super) fn say_dry_run(
             a.source
         ));
         for i in ready {
-            let how = if mechanical.contains(&i.pkg) {
-                "style fixes committed as they are (no build, no agent pass)"
-            } else if a.no_agent {
-                "needs the agent (--no-agent is set), would be skipped"
-            } else if i.findings.is_empty() {
-                "rebuilt by the pipeline, then the agent's review pass (no findings)"
+            let tool = routes.tool(&i.pkg);
+            let how = if routes.mechanical(&i.pkg) {
+                if tool.is_empty() {
+                    "style fixes committed as they are (no build, no agent pass)".to_string()
+                } else {
+                    format!(
+                        "the tool cleans the branch leftovers {} and commits them without a build (no agent pass)",
+                        tool.join(", ")
+                    )
+                }
             } else {
-                "rebuilt by the pipeline, the agent fixing the findings"
+                let rebuilt = if a.no_agent {
+                    "needs the agent (--no-agent is set), would be skipped"
+                } else if i.findings.is_empty() {
+                    "rebuilt by the pipeline, then the agent's review pass (no findings)"
+                } else {
+                    "rebuilt by the pipeline, the agent fixing the findings"
+                };
+                if tool.is_empty() {
+                    rebuilt.to_string()
+                } else {
+                    format!(
+                        "the tool cleans the branch leftovers {} first; {rebuilt}",
+                        tool.join(", ")
+                    )
+                }
             };
             ctx.say(format!("  {}: {how}", i.pkg));
         }

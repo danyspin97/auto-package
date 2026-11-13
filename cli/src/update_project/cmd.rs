@@ -121,7 +121,7 @@ fn prepare(
     // `update` sweeps the source for newer releases and `lint` audits it, each
     // on its own thread. A package that has a release, or findings, is branched
     // and built as it turns up, while the thread goes on with the others.
-    let mut mechanical: HashSet<String> = HashSet::new();
+    let mut routes = Routes::default();
     let (mut sweep, mut audit) = (None, None);
     // Whether the sweep queues each update's row when it finds it.
     let mut sweep_queues = false;
@@ -161,9 +161,12 @@ fn prepare(
     }
     // The next package to work on, in the order it was found, and whether its
     // findings are only style slips, which are committed without a build.
-    let incoming = || -> Option<(Item, bool)> {
+    let incoming = || -> Option<(Item, Route)> {
         if let Some(queue) = &backports {
-            return queue.borrow_mut().pop_front().map(|i| (i, false));
+            return queue
+                .borrow_mut()
+                .pop_front()
+                .map(|i| (i, Route::default()));
         }
         if let Some(audit) = &audit {
             return audit.items.recv().ok();
@@ -174,7 +177,7 @@ fn prepare(
             let items =
                 up::items_from_plan(&a.source, std::slice::from_ref(&candidate), &a.exclude);
             if let Some(item) = items.into_iter().next() {
-                return Some((item, false));
+                return Some((item, Route::default()));
             }
         }
     };
@@ -230,14 +233,14 @@ fn prepare(
                 // The package and what it needs are all prepared: build them
                 // now, then wait for the sweep to find the next.
                 if !a.dry_run {
-                    hand_over(&mut ready, &mechanical, builds, report);
+                    hand_over(&mut ready, &routes, builds, report);
                 }
                 // Stopping: no more of the sweep is taken, so nothing more is found.
                 if ap_build::proc::shutting_down() {
                     break;
                 }
                 // The sweep is over: parked packages are released at the top of the loop.
-                let Some((item, style_only)) = incoming() else {
+                let Some((item, route)) = incoming() else {
                     if same.sweep_ended() {
                         continue;
                     }
@@ -247,15 +250,13 @@ fn prepare(
                 if sweep_queues && let Some(row) = row_name(&item) {
                     sweep_rows.insert(row);
                 }
-                if style_only {
-                    mechanical.insert(item.pkg.clone());
-                }
+                routes.insert(&item.pkg, route);
                 if !visited.insert(visit_key(&item)) {
                     continue;
                 }
                 match up::check_pipeline_name(&item) {
                     // A style commit does not run the pipeline, so its naming does not matter.
-                    _ if mechanical.contains(&item.pkg) => {}
+                    _ if routes.mechanical(&item.pkg) => {}
                     Ok(()) => {}
                     Err(why) => {
                         ctx.warn(format!("skipping {}: {why}", item.pkg));
@@ -500,7 +501,7 @@ fn prepare(
             Err(e) => {
                 // Packages already branched and prepared are still built before the error is returned.
                 if !a.dry_run {
-                    hand_over(&mut ready, &mechanical, builds, report);
+                    hand_over(&mut ready, &routes, builds, report);
                 }
                 return Err(eyre!("{e}"));
             }
@@ -510,7 +511,7 @@ fn prepare(
         if !plan.unreadable.is_empty() {
             // Packages already branched and prepared are still built before the error is returned.
             if !a.dry_run {
-                hand_over(&mut ready, &mechanical, builds, report);
+                hand_over(&mut ready, &routes, builds, report);
             }
             return Err(obs_unavailable(&plan.unreadable, &a.source));
         }
@@ -532,7 +533,7 @@ fn prepare(
             Err(e) => {
                 // Packages already branched and prepared are still built before the error is returned.
                 if !a.dry_run {
-                    hand_over(&mut ready, &mechanical, builds, report);
+                    hand_over(&mut ready, &routes, builds, report);
                 }
                 return Err(eyre!("{e}"));
             }
@@ -541,7 +542,7 @@ fn prepare(
         if !end.unreadable.is_empty() {
             // Packages already branched and prepared are still built before the error is returned.
             if !a.dry_run {
-                hand_over(&mut ready, &mechanical, builds, report);
+                hand_over(&mut ready, &routes, builds, report);
             }
             return Err(obs_unavailable(&end.unreadable, &a.source));
         }
@@ -564,11 +565,11 @@ fn prepare(
 
     if a.dry_run {
         let items: Vec<Item> = ready.into_iter().map(|j| j.item).collect();
-        say_dry_run(a, branch, branch_exists, &items, &mechanical, ctx, report);
+        say_dry_run(a, branch, branch_exists, &items, &routes, ctx, report);
         return Ok(false);
     }
 
-    hand_over(&mut ready, &mechanical, builds, report);
+    hand_over(&mut ready, &routes, builds, report);
     Ok(true)
 }
 

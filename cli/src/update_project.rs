@@ -48,6 +48,8 @@ mod deps;
 #[cfg(test)]
 mod deps_tests;
 mod dry_run;
+mod routes;
+use routes::*;
 mod existing;
 mod existing_lint;
 mod fix_landed;
