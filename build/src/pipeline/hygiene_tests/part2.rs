@@ -99,6 +99,18 @@ fn a_failed_state_that_obs_built_is_reconciled_by_downloading_its_rpms() {
 
 pub(super) struct Warnings(pub(super) std::sync::Mutex<Vec<String>>);
 
+/// Collects the warnings and the progress lines alike: for a line that is
+/// reported either way, depending on whether the run went on.
+pub(super) struct Reported(pub(super) std::sync::Mutex<Vec<String>>);
+
+impl ap_core::sink::Reporter for Reported {
+    fn report(&self, event: &Event) {
+        if let Event::Warning { message, .. } | Event::Progress { message, .. } = event {
+            self.0.lock().unwrap().push(message.clone());
+        }
+    }
+}
+
 impl ap_core::sink::Reporter for Warnings {
     fn report(&self, event: &Event) {
         if let Event::Warning { message, .. } = event {
@@ -113,10 +125,10 @@ fn a_stale_failure_is_reconciled_only_when_the_rpms_download() {
     write_state(root.path(), "python-x", "failed", Some("old"));
     let ws = Workspace::open(root.path(), "python-x").unwrap();
     let cfg = config("x", root.path());
-    let quiet = Warnings(Default::default());
+    let quiet = Reported(Default::default());
     assert!(reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || Ok(2)));
     assert!(quiet.0.lock().unwrap().is_empty());
-    // Nothing landed: the package is rebuilt, with a warning saying why.
+    // Nothing landed: the package is rebuilt, and the progress line says why.
     assert!(!reconcile_rpms_with(&cfg, "python-x", &ws, &quiet, || Ok(
         0
     )));

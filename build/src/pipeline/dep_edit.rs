@@ -70,7 +70,7 @@ pub(super) fn warn_skipped(
     skipped: &[(String, crate::depclass::Skip)],
 ) {
     for (name, why) in skipped {
-        ctx.reporter.report(&Event::Warning {
+        ctx.reporter.report(&Event::Progress {
             step: Some(step),
             message: format!("not queuing {name} as missing: {}", why.reason()),
         });
@@ -222,7 +222,7 @@ pub(super) fn missing_deps_added_by_edit(
         names: to_build.clone(),
         source: ap_core::event::MissingSource::Agent,
     });
-    ctx.reporter.report(&Event::Warning {
+    ctx.reporter.report(&Event::Progress {
         step: Some(step),
         message: format!(
             "the edit added {} to the spec and neither {} nor a project it builds against \
@@ -303,7 +303,7 @@ pub(super) fn without_available_deps(
                 ),
                 _ => return true,
             };
-            ctx.reporter.report(&Event::Warning {
+            ctx.reporter.report(&Event::Progress {
                 step: Some(step),
                 message,
             });

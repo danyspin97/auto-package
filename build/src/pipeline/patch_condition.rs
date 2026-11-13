@@ -263,7 +263,7 @@ pub(super) fn patch_condition_gate(
             ),
         ));
     }
-    ctx.reporter.report(&Event::Warning {
+    ctx.reporter.report(&Event::Progress {
         step: Some(apply.step.id),
         message: format!(
             "{}: {failures} patches did not make `{}` true; switching to the upstream wheel",

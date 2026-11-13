@@ -95,7 +95,7 @@ pub(super) fn extract_build_log(
     let extracted = crate::log::extract(&log_text, &mapper);
 
     if !mapper.did_match_root() && !log_text.is_empty() {
-        reporter.report(&Event::Warning {
+        reporter.report(&Event::Progress {
             step,
             message: format!(
                 "no path in the build log sits under the sdist root '{sdist_top_level}'; \

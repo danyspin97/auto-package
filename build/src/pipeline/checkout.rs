@@ -579,14 +579,14 @@ pub(super) fn reconcile_rpms_with(
             true
         }
         Ok(_) => {
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: None,
                 message: "OBS reports a success but no RPMs were downloaded; rebuilding".into(),
             });
             false
         }
         Err(e) => {
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: None,
                 message: format!("OBS reports a success but fetching its RPMs failed: {e}"),
             });

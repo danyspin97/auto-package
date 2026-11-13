@@ -388,7 +388,7 @@ fn apply_turn_outcome_with(
                          `use_upstream_wheel` again only if that attempt fails.\n"
                     ),
                 );
-                reporter.report(&Event::Warning {
+                reporter.report(&Event::Progress {
                     step: Some(step.id),
                     message: format!(
                         "{rpm_name}: npm build failure with a package-lock.json in the \
@@ -397,7 +397,7 @@ fn apply_turn_outcome_with(
                 });
                 return Ok(TurnEffect::NoChange);
             }
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: Some(step.id),
                 message: format!(
                     "{rpm_name} reported unbuildable from source in this environment \
@@ -497,7 +497,7 @@ fn apply_turn_outcome_with(
                              otherwise build that flavor from source or request what it needs (`blocked` is not accepted).\n"
                         ),
                     );
-                    reporter.report(&Event::Warning {
+                    reporter.report(&Event::Progress {
                         step: Some(step.id),
                         message: format!(
                             "{rpm_name}: use_upstream_wheel refused ({e}); asking the \

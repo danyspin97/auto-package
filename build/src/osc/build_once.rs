@@ -363,7 +363,7 @@ pub(super) fn obs_build_once(
         failing_result(project, pkg_name, repo, arch, &status)
     };
     if log_pkg != pkg_name {
-        reporter.report(&Event::Warning {
+        reporter.report(&Event::Progress {
             step,
             message: format!(
                 "{pkg_name} itself built, but its multibuild flavor {log_pkg} did not: \

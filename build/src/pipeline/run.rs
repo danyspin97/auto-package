@@ -114,7 +114,7 @@ fn put_back_or_confirm(
     match osc::restore_baseline_outcome(baseline, &expected_checkout(config), Emit::run(reporter))?
     {
         osc::Restored::Undone => {
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: None,
                 message: format!(
                     "{}: restored the OBS baseline of an earlier failed attempt: the attempt is \
@@ -125,7 +125,7 @@ fn put_back_or_confirm(
             Ok(true)
         }
         osc::Restored::NothingWritten => {
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: None,
                 message: format!(
                     "{}: nothing was written to OBS since the failed attempt (OBS holds the \

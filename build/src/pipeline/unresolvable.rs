@@ -73,7 +73,7 @@ pub(super) fn unresolvable_deps_round(
             // The name goes into a BuildRequires line verbatim: OBS text is not
             // trusted to hold only a package name.
             if !is_provider_stem(first) {
-                reporter.report(&Event::Warning {
+                reporter.report(&Event::Progress {
                     step: Some(build_step.id),
                     message: format!(
                         "not adding a BuildRequires for the OBS provider {first:?}: not a package name"
@@ -100,7 +100,7 @@ pub(super) fn unresolvable_deps_round(
         }
         if !added.is_empty() {
             write_or_warn(spec_path, &text);
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: Some(build_step.id),
                 message: format!(
                     "OBS cannot choose between the flavors that provide what the build needs; \
@@ -137,7 +137,7 @@ pub(super) fn unresolvable_deps_round(
             let satisfied =
                 rpm_satisfies_dep(&config.rpms_dir, dep) && !is_outdated_dep(&outdated_keys, dep);
             if satisfied {
-                reporter.report(&Event::Warning {
+                reporter.report(&Event::Progress {
                     step: Some(build_step.id),
                     message: format!(
                         "OBS reports {dep} unresolvable, but an RPM built here already \
@@ -161,7 +161,7 @@ pub(super) fn unresolvable_deps_round(
         })
     };
     if !extra_drops.is_empty() {
-        reporter.report(&Event::Warning {
+        reporter.report(&Event::Progress {
             step: Some(build_step.id),
             message: format!(
                 "not queuing {} as missing: the spec asks for an extra that no distro \
@@ -219,7 +219,7 @@ pub(super) fn unresolvable_deps_round(
         }
         if next != text {
             write_or_warn(spec_path, &next);
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: Some(build_step.id),
                 message: format!(
                     "the distro publishes {} under another spelling; respelling the spec \
@@ -291,7 +291,7 @@ pub(super) fn unresolvable_deps_round(
                 )
             })
             .collect();
-        reporter.report(&Event::Warning {
+        reporter.report(&Event::Progress {
             step: Some(build_step.id),
             message: format!(
                 "not queuing {} as missing: the distro has it under another name\n{}",
@@ -336,7 +336,7 @@ pub(super) fn unresolvable_deps_round(
                 state.relax_dependency(&m.name, &m.got);
             }
         });
-        reporter.report(&Event::Warning {
+        reporter.report(&Event::Progress {
             step: Some(build_step.id),
             message: format!(
                 "{} {} newer than the bound the spec asks for: keeping the package and \
@@ -376,7 +376,7 @@ pub(super) fn unresolvable_deps_round(
             driver_before = sha256_file(spec_path).ok();
             write_or_warn(spec_path, &fixed);
             driver_fixed = true;
-            ctx.reporter.report(&Event::Warning {
+            ctx.reporter.report(&Event::Progress {
                 step: Some(build_step.id),
                 message: format!(
                     "{} is a library of the NVIDIA driver: added it to \

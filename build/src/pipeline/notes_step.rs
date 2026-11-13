@@ -36,7 +36,7 @@ pub(super) fn package_notes_step(
     )
     .is_err()
     {
-        reporter.report(&Event::Warning {
+        reporter.report(&Event::Progress {
             step: None,
             message: format!(
                 "package notes not updated: ${spent_this_run:.2} already spent in this run \

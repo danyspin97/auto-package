@@ -146,16 +146,6 @@ fn the_first_unmet_condition_fails_the_patch_and_the_second_switches_to_the_whee
     assert_eq!(spec, SPLIT_SPEC);
 }
 
-struct Reported(std::sync::Mutex<Vec<String>>);
-
-impl Reporter for Reported {
-    fn report(&self, event: &Event) {
-        if let Event::Warning { message, .. } | Event::Progress { message, .. } = event {
-            self.0.lock().unwrap().push(message.clone());
-        }
-    }
-}
-
 #[test]
 fn a_failed_wheel_lookup_leaves_the_spec_to_the_review_turn() {
     let root = tempfile::tempdir().unwrap();

@@ -62,7 +62,7 @@ pub(super) fn restore_obs_baseline(
                     "nothing was written to OBS by the failed attempt: nothing to restore"
                 }
             };
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: None,
                 message: message.into(),
             });

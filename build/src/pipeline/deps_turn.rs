@@ -291,7 +291,7 @@ pub(super) fn missing_deps_from_turn(
                     update_state(&ctx.ws, ctx.reporter, |state| {
                         state.relax_dependency(&c.dep, &c.shipped);
                     });
-                    ctx.reporter.report(&Event::Warning {
+                    ctx.reporter.report(&Event::Progress {
                         step: Some(step),
                         message: format!(
                             "{} {} ({}) is newer than the bound `{}` that {} declares and \

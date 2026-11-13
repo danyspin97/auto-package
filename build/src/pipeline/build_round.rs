@@ -484,7 +484,7 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
         // green, so the package keeps it and the refusal is only a warning.
         Ok(_) | Err(_) => {
             if let Err(e) = &effect {
-                reporter.report(&Event::Warning {
+                reporter.report(&Event::Progress {
                     step: Some(agent_step.id),
                     message: format!("{rpm_name}: post-build review turn not applied: {e}"),
                 });
@@ -528,9 +528,13 @@ fn revert_post_review(
 ) -> Result<RoundEnd, PipelineResult> {
     let reporter = ctx.reporter;
     let build_step = build_step.finish(StepOutcome::Failed);
-    reporter.report(&Event::Warning {
-        step: Some(build_step.id),
-        message: revert_warning(&ctx.rpm_name, &revert.kind, why),
+    let message = revert_warning(&ctx.rpm_name, &revert.kind, why);
+    // A reverted post-build review edit leaves the package as it was built, which
+    // is not a problem. A reverted rpmlint fix ships with its errors: a warning.
+    let step = Some(build_step.id);
+    reporter.report(&match revert.kind {
+        RevertKind::PostReview => Event::Progress { step, message },
+        RevertKind::Rpmlint(_) => Event::Warning { step, message },
     });
     revert.snapshot.restore(reporter, Some(&build_step));
     restore_spec(&ctx.spec_path, &revert.spec, Some(&build_step), reporter);
