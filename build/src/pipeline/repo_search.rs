@@ -263,7 +263,7 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
     // repository derived from the name. Anything else (typically a name
     // search hit) is kept as a guess, and is built only when the user
     // confirms it with `--source-url`.
-    let recorded = recorded_upstream(pkg_name);
+    let recorded = crate::sources::recorded_repo(pkg_name);
     let vouched = |url: &str| {
         is_vouched_for(
             url,
@@ -350,16 +350,6 @@ fn search_repo_candidates(pkg_name: &str, package: &str, agent: bool) -> RepoCan
         unvouched_search_hits,
         agent_pick,
     }
-}
-
-/// The source repository PyPI records for `pkg_name`, from its project URLs.
-fn recorded_upstream(pkg_name: &str) -> Option<String> {
-    let url = format!(
-        "https://pypi.org/pypi/{}/json",
-        urlencoding::encode(pkg_name)
-    );
-    let body = crate::http::read_text(crate::http::get_with_retries(&url).ok()?).ok()?;
-    ap_ecosystem::pypi::source_url_from_json(&body)
 }
 
 /// Whether two repository URLs name the same repository, ignoring case, a
