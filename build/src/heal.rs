@@ -106,15 +106,16 @@ pub fn obs_built_decision(
 
 /// Heal the checkouts and the state files of every package that has one,
 /// without asking OBS: a leftover archive of another release is deleted from
-/// its checkout, and a recorded review of another version is dropped. Returns
-/// `(package, what was done)` for each change, which is also written to the
-/// package's `reconciled.log`.
+/// its checkout, and a recorded review of another version is dropped, for the
+/// packages `covers` names. Returns `(package, what was done)` for each change,
+/// which is also written to the package's `reconciled.log`.
 pub fn checkouts(
     state_root: &std::path::Path,
     checkout_root: &std::path::Path,
+    covers: impl Fn(&str) -> bool,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    for name in package_names(state_root) {
+    for name in package_names(state_root).into_iter().filter(|n| covers(n)) {
         let Some(ws) = crate::workspace::Workspace::find_existing(state_root, &[&name]) else {
             continue;
         };
@@ -436,7 +437,7 @@ mod tests {
         .unwrap();
         Workspace::open(&state_root, "tracked").unwrap();
 
-        let done = checkouts(&state_root, &proj);
+        let done = checkouts(&state_root, &proj, |_| true);
 
         assert!(!dir.join("pyenv-2.8.4.tar.gz").exists());
         assert!(dir.join("pyenv-2.8.14.tar.gz").exists());
@@ -457,6 +458,6 @@ mod tests {
         let log = std::fs::read_to_string(ws.dir().join("reconciled.log")).unwrap();
         assert!(log.contains("stale archive pyenv-2.8.4.tar.gz"), "{log}");
         // A second run has nothing left to do.
-        assert!(checkouts(&state_root, &proj).is_empty());
+        assert!(checkouts(&state_root, &proj, |_| true).is_empty());
     }
 }

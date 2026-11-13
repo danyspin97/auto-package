@@ -336,7 +336,7 @@ fn startup_reset_frees_dead_running_and_satisfied_missing_deps() {
         .dir()
         .join("build.lock");
     let _held = ap_core::proc_lock::try_lock(&live_lock).unwrap();
-    let changed = reconcile_state(root.path());
+    let changed = reconcile_state(root.path(), |_| true);
     assert_eq!(
         outcome(root.path(), "python-dead").as_deref(),
         Some("interrupted")
@@ -407,7 +407,7 @@ fn dependents_of_a_given_up_package_get_their_own_outcome_and_are_freed_with_it(
     // The same edges again: nothing changes.
     assert!(sync_blocked_waiters(root.path(), &edges).0.is_empty());
     // The graph is not known at startup: the dependents are ready again.
-    let changed = reconcile_state(root.path());
+    let changed = reconcile_state(root.path(), |_| true);
     assert_eq!(changed.len(), 2, "{changed:?}");
     assert_eq!(
         outcome(root.path(), "python-mid").as_deref(),
@@ -466,7 +466,7 @@ fn missing_deps_dependents_wait_on_a_given_up_package_transitively_and_are_freed
     // Idempotent.
     assert!(sync_blocked_waiters(root.path(), &edges).0.is_empty());
     write_state(root.path(), "python-torch", "success", None);
-    let changed = reconcile_state(root.path());
+    let changed = reconcile_state(root.path(), |_| true);
     assert_eq!(changed.len(), 3, "{changed:?}");
     assert_eq!(
         outcome(root.path(), "python-top").as_deref(),

@@ -9,15 +9,17 @@ use crate::workspace::Workspace;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Check every package with a `state.json` under `state_root` against its
-/// checkout under `checkout_root` and against `statuses`, which is called at
-/// most once and says what OBS shows for each package (`None`: unknown, the
-/// OBS comparison is skipped). Returns one finding per problem.
+/// Check every package with a `state.json` under `state_root` that `covers`
+/// names against its checkout under `checkout_root` and against `statuses`,
+/// which is called at most once and says what OBS shows for each package
+/// (`None`: unknown, the OBS comparison is skipped). Returns one finding per
+/// problem.
 pub fn run(
     state_root: &Path,
     checkout_root: &Path,
     statuses: impl FnOnce() -> Option<HashMap<String, BuildStatus>>,
     local_changes: impl Fn(&Path) -> bool,
+    covers: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(state_root)
         .into_iter()
@@ -25,6 +27,7 @@ pub fn run(
         .flatten()
         .filter(|e| e.path().join("state.json").is_file())
         .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| covers(n))
         .collect();
     names.sort();
     let statuses = statuses().map(|m| {

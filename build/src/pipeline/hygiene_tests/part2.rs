@@ -51,6 +51,7 @@ fn a_failed_state_that_obs_built_is_reconciled_by_downloading_its_rpms() {
             std::fs::write(stash.join(format!("{name}.log")), "x.rpm: E: no-binary\n").unwrap();
             Ok(if name == "python-empty" { 0 } else { 3 })
         },
+        |_| true,
     );
     // Only the package OBS built, at the version the state worked on, with a
     // clean checkout, is fetched; an empty download changes nothing.
@@ -88,6 +89,7 @@ fn a_failed_state_that_obs_built_is_reconciled_by_downloading_its_rpms() {
         &statuses,
         |_| false,
         |_| Err(osc::Error::NotActionable("502".into())),
+        |_| true,
     );
     assert!(
         again

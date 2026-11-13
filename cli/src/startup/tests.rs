@@ -31,7 +31,7 @@ fn a_dry_run_changes_neither_the_state_nor_the_checkout() {
     let work = stale_work_dir(root.path());
     let checkout = work.join("proj").join("pyenv");
 
-    let healed = heal_on_disk(&work, "proj", true);
+    let healed = heal_on_disk(&work, "proj", true, &|_: &str| true);
 
     assert!(healed.is_empty(), "{healed:?}");
     assert!(checkout.join("pyenv-2.8.4.tar.gz").exists());
@@ -47,7 +47,7 @@ fn a_run_heals_the_stale_review_and_the_leftover_archive() {
     let work = stale_work_dir(root.path());
     let checkout = work.join("proj").join("pyenv");
 
-    let healed = heal_on_disk(&work, "proj", false);
+    let healed = heal_on_disk(&work, "proj", false, &|_: &str| true);
 
     assert!(!checkout.join("pyenv-2.8.4.tar.gz").exists());
     assert!(checkout.join("pyenv-2.8.14.tar.gz").exists());
@@ -58,4 +58,21 @@ fn a_run_heals_the_stale_review_and_the_leftover_archive() {
     );
     let ws = Workspace::find_existing(&work.join("state"), &["pyenv"]).unwrap();
     assert_eq!(PkgState::load(&ws).reviewed_version, None);
+}
+
+#[test]
+fn a_run_heals_only_the_packages_it_covers() {
+    let root = tempfile::tempdir().unwrap();
+    let work = stale_work_dir(root.path());
+    let checkout = work.join("proj").join("pyenv");
+
+    let healed = heal_on_disk(&work, "proj", false, &|n: &str| n == "other");
+
+    assert!(healed.is_empty(), "{healed:?}");
+    assert!(checkout.join("pyenv-2.8.4.tar.gz").exists());
+    let ws = Workspace::find_existing(&work.join("state"), &["pyenv"]).unwrap();
+    assert_eq!(
+        PkgState::load(&ws).reviewed_version.as_deref(),
+        Some("2.8.4")
+    );
 }
