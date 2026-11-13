@@ -249,8 +249,8 @@ pub(super) fn settle(
     agent: bool,
     reporter: &(dyn Reporter + Send + Sync),
 ) -> Result<(Verdict, bool), String> {
-    let state = Workspace::find_by_obs_name(state_root, pkg).map(|ws| ws.dir().join(VERDICT_FILE));
-    let stored = state.as_deref().and_then(read_verdict);
+    let state = verdict_file(state_root, pkg);
+    let stored = state.as_deref().ok().and_then(read_verdict);
     let (verdict, kept) = settled(stored, srcmd5, || {
         review(carry, pkg, srcmd5, agent, scratch_root, reporter)
     })?;
@@ -262,15 +262,29 @@ pub(super) fn settle(
             })
         };
         match &state {
-            Some(path) => {
+            Ok(path) => {
                 if let Err(e) = write_verdict(path, &verdict) {
                     warn(format!("{pkg}: the verdict could not be kept: {e}"));
                 }
             }
-            None => warn(format!("{pkg}: no build state to keep the verdict in")),
+            Err(why) => warn(format!("{pkg}: the verdict could not be kept: {why}")),
         }
     }
     Ok((verdict, kept))
+}
+
+/// The file that keeps the verdict on `pkg`: in its state directory under
+/// `state_root`, which is created when the package has none yet. An in-place
+/// package has no build workspace, and its verdict is kept all the same.
+fn verdict_file(state_root: &Path, pkg: &str) -> Result<PathBuf, String> {
+    let dir = match Workspace::find_by_obs_name(state_root, pkg) {
+        Some(ws) => ws.dir().to_path_buf(),
+        None => Workspace::open(state_root, pkg)
+            .map_err(|e| format!("no state directory for it: {e}"))?
+            .dir()
+            .to_path_buf(),
+    };
+    Ok(dir.join(VERDICT_FILE))
 }
 
 /// The ready gate of a submit of `item` at its branch revision `srcmd5`: the
@@ -495,5 +509,19 @@ mod tests {
         assert!(!kept);
         let (_, kept) = settled(None, "abc", fresh).unwrap();
         assert!(!kept);
+    }
+
+    #[test]
+    fn the_verdict_of_a_package_without_a_build_workspace_has_a_state_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let path = verdict_file(root.path(), "python-ExifRead").unwrap();
+        assert_eq!(path, root.path().join("python-ExifRead").join(VERDICT_FILE));
+        assert!(path.parent().unwrap().is_dir());
+        write_verdict(&path, &judge("abc", [].iter(), true)).unwrap();
+        assert_eq!(verdict_file(root.path(), "python-ExifRead").unwrap(), path);
+        assert_eq!(
+            read_verdict(&path).map(|v| v.srcmd5),
+            Some("abc".to_string())
+        );
     }
 }
