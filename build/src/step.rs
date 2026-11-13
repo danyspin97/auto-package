@@ -211,7 +211,11 @@ mod tests {
         let mut attempts = Attempts::default();
 
         attempts.skip(&recorder, StepKind::OscService, SkipReason::ServiceUpToDate);
-        attempts.skip(&recorder, StepKind::OscService, SkipReason::NotRust);
+        attempts.skip(
+            &recorder,
+            StepKind::OscService,
+            SkipReason::Other("the source pass runs the service".to_string()),
+        );
         attempts.skip(&recorder, StepKind::AgentTurn, SkipReason::NoAgent);
         // Starting the step opens a new attempt, which may be skipped again.
         StepGuard::begin(
@@ -223,7 +227,11 @@ mod tests {
         )
         .unwrap()
         .finish(StepOutcome::Ok);
-        attempts.skip(&recorder, StepKind::OscService, SkipReason::NotRust);
+        attempts.skip(
+            &recorder,
+            StepKind::OscService,
+            SkipReason::Other("the source pass runs the service".to_string()),
+        );
 
         let events = recorder.0.lock().unwrap();
         let skipped: Vec<(StepKind, String)> = events
@@ -237,6 +245,6 @@ mod tests {
         assert_eq!(skipped[0].0, StepKind::OscService);
         assert_eq!(skipped[0].1, SkipReason::ServiceUpToDate.to_string());
         assert_eq!(skipped[1].0, StepKind::AgentTurn);
-        assert_eq!(skipped[2].1, SkipReason::NotRust.to_string());
+        assert_eq!(skipped[2].1, "the source pass runs the service");
     }
 }

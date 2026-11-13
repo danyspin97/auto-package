@@ -274,6 +274,8 @@ mod removal_proof_tests;
 use patch_apply::*;
 #[cfg(test)]
 mod carried_origin_tests;
+#[cfg(test)]
+mod generate_service_tests;
 mod sdist_stage;
 #[cfg(test)]
 mod sdist_stage_tests;

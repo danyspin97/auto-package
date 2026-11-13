@@ -169,7 +169,7 @@ fn with_checkout<R>(
 
 /// [`with_checkout`] for a run of `version` that reports to `reporter`. The
 /// tarball, when given, is `AMQPStorm-1.0.tar.gz` whatever the version.
-fn with_checkout_as<R>(
+pub(super) fn with_checkout_as<R>(
     reporter: &dyn Reporter,
     version: &str,
     entries: Option<&[&str]>,

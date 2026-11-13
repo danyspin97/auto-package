@@ -192,8 +192,9 @@ pub(super) fn osc_service_stage(
             step_attempts.skip(reporter, StepKind::OscService, SkipReason::ServiceUpToDate);
         }
     }
-    if !is_rust && !is_maturin {
-        step_attempts.skip(reporter, StepKind::OscService, SkipReason::NotRust);
-    }
+    // A package that is neither Rust nor maturin has no work in this stage. A
+    // `_service` that makes its source is run by the source pass, which opens
+    // its own OscService step in FetchSdist (see `source_pass`), so no skip is
+    // reported here.
     Ok(())
 }
