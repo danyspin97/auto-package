@@ -114,16 +114,22 @@ pub fn restore_old_entries(new: &str, base: Option<&str>) -> Result<String, Stri
 }
 
 /// `- Update to <version>` first in the newest entry of the request, when no
-/// entry of the request has an `Update to` bullet at all (one that names
-/// another version is for a person or a turn to judge).
+/// entry of the request has an `Update to` bullet for this release or a newer
+/// one (an older release's bullet is the recap of the jump and stays; one for
+/// this release or a newer one is for a person or a turn to judge).
 pub fn add_update_bullet(new: &str, base: Option<&str>, version: &str) -> Result<String, String> {
     let prefix = own_prefix(new, base)?;
+    let not_older = |t: &String| {
+        crate::version::cmp(t, version, crate::version::Scheme::Generic)
+            != Some(std::cmp::Ordering::Less)
+    };
     if prefix
         .lines()
         .filter_map(|l| l.strip_prefix("- "))
-        .any(|b| update_target(b.trim()).is_some())
+        .filter_map(|b| update_target(b.trim()))
+        .any(|t| not_older(&t))
     {
-        return Err("an entry has an Update to bullet that names another version".into());
+        return Err("an entry has an Update to bullet for this release or a newer one".into());
     }
     let mut lines: Vec<&str> = prefix.lines().collect();
     let sep = lines

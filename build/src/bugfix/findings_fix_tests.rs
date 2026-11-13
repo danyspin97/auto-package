@@ -108,8 +108,23 @@ fn the_update_bullet_is_added_when_none_exists_and_not_when_another_does() {
         "{fixed}"
     );
     assert!(!findings(&fixed, &[]).contains(&"changes.version-mismatch"));
-    let other = format!("{}{OLD}", entry(DATE, "- Update to 2.9"));
-    assert!(add_update_bullet(&other, Some(OLD), "2.10.4").is_err());
+    let newer = format!("{}{OLD}", entry(DATE, "- Update to 2.11"));
+    assert!(add_update_bullet(&newer, Some(OLD), "2.10.4").is_err());
+}
+
+#[test]
+fn an_older_release_bullet_stays_under_the_new_one() {
+    let older = format!(
+        "{}{OLD}",
+        entry(DATE, "- Update to 2.10.3:\n  * old recap\n- Fix a thing")
+    );
+    let fixed = add_update_bullet(&older, Some(OLD), "2.10.4").unwrap();
+    assert!(
+        fixed.contains(&format!(
+            "{MAIL}\n\n- Update to 2.10.4\n- Update to 2.10.3:\n  * old recap\n- Fix a thing\n"
+        )),
+        "{fixed}"
+    );
 }
 
 #[test]
