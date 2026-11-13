@@ -6,6 +6,7 @@ use regex::Regex;
 
 use super::{Finding, Severity, ids};
 use crate::risk_flags::RiskFlag;
+use crate::version::{Scheme, cmp};
 
 /// What the `.changes` checks read.
 pub struct ChangesCtx<'a> {
@@ -305,16 +306,32 @@ pub fn changes_findings(c: &ChangesCtx<'_>) -> Vec<Finding> {
         }
     }
     let bullets: Vec<&Bullet> = new_entries.iter().flat_map(|e| &e.bullets).collect();
-    let updates: Vec<(&Bullet, String)> = bullets
-        .iter()
-        .filter_map(|b| Some((*b, update_target(&b.text)?)))
-        .collect();
+    // Per entry, the first `Update to` bullet names its release. A later one
+    // is the recap of a release between the base's and the Version's, when it
+    // is one (`recap`).
+    let mut updates: Vec<(&Bullet, String, bool)> = Vec::new();
+    for e in &new_entries {
+        let mut first = true;
+        for b in &e.bullets {
+            if let Some(target) = update_target(&b.text) {
+                updates.push((b, target, !first));
+                first = false;
+            }
+        }
+    }
     let changed_version = c.base_version.is_some_and(|b| b != c.new_version);
+    let between = |target: &str| {
+        let after = c.base_version.and_then(|b| cmp(target, b, Scheme::Generic));
+        let before = cmp(target, c.new_version, Scheme::Generic);
+        changed_version
+            && after == Some(std::cmp::Ordering::Greater)
+            && before == Some(std::cmp::Ordering::Less)
+    };
     // Only a word that is a version (it starts with a digit) is compared:
     // `Update to git snapshot 2024...` names no version to be wrong about.
-    let versions: Vec<&(&Bullet, String)> = updates
+    let versions: Vec<&(&Bullet, String, bool)> = updates
         .iter()
-        .filter(|(_, t)| looks_like_version(t))
+        .filter(|(_, t, recap)| looks_like_version(t) && !(*recap && between(t)))
         .collect();
     if changed_version {
         let from = c.base_version.unwrap_or_default();
@@ -329,7 +346,7 @@ pub fn changes_findings(c: &ChangesCtx<'_>) -> Vec<Finding> {
                 Some(newest.line),
             ));
         }
-        for (b, target) in versions {
+        for (b, target, _) in versions {
             let Some(clearly) = mismatch(target, c.new_version) else {
                 continue;
             };
@@ -352,7 +369,7 @@ pub fn changes_findings(c: &ChangesCtx<'_>) -> Vec<Finding> {
             ));
         }
     } else {
-        for (b, target) in versions {
+        for (b, target, _) in versions {
             out.push(mk(
                 ids::CHANGES_UPDATE_WITHOUT_VERSION_CHANGE,
                 Severity::Warning,
@@ -361,7 +378,8 @@ pub fn changes_findings(c: &ChangesCtx<'_>) -> Vec<Finding> {
             ));
         }
     }
-    for (b, target) in &updates {
+    // Only the release an entry is for needs notes; a recap bullet may have none.
+    for (b, target, _) in updates.iter().filter(|(_, _, recap)| !recap) {
         if b.items == 0 && !b.link {
             out.push(mk(
                 ids::CHANGES_NO_UPSTREAM_NOTES,

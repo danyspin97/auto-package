@@ -269,3 +269,59 @@ fn a_require_bullet_without_a_dependency_word_is_a_dependency_bullet() {
         "Fix the install path of the man pages"
     ));
 }
+
+/// A jump from 1.13.0 to 1.14.1 over the old text.
+fn jump() -> ChangesCtx<'static> {
+    let mut c = ctx(Some(OLD), None);
+    c.base_version = Some("1.13.0");
+    c.new_version = "1.14.1";
+    c
+}
+
+#[test]
+fn the_older_release_bullets_of_a_jump_are_recap_not_a_mismatch() {
+    let text = with_entry("- Update to 1.14.1:\n  * new\n\n- Update to 1.14.0:\n  * old");
+    let mut c = jump();
+    c.new = Some(&text);
+    let found = changes_findings(&c);
+    assert!(
+        !ids_of(&found).contains(&ids::CHANGES_VERSION_MISMATCH),
+        "{found:?}"
+    );
+    assert!(
+        !ids_of(&found).contains(&ids::CHANGES_NO_UPSTREAM_NOTES),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn only_the_newest_bullet_of_an_entry_needs_notes() {
+    let bare = with_entry("- Update to 1.14.1:\n- Update to 1.14.0:");
+    let mut c = jump();
+    c.new = Some(&bare);
+    let found = changes_findings(&c);
+    let notes: Vec<_> = found
+        .iter()
+        .filter(|f| f.id == ids::CHANGES_NO_UPSTREAM_NOTES)
+        .collect();
+    assert_eq!(notes.len(), 1, "{found:?}");
+    assert!(notes[0].message.contains("1.14.1"), "{found:?}");
+}
+
+#[test]
+fn a_recap_bullet_outside_the_jump_is_a_mismatch() {
+    // 1.15.0 is newer than the Version, 1.12.0 older than the base.
+    for stray in ["1.15.0", "1.12.0"] {
+        let text = with_entry(&format!(
+            "- Update to 1.14.1:\n  * new\n\n- Update to {stray}:\n  * old"
+        ));
+        let mut c = jump();
+        c.new = Some(&text);
+        let found = changes_findings(&c);
+        let m = found
+            .iter()
+            .find(|f| f.id == ids::CHANGES_VERSION_MISMATCH)
+            .unwrap_or_else(|| panic!("{stray}: {found:?}"));
+        assert_eq!(m.severity, Severity::Blocker, "{stray}");
+    }
+}
