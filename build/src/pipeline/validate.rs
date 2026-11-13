@@ -336,7 +336,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                 let (introduced, inherited) = split_inherited(std::mem::take(&mut style), &origin);
                 // The gate runs again after each fix: each problem is said once per run.
                 for problem in newly_reported(&mut update.reported, inherited) {
-                    reporter.report(&Event::Warning {
+                    reporter.report(&Event::Progress {
                         step: Some(validate_step.id),
                         message: format!(
                             "{rpm_name}: {problem}; the origin's spec has the same problem, \
@@ -403,7 +403,7 @@ pub(super) fn validate_round(ctx: &RunCtx, st: &mut RunState) -> Result<Flow, Pi
                     );
                     if let Some(update) = carried_origin::inherit_mode(st) {
                         for problem in newly_reported(&mut update.reported, inherited) {
-                            reporter.report(&Event::Warning {
+                            reporter.report(&Event::Progress {
                                 step: Some(validate_step.id),
                                 message: format!(
                                     "{rpm_name}: {problem}; the origin's spec has the same \
