@@ -206,3 +206,18 @@ impl LinkGuard {
         undone
     }
 }
+
+/// Denies Edit, Write and NotebookEdit under the workspace's `package` link (see
+/// `Workspace::link_package`). The link leads to the checkout, and the denies on
+/// its metadata, series and `.changes` are written as checkout paths, which a
+/// write spelled through the link does not match. The turn lists and reads the
+/// package through the link; it edits only the spec, by its absolute path.
+pub(super) fn package_link_denied_tools(workspace: &Path) -> Vec<String> {
+    let p = super::response::permission_path(workspace);
+    let mut out = Vec::new();
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        out.push(format!("{tool}({p}/package)"));
+        out.push(format!("{tool}({p}/package/**)"));
+    }
+    out
+}

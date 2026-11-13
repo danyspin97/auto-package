@@ -193,3 +193,21 @@ fn a_turn_that_unwinds_is_still_undone() {
     );
     assert!(std::fs::symlink_metadata(t.ws().join("source/lnk")).is_err());
 }
+
+/// The turn may not write through the `package` link: its checkout-path denies
+/// do not match a write spelled through the link.
+#[test]
+fn the_package_link_is_denied_for_writes_in_the_turn() {
+    let ws = std::path::Path::new("/srv/ws");
+    let denied =
+        crate::agent::tools::turn_denied_tools(ws, Some(std::path::Path::new("/srv/ws/checkout")));
+    let list: Vec<&str> = denied.split(',').collect();
+    for tool in ["Edit", "Write", "NotebookEdit"] {
+        for rule in [
+            format!("{tool}(//srv/ws/package)"),
+            format!("{tool}(//srv/ws/package/**)"),
+        ] {
+            assert!(list.contains(&rule.as_str()), "missing {rule}: {denied}");
+        }
+    }
+}

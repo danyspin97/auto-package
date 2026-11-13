@@ -228,6 +228,7 @@ pub(super) fn turn_denied_tools(
         }
     }
     denied.extend(source_metadata_denied_tools(workspace));
+    denied.extend(super::links::package_link_denied_tools(workspace));
     if let Some(checkout) = checkout {
         denied.extend(metadata_denied_tools(checkout));
         denied.extend(series_denied_tools(checkout));
