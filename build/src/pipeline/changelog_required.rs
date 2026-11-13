@@ -1,7 +1,9 @@
 //! The edit that needs a `.changes` bullet (convention 40). An edit that changes
 //! only dependencies (and comments) leaves `changelog` empty and gets no bullet;
-//! any other change with an empty `changelog` is rolled back, so the agent
-//! writes the bullet.
+//! so does housekeeping: a source archive or `%setup -n` name that only tracks
+//! the release, and a workaround removed from `%prep`, `%build` or `%check` that
+//! skips no test. Any other change with an empty `changelog` is rolled back, so
+//! the agent writes the bullet.
 //!
 //! The whole edit is judged: the spec, and the files of the checkout the turn
 //! changed (an rpmlintrc, `_service`, `_multibuild`, `_constraints`, a patch
@@ -118,31 +120,257 @@ pub(super) fn keyed_lines(spec: &str) -> Vec<(String, String, String)> {
     out
 }
 
+/// A spec line as the gate keys it: its section, its enclosing conditionals and
+/// the line itself.
+type Key = (String, String, String);
+
+/// The sections whose workaround lines a fix may remove without a bullet.
+const WORKAROUND_SECTIONS: &[&str] = &["%prep", "%build", "%check"];
+
+/// Characters that make a line run more than one command: a chain, a pipe, a
+/// redirect or a substitution.
+const COMPOUND: &[&str] = &["&&", ";", "|", ">", "`", "$("];
+
+/// Words of a line that runs tests: a workaround line that names one is no
+/// workaround, its removal may drop a test.
+const TEST_WORDS: &[&str] = &[
+    "pytest", "unittest", "nose", "test", "make", "tox", "ctest", "meson", "-m ", "setup.py",
+];
+
+/// Variables that tools read without a reference in the spec (a `PYTHON*`
+/// setting, a compiler or a locale): removing their `export` changes a build.
+const IMPLICIT_ENV: &[&str] = &[
+    "PYTHON",
+    "PATH",
+    "LD_",
+    "LC_",
+    "LANG",
+    "HOME",
+    "TMP",
+    "CC",
+    "CXX",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CPPFLAGS",
+    "LDFLAGS",
+    "RUST",
+    "CARGO",
+    "GO",
+    "PKG_CONFIG",
+    "CMAKE",
+    "PIP",
+    "SETUPTOOLS",
+    "MAKE",
+    "TEST",
+    "PYTEST",
+    "OMP_",
+    "MKL_",
+    "OPENBLAS_",
+    "NUMBA_",
+    "NPY_",
+    "SOURCE_DATE_EPOCH",
+];
+
+/// The archive extensions a `Source` name may end in.
+const ARCHIVE_EXTS: &[&str] = &[
+    ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tar", ".zip",
+];
+
+/// The first word of a spec line, lowercased.
+fn first_word(line: &str) -> String {
+    line.split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// Whether a section key names one of `WORKAROUND_SECTIONS`.
+fn in_workaround_section(section: &str) -> bool {
+    let word = section.split_whitespace().next().unwrap_or("");
+    WORKAROUND_SECTIONS.contains(&word)
+}
+
+/// Whether removing `line` (of `section`) only drops a workaround that the
+/// sources no longer need, and skips no test: a `sed` edit, an `export` of a
+/// variable the rest of the spec (`after`) never names, or a Python `import mock`
+/// line that runs no test. A line that chains, pipes or redirects is no
+/// workaround here, and neither is a `|| true` (see `relaxed_pair`).
+fn is_workaround_removal(section: &str, line: &str, after: &str) -> bool {
+    if !in_workaround_section(section) {
+        return false;
+    }
+    let lower = line.trim().to_ascii_lowercase();
+    if COMPOUND.iter().any(|c| lower.contains(c)) {
+        return false;
+    }
+    match first_word(line).as_str() {
+        "sed" | "%{__sed}" | "%__sed" => true,
+        "export" => {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let Some(name) = words.get(1).and_then(|w| w.split('=').next()) else {
+                return false;
+            };
+            let upper = name.to_ascii_uppercase();
+            words.len() == 2
+                && !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !IMPLICIT_ENV.iter().any(|p| upper.starts_with(p))
+                && !after
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .any(|w| w == name)
+        }
+        _ => lower.contains("import mock") && !TEST_WORDS.iter().any(|w| lower.contains(w)),
+    }
+}
+
+/// `(tag, value)` of a `SourceN:` line, the tag in its written case.
+fn source_tag_value(line: &str) -> Option<(&str, &str)> {
+    let (tag, value) = line.trim().split_once(':')?;
+    let tag = tag.trim();
+    let digits = tag.to_ascii_lowercase();
+    let digits = digits.strip_prefix("source")?;
+    digits
+        .chars()
+        .all(|c| c.is_ascii_digit())
+        .then_some((tag, value.trim()))
+}
+
+/// The form a name is compared in when only its case, its `_` or `.` for `-`,
+/// or its `%{version}` differ (the PyPI normalised name is one of them).
+fn name_form(name: &str) -> String {
+    name.to_ascii_lowercase()
+        .replace(['_', '.'], "-")
+        .replace("%{version}", "")
+}
+
+/// Whether two archive names (or paths of them) differ only in their directory
+/// and file name form, their extension, and `%{version}` usage: the same host
+/// and directory, and the same base name in `name_form`. A changed host or
+/// project is not the same.
+fn same_archive(a: &str, b: &str) -> bool {
+    let split = |v: &str| -> (String, String) {
+        let (dir, file) = v.rsplit_once('/').unwrap_or(("", v));
+        (name_form(dir), file.to_string())
+    };
+    let (dir_a, file_a) = split(a);
+    let (dir_b, file_b) = split(b);
+    let base = |file: &str| -> Option<String> {
+        let lower = file.to_ascii_lowercase();
+        let ext = ARCHIVE_EXTS.iter().find(|e| lower.ends_with(*e))?;
+        Some(name_form(&file[..file.len() - ext.len()]))
+    };
+    match (base(&file_a), base(&file_b)) {
+        (Some(x), Some(y)) => dir_a == dir_b && !x.is_empty() && x == y,
+        _ => false,
+    }
+}
+
+/// Whether two `SourceN:` lines differ only in the archive name of the release.
+fn archive_rename(old: &str, new: &str) -> bool {
+    match (source_tag_value(old), source_tag_value(new)) {
+        (Some((ta, va)), Some((tb, vb))) => ta.eq_ignore_ascii_case(tb) && same_archive(va, vb),
+        _ => false,
+    }
+}
+
+/// Whether two `%setup` or `%autosetup` lines differ only in the value of their
+/// `-n` directory name, which is the same name in `name_form`.
+fn setup_dir_rename(old: &str, new: &str) -> bool {
+    let a: Vec<&str> = old.split_whitespace().collect();
+    let b: Vec<&str> = new.split_whitespace().collect();
+    let is_setup = |w: &[&str]| {
+        w.first().is_some_and(|f| {
+            f.eq_ignore_ascii_case("%setup") || f.eq_ignore_ascii_case("%autosetup")
+        })
+    };
+    if !is_setup(&a) || !is_setup(&b) || a.len() != b.len() {
+        return false;
+    }
+    let mut renamed = false;
+    for i in 0..a.len() {
+        if a[i] == b[i] {
+            continue;
+        }
+        let dir_pair = i > 0 && a[i - 1] == "-n" && b[i - 1] == "-n";
+        if !dir_pair || name_form(a[i]) != name_form(b[i]) || name_form(a[i]).is_empty() {
+            return false;
+        }
+        renamed = true;
+    }
+    renamed
+}
+
+/// Whether a removed `|| true` line and the added line are the same command,
+/// the mask gone: the command now fails the build when it fails.
+fn relaxed_pair(old: &str, new: &str) -> bool {
+    old.trim()
+        .strip_suffix("|| true")
+        .is_some_and(|rest| rest.trim_end() == new.trim())
+}
+
+/// Whether a removed line and an added line of the same section and conditions
+/// are one housekeeping change: an archive name or `-n` directory name that
+/// only tracks the release, or a `|| true` mask removed from the command.
+fn housekeeping_pair(old: &Key, new: &Key) -> bool {
+    old.0 == new.0
+        && old.1 == new.1
+        && (archive_rename(&old.2, &new.2)
+            || setup_dir_rename(&old.2, &new.2)
+            || (in_workaround_section(&old.0) && relaxed_pair(&old.2, &new.2)))
+}
+
 /// The lines the edit added or removed that are not dependency lines, comments,
-/// conditional lines or patch lines. A line is keyed by its section and the
-/// conditions around it, so a line moved to another section, or newly wrapped in
-/// (or freed from) a conditional, counts. With `switch`, the lines of `%prep`,
-/// `%build` and `%install` are the build system switch's, which has its own
-/// bullet.
+/// conditional lines, patch lines or housekeeping. A line is keyed by its section
+/// and the conditions around it, so a line moved to another section, or newly
+/// wrapped in (or freed from) a conditional, counts. With `switch`, the lines of
+/// `%prep`, `%build` and `%install` are the build system switch's, which has its
+/// own bullet. Housekeeping needs no bullet (convention 40): a source archive or
+/// `%setup -n` directory name that only tracks the release, and a workaround
+/// removed from `%prep`, `%build` or `%check` that skips no test.
 pub(super) fn changes_needing_a_bullet(before: &str, after: &str, switch: bool) -> Vec<String> {
-    let mut counts: std::collections::BTreeMap<(String, String, String), i64> = Default::default();
+    let mut counts: std::collections::BTreeMap<Key, i64> = Default::default();
     for k in keyed_lines(before) {
         *counts.entry(k).or_default() -= 1;
     }
     for k in keyed_lines(after) {
         *counts.entry(k).or_default() += 1;
     }
+    counts.retain(|(section, _, line), n| {
+        *n != 0
+            && !needs_no_bullet(line)
+            && !super::diagnostic_edit::is_build_print(section, line)
+            && !(switch
+                && ["%prep", "%build", "%install"]
+                    .iter()
+                    .any(|s| section.split_whitespace().next() == Some(s)))
+    });
+    let removed: Vec<Key> = counts
+        .iter()
+        .filter(|(_, n)| **n < 0)
+        .map(|(k, _)| k.clone())
+        .collect();
+    for r in &removed {
+        while counts.get(r).is_some_and(|n| *n < 0) {
+            let added = counts
+                .iter()
+                .find(|(a, n)| **n > 0 && housekeeping_pair(r, a))
+                .map(|(a, _)| a.clone());
+            let settled = match added {
+                Some(a) => {
+                    *counts.entry(a).or_default() -= 1;
+                    true
+                }
+                None => is_workaround_removal(&r.0, &r.2, after),
+            };
+            if !settled {
+                break;
+            }
+            *counts.entry(r.clone()).or_default() += 1;
+        }
+    }
     counts
         .into_iter()
-        .filter(|((section, _, line), n)| {
-            *n != 0
-                && !needs_no_bullet(line)
-                && !super::diagnostic_edit::is_build_print(section, line)
-                && !(switch
-                    && ["%prep", "%build", "%install"]
-                        .iter()
-                        .any(|s| section.split_whitespace().next() == Some(s)))
-        })
+        .filter(|(_, n)| *n != 0)
         .map(|((_, _, line), _)| line)
         .collect()
 }
