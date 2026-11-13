@@ -19,7 +19,7 @@ pub(super) fn package_notes_step(
     let prior = match PkgState::try_load(ws) {
         Ok(prior) => prior,
         Err(e) => {
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: None,
                 message: format!("package notes not updated: cannot read the package state: {e}"),
             });
@@ -56,7 +56,7 @@ pub(super) fn package_notes_step(
     ) {
         Ok(step) => step,
         Err(e) => {
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: None,
                 message: format!("package notes not updated: {e}"),
             });
@@ -89,7 +89,7 @@ pub(super) fn package_notes_step(
     let outcome = match run.result {
         Ok(()) => StepOutcome::Ok,
         Err(e) => {
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: Some(step.id),
                 message: format!("package notes not updated: {e}"),
             });
