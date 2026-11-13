@@ -73,6 +73,7 @@ pub(super) fn tidy_item(
     )
     .map_err(|e| format!("cannot keep the OBS baseline of {branch}: {e}"))?;
     ap_core::fsx::write_atomic(&spec_path, after.as_bytes()).map_err(|e| e.to_string())?;
+    let mut cleaned: Vec<String> = Vec::new();
     let committed = (|| -> Result<(), String> {
         for fix in &rpm_fixes {
             ap_core::fsx::write_atomic(&dir.join(&fix.name), fix.after.as_bytes())
@@ -91,6 +92,14 @@ pub(super) fn tidy_item(
                 commit_files.push(changes.clone());
             }
         }
+        // The leftovers the build commit cleans too, so both leave the same ones.
+        let named = osc::spec_source_names(&after);
+        cleaned = osc::clean_branch_leftovers(&dir, branch, &item.pkg, &named, emit);
+        if changes_differ(&changes_path, changes_before.as_deref())
+            && !commit_files.contains(&changes)
+        {
+            commit_files.push(changes.clone());
+        }
         osc::note_attempt(&baseline, &commit_files).map_err(|e| e.to_string())?;
         osc::commit_attempt(
             &baseline,
@@ -102,6 +111,9 @@ pub(super) fn tidy_item(
         )
         .map_err(|e| e.to_string())
     })();
+    for message in &cleaned {
+        ctx.say(format!("{}: {message}", item.pkg));
+    }
     let committed = match committed {
         Ok(()) => {
             let _ = std::fs::remove_dir_all(&baseline);
@@ -147,6 +159,12 @@ pub(super) fn tidy_item(
         !rpm_fixes.is_empty(),
         provenance_changed,
     ))
+}
+
+/// Whether the `.changes` at `path` no longer holds `before`: its bytes before
+/// the tidy wrote it, `None` when it was absent.
+fn changes_differ(path: &Path, before: Option<&[u8]>) -> bool {
+    std::fs::read(path).ok().as_deref() != before
 }
 
 /// What a tidy commit changed, for the outcome of the item.

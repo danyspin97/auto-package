@@ -65,3 +65,14 @@ fn the_agent_is_skipped_only_for_items_with_fixable_findings() {
     assert!(!agent_needed(true, &[]));
     assert!(!agent_needed(false, &["style: x".to_string()]));
 }
+
+#[test]
+fn a_changes_the_cleanup_rewrote_differs_from_what_the_tidy_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fwupd-efi.changes");
+    std::fs::write(&path, "before\n").unwrap();
+    assert!(!changes_differ(&path, Some(b"before\n")));
+    std::fs::write(&path, "after\n").unwrap();
+    assert!(changes_differ(&path, Some(b"before\n")));
+    assert!(!changes_differ(&dir.path().join("absent.changes"), None));
+}
