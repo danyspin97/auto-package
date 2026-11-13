@@ -8,7 +8,7 @@
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use ap_build::bugfix::{FindingRoute, FindingsJob, FixTask, ReviewFinding, route};
+use ap_build::bugfix::{FindingRoute, FindingsJob, FixTask, ReviewFinding, not_submittable, route};
 use ap_build::osc;
 use ap_build::proc::Emit;
 use ap_build::request_review::fetch::{LiveRequestObs, RequestObs};
@@ -414,7 +414,7 @@ pub(super) fn run(a: &FixArgs, id: &str, summary: &mut Option<String>) -> color_
     for f in &d.left {
         println!("  left:       {}", f.id);
     }
-    let left_refusal = not_submittable(&after);
+    let left_refusal = not_submittable(&after).map(refusal_exit);
     if !a.submit {
         println!(
             "nothing was submitted: run with --submit to create a request that supersedes {id}"

@@ -2,7 +2,7 @@
 //! says, how its findings group, what a re-check changed, and when the request
 //! may be superseded. Nothing here reads or writes anything.
 
-use ap_build::bugfix::{FindingRoute, ReviewFinding, route};
+use ap_build::bugfix::{FindingRoute, Refusal, ReviewFinding, route};
 use ap_build::request_review::request::{ActionSource, ActionTarget, RequestDoc};
 use ap_build::request_review::{Origin, Severity};
 use serde_json::Value;
@@ -232,47 +232,16 @@ pub(super) fn delta(before: &[ReviewFinding], after: &[ReviewFinding]) -> Delta 
     out
 }
 
-/// Why the request must not be superseded, with the exit status, after a
-/// re-check left `after`. `None` when every finding is resolved or is a
-/// person's to decide (a warning with a maintainer route).
-pub(super) fn not_submittable(after: &[ReviewFinding]) -> Option<FixExit> {
-    let mut maintainer_blocker = None;
-    let mut unresolved = Vec::new();
-    for f in after {
-        let r = route(f);
-        if f.severity == Severity::Note || matches!(r, FindingRoute::NotActedOn) {
-            continue;
-        }
-        match r {
-            FindingRoute::Maintainer(_) if f.severity == Severity::Blocker => {
-                maintainer_blocker = Some(f);
-            }
-            FindingRoute::Maintainer(_) => {}
-            _ => unresolved.push(f),
-        }
+/// The exit status and the message of a refusal to supersede a request.
+pub(super) fn refusal_exit(refusal: Refusal) -> FixExit {
+    let code = match refusal {
+        Refusal::NeedsMaintainer(_) => EXIT_NEEDS_MAINTAINER,
+        Refusal::Unresolved(_) => 1,
+    };
+    FixExit {
+        code,
+        message: refusal.message().to_string(),
     }
-    if let Some(f) = maintainer_blocker {
-        return Some(FixExit {
-            code: EXIT_NEEDS_MAINTAINER,
-            message: format!(
-                "a blocker needs a maintainer: {} {}: nothing was submitted; the branch keeps the fixes",
-                f.id,
-                f.file.as_deref().unwrap_or_default()
-            ),
-        });
-    }
-    if !unresolved.is_empty() {
-        let ids: Vec<&str> = unresolved.iter().map(|f| f.id.as_str()).collect();
-        return Some(FixExit {
-            code: 1,
-            message: format!(
-                "{} finding(s) are not resolved ({}): nothing was submitted; the branch keeps the fixes",
-                unresolved.len(),
-                ids.join(", ")
-            ),
-        });
-    }
-    None
 }
 
 /// Whether `--yes` must refuse: a finding a person must decide is among the

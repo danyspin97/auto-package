@@ -1,4 +1,4 @@
-use ap_build::bugfix::{FindingRoute, ReviewFinding};
+use ap_build::bugfix::{FindingRoute, ReviewFinding, not_submittable};
 use ap_build::osc;
 use ap_build::request_review::Origin;
 use ap_build::request_review::Severity;
@@ -301,7 +301,7 @@ fn a_remaining_warning_for_the_tool_or_a_blocker_for_a_maintainer_stops_the_subm
         Origin::Check,
         None,
     )];
-    let refused = not_submittable(&blocker).unwrap();
+    let refused = refusal_exit(not_submittable(&blocker).unwrap());
     assert_eq!(refused.code, EXIT_NEEDS_MAINTAINER);
 
     let left = [finding(
@@ -310,7 +310,7 @@ fn a_remaining_warning_for_the_tool_or_a_blocker_for_a_maintainer_stops_the_subm
         Origin::Check,
         Some("0001.patch"),
     )];
-    let refused = not_submittable(&left).unwrap();
+    let refused = refusal_exit(not_submittable(&left).unwrap());
     assert_eq!(refused.code, 1);
     assert!(refused.message.contains("patch.header"));
 

@@ -194,3 +194,60 @@ pub struct FindingsJob {
     /// Ties `fix-end.json` to this run.
     pub nonce: String,
 }
+
+/// Why a request may not be superseded after a re-check: the finding that
+/// stops it, with the message that says which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// A blocker a maintainer must resolve; the message names it.
+    NeedsMaintainer(String),
+    /// Findings nobody resolved; the message names them.
+    Unresolved(String),
+}
+
+impl Refusal {
+    /// What the refusal says, for the person who ran the command.
+    pub fn message(&self) -> &str {
+        match self {
+            Refusal::NeedsMaintainer(message) | Refusal::Unresolved(message) => message,
+        }
+    }
+}
+
+/// Why the request must not be superseded, after a re-check left `after`.
+/// `None` when every finding is resolved or is a person's to decide (a
+/// warning with a maintainer route). A note and a finding of the agent never
+/// stop it.
+pub fn not_submittable(after: &[ReviewFinding]) -> Option<Refusal> {
+    let mut maintainer_blocker = None;
+    let mut unresolved = Vec::new();
+    for f in after {
+        let r = route(f);
+        if f.severity == Severity::Note || matches!(r, FindingRoute::NotActedOn) {
+            continue;
+        }
+        match r {
+            FindingRoute::Maintainer(_) if f.severity == Severity::Blocker => {
+                maintainer_blocker = Some(f);
+            }
+            FindingRoute::Maintainer(_) => {}
+            _ => unresolved.push(f),
+        }
+    }
+    if let Some(f) = maintainer_blocker {
+        return Some(Refusal::NeedsMaintainer(format!(
+            "a blocker needs a maintainer: {} {}: nothing was submitted; the branch keeps the fixes",
+            f.id,
+            f.file.as_deref().unwrap_or_default()
+        )));
+    }
+    if !unresolved.is_empty() {
+        let ids: Vec<&str> = unresolved.iter().map(|f| f.id.as_str()).collect();
+        return Some(Refusal::Unresolved(format!(
+            "{} finding(s) are not resolved ({}): nothing was submitted; the branch keeps the fixes",
+            unresolved.len(),
+            ids.join(", ")
+        )));
+    }
+    None
+}
