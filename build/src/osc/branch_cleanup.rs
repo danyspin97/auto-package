@@ -11,6 +11,7 @@ use super::changes_flag_lines::{flag_line_mask, is_flag_start};
 use super::changes_normalise::{normalise_checkout, split_entries};
 use super::service_dirs::remove_service_source_dirs;
 use super::*;
+use crate::bugfix::restore_old_entries;
 use crate::fix_flags::{FixFlag, from_spec_diff};
 use crate::release_notes::{FILLED, Fill, fill_missing_recap};
 use ap_core::event::Event;
@@ -100,6 +101,13 @@ pub(super) fn clean_with_origin(
     let mut messages = origin_changes
         .map(|text| normalise_checkout(checkout, text, pkg))
         .unwrap_or_default();
+    if let Some(changes) = origin_changes
+        && restore_published_entries(checkout, changes)
+    {
+        messages.push(
+            "restored the published entries of its .changes as the origin has them".to_string(),
+        );
+    }
     if let (Some(changes), Some(spec)) = (origin_changes, origin_spec)
         && drop_explained_flags(checkout, changes, spec, pkg)
     {
@@ -122,6 +130,22 @@ pub(super) fn clean_with_origin(
         ));
     }
     messages
+}
+
+/// Puts the published entries back as `origin_changes` has them, byte for
+/// byte, when an edit left them different: the unpublished entries above them
+/// are kept (see [`restore_old_entries`]). Whether the file changed.
+fn restore_published_entries(checkout: &Path, origin_changes: &str) -> bool {
+    let Some(file) = newest_changes_file(checkout) else {
+        return false;
+    };
+    let Ok(text) = fs::read_to_string(&file) else {
+        return false;
+    };
+    match restore_old_entries(&text, Some(origin_changes)) {
+        Ok(restored) => fs::write(&file, restored).is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Rewrites the newest `.changes` of `checkout` with

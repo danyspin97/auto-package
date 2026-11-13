@@ -277,3 +277,41 @@ fn a_missing_recap_nobody_can_read_is_reported_and_the_entry_stays() {
         warnings.borrow()
     );
 }
+
+#[test]
+fn the_published_entries_are_restored_byte_for_byte() {
+    // The origin ends with two blank lines the branch lost: the published part
+    // then differs from the origin, which the ready gate reports as edited.
+    let origin = format!("{ORIGIN}\n\n");
+    let dir = checkout(
+        "2.7.1",
+        &format!(
+            "-------------------------------------------------------------------\n\
+             Wed Nov  4 13:08:52 UTC 2026 - Jane Doe <jane.doe@example.com>\n\
+             \n\
+             - Update to 2.7.1\n\
+             \x20 * Add a template option.\n\
+             \n{ORIGIN}"
+        ),
+    );
+    let messages = clean_with_origin(dir.path(), Some(&origin), None, "pkg", &[], false, &|_| {});
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.starts_with("restored the published")),
+        "{messages:?}"
+    );
+    let text = changes_of(&dir);
+    assert!(text.ends_with(&origin), "{text:?}");
+    assert!(text.contains("* Add a template option."), "{text}");
+    assert!(text.starts_with("-----"), "{text}");
+}
+
+#[test]
+fn an_unchanged_published_part_is_left_alone() {
+    let origin = format!("{ORIGIN}\n\n");
+    let dir = checkout("2.6.0", &origin);
+    let messages = clean_with_origin(dir.path(), Some(&origin), None, "pkg", &[], false, &|_| {});
+    assert!(messages.is_empty(), "{messages:?}");
+    assert_eq!(changes_of(&dir), origin);
+}
