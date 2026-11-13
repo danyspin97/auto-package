@@ -104,12 +104,16 @@ fn a_hunk_with_two_change_groups_is_proven_by_its_whole_post_image() {
 
 #[test]
 fn a_removed_line_that_is_elsewhere_in_the_file_does_not_block_the_proof() {
-    // `gone_line` is still in the file, but not in the post-image's run.
+    // `gone_line` is still in the file, but more than REMOVED_MARGIN lines above
+    // the match: not near it.
     let (_dir, tar) = one_file(
-        "int gone_line = 9;\nint keep_me = 1;\nint answer_new = 42;\nint tail_line = 3;\n",
+        "int gone_line = 9;\nint filler_a = 0;\nint filler_b = 0;\nint filler_c = 0;\nint filler_d = 0;\nint keep_me = 1;\nint answer_new = 42;\nint tail_line = 3;\n",
     );
     let moved = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n int keep_me = 1;\n-int gone_line = 9;\n+int answer_new = 42;\n";
     assert!(already_in_tarball(&tar, moved.as_bytes(), 1));
+    // Right above the match, it is: not proven.
+    let (_dir2, near) = one_file("int gone_line = 9;\nint keep_me = 1;\nint answer_new = 42;\n");
+    assert!(!already_in_tarball(&near, moved.as_bytes(), 1));
 }
 
 #[test]

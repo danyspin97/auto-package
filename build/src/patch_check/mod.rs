@@ -22,6 +22,8 @@ mod applied;
 #[cfg(test)]
 mod applied_tests;
 mod post_image;
+#[cfg(test)]
+mod post_image_tests;
 mod present;
 #[cfg(test)]
 mod present_tests;

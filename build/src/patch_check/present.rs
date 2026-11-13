@@ -3,8 +3,9 @@
 //! judges a patch quilt did not run on.
 //!
 //! A hunk that adds lines is proven by its post-image (see [`super::post_image`]):
-//! its context and added lines, in hunk order, are one contiguous run of its
-//! file. A hunk that only removes lines is proven by its context being one run
+//! its added lines are one contiguous block of its file, with its context lines
+//! near that block and its removed lines gone from there. A hunk that only
+//! removes lines is proven by its context being one run
 //! of the file, with its removed lines not between the context lines. A hunk
 //! that deletes a whole file is proven when that file is gone from the archive.
 

@@ -1,25 +1,41 @@
 //! The line matching of the hunk proof (see [`super::present`]).
 //!
 //! A hunk that adds lines is proven by its post-image: the lines it keeps and
-//! adds, in hunk order, with the removed lines dropped. That run must be one
-//! contiguous run of the file, so an added line that is not next to the others
-//! proves nothing, and the context between two change groups is part of the run.
-//! A hunk that only removes lines is proven by its context being one run of the
-//! file, with the removed lines not between its context lines.
+//! adds, in hunk order, with the removed lines dropped. Its added lines must be
+//! one contiguous block of the file, in order, so an added line that is not next
+//! to the others proves nothing. Between two lines of the post-image the file
+//! may hold up to [`TOLERATED_GAP`] blank or comment-only lines, except between
+//! two added lines: a comment that the new sources have between a context line
+//! and the change does not break the proof, a line of code does. A hunk that only
+//! removes lines is proven by its context being one run of the file, with the
+//! removed lines not between its context lines.
+//!
+//! A removed substantive line still in the file within [`REMOVED_MARGIN`] lines
+//! of the match, with the same indentation, refuses the proof.
 //!
 //! A comment-only added line may match a comment of the file that is nearly the
 //! same (a typo fixed upstream): at most a tenth of the longer one may differ,
-//! ignoring case and whitespace. Every other line matches exactly, and a run
-//! needs an added code line, not only a comment.
+//! ignoring case and whitespace. An added code line matches a file line equal to
+//! it once leading and trailing whitespace are ignored; a context line matches
+//! exactly. A run needs an added code line, not only a comment.
 
 use super::present::{Hunk, HunkLine, is_substantive};
 
-/// Whether the post-image of a hunk that adds lines is one run of `lines`.
+/// Blank or comment-only lines the file may hold between two lines of a
+/// post-image, other than between two added lines.
+const TOLERATED_GAP: usize = 3;
+
+/// File lines on each side of a matched run in which a removed substantive line
+/// (with the same indentation) still refuses the proof.
+const REMOVED_MARGIN: usize = 3;
+
+/// Whether the post-image of a hunk that adds lines is in `lines` (see the
+/// module doc).
 ///
 /// Up to two leading and two trailing context lines may be left out of the run,
 /// as a fuzzy hunk's edge context differs from the file; an added line never is.
-/// The run must keep a substantive added code line, and no removed line may sit
-/// in the matched lines.
+/// The run must keep a substantive added code line, and no substantive removed
+/// line may be near the match.
 pub(super) fn added_in_file(lines: &[String], hunk: &Hunk) -> bool {
     let post: Vec<&HunkLine> = hunk
         .lines
@@ -83,22 +99,64 @@ fn trimmed_run<'a>(
     (cut_is_context && has_added).then_some(run)
 }
 
-/// Whether `run` is one contiguous run of `lines` whose matched lines hold no
-/// removed substantive line.
+/// Whether `run` matches `lines` at some place, and no substantive removed line
+/// stands within [`REMOVED_MARGIN`] lines of that match with the same indentation.
 fn run_in(lines: &[String], run: &[&HunkLine], removed: &[&str]) -> bool {
-    lines.windows(run.len()).any(|w| {
-        w.iter().zip(run).all(|(f, item)| line_matches(f, item))
-            && !w.iter().any(|f| removed.contains(&f.as_str()))
+    (0..lines.len()).any(|start| {
+        matched_end(lines, start, run).is_some_and(|end| {
+            let from = start.saturating_sub(REMOVED_MARGIN);
+            let to = (end + REMOVED_MARGIN).min(lines.len());
+            !lines[from..to]
+                .iter()
+                .any(|f| removed.iter().any(|r| f.trim_end() == r.trim_end()))
+        })
     })
 }
 
-/// Whether file line `file` stands for the post-image line `item`: context and
-/// code lines are equal, a comment-only added line is a comment nearly the same.
+/// The end (exclusive) of the match of `run` whose first line is file line
+/// `start`, or `None`. Each line after the first is found after at most
+/// [`TOLERATED_GAP`] non-code lines, and right after the line before when both
+/// are added lines.
+fn matched_end(lines: &[String], start: usize, run: &[&HunkLine]) -> Option<usize> {
+    let mut from = start;
+    let mut prev: Option<&HunkLine> = None;
+    for &item in run {
+        let block = matches!((prev, item), (Some(HunkLine::Added(_)), HunkLine::Added(_)));
+        let gap = if prev.is_none() || block {
+            0
+        } else {
+            TOLERATED_GAP
+        };
+        from = next_match(lines, from, item, gap)? + 1;
+        prev = Some(item);
+    }
+    Some(from)
+}
+
+/// The first file line from `from` on that stands for `item`, with at most `gap`
+/// non-code lines before it. A line of code that does not stand for it ends the
+/// search.
+fn next_match(lines: &[String], from: usize, item: &HunkLine, gap: usize) -> Option<usize> {
+    for at in from..lines.len().min(from + gap + 1) {
+        if line_matches(&lines[at], item) {
+            return Some(at);
+        }
+        if !is_non_code(&lines[at]) {
+            return None;
+        }
+    }
+    None
+}
+
+/// Whether file line `file` stands for the post-image line `item`: context lines
+/// are equal, an added code line is equal once its leading and trailing
+/// whitespace is ignored, a comment-only added line is a comment nearly the same.
 fn line_matches(file: &str, item: &HunkLine) -> bool {
     match item {
         HunkLine::Added(text) if is_comment(text) => {
             is_comment(file) && similar_comments(file, text)
         }
+        HunkLine::Added(text) => file.trim() == text.trim(),
         _ => file == item.text(),
     }
 }
@@ -106,6 +164,12 @@ fn line_matches(file: &str, item: &HunkLine) -> bool {
 /// Whether a line is a comment only (a `#` after its indentation).
 fn is_comment(line: &str) -> bool {
     line.trim_start().starts_with('#')
+}
+
+/// Whether a line is blank or a comment only: a line a change may be kept apart
+/// from its context by (see [`TOLERATED_GAP`]).
+fn is_non_code(line: &str) -> bool {
+    line.trim().is_empty() || is_comment(line)
 }
 
 /// Whether two comment lines are at least 90% alike: their edit distance, over
