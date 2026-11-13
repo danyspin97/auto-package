@@ -41,6 +41,7 @@ fn unbuilt_state(outcome: &ItemOutcome) -> Option<String> {
         ItemOutcome::Failed(why) => Some(format!("failed ({why})")),
         ItemOutcome::Skipped(why) => Some(format!("was skipped ({why})")),
         ItemOutcome::NotStarted => Some("was not started".to_string()),
+        ItemOutcome::Interrupted => Some("was interrupted".to_string()),
     }
 }
 

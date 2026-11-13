@@ -116,7 +116,10 @@ pub(super) fn check_item(
     ) {
         Ok(out) => out,
         Err(e) => {
-            ctx.warn(format!("arch check of {} did not run: {e}", item.pkg));
+            // The user's stop killed the check's osc calls: not a warning.
+            if !ap_build::proc::interrupted() {
+                ctx.warn(format!("arch check of {} did not run: {e}", item.pkg));
+            }
             return;
         }
     };

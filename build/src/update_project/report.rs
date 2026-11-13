@@ -13,6 +13,25 @@ pub enum ItemOutcome {
     /// Found, but the run was interrupted before it was branched. Not a
     /// failure of the package: it was never attempted.
     NotStarted,
+    /// Being built when the user stopped the run, and the stop ended the build.
+    /// Not a failure of the package: it can be run again.
+    Interrupted,
+}
+
+/// The one line that says what an interrupt left unfinished, or `None` when
+/// nothing was left: the packages not started and those stopped in flight.
+pub fn interrupt_summary(results: &[ItemResult]) -> Option<String> {
+    let count =
+        |want: fn(&ItemOutcome) -> bool| results.iter().filter(|r| want(&r.outcome)).count();
+    let not_started = count(|o| *o == ItemOutcome::NotStarted);
+    let in_flight = count(|o| *o == ItemOutcome::Interrupted);
+    if not_started + in_flight == 0 {
+        return None;
+    }
+    Some(format!(
+        "interrupted: {not_started} package(s) not started, {in_flight} in flight stopped; \
+         re-run the same command to continue"
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +124,7 @@ pub fn sr_eligibility(
         ItemOutcome::Failed(_) => return Err("its update failed".to_string()),
         ItemOutcome::Skipped(_) => return Err("it was skipped".to_string()),
         ItemOutcome::NotStarted => return Err("it was not started".to_string()),
+        ItemOutcome::Interrupted => return Err("it was interrupted".to_string()),
     }
     match build {
         Some(osc::BuildStatus::Succeeded) => {}
@@ -397,13 +417,18 @@ pub fn summary_text(
     );
     let not_started: Vec<String> = results
         .iter()
-        .filter(|r| r.outcome == ItemOutcome::NotStarted)
+        .filter(|r| {
+            matches!(
+                r.outcome,
+                ItemOutcome::NotStarted | ItemOutcome::Interrupted
+            )
+        })
         .map(|r| r.item.pkg.clone())
         .collect();
     if !not_started.is_empty() {
         section(
             &mut out,
-            "Not started (the run was interrupted)",
+            "Not finished (the run was interrupted)",
             not_started,
         );
     }

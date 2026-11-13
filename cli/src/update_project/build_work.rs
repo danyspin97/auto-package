@@ -134,6 +134,8 @@ impl<'a, 'c> BuildWork<'a, 'c> {
         let outcome = match done {
             Ok(()) if skip.is_some() => ItemOutcome::Skipped(skip.clone().unwrap_or_default()),
             Ok(()) => ItemOutcome::Updated,
+            // A build the user's stop ended is not a failure of the package.
+            Err(_) if ap_build::proc::interrupted() => ItemOutcome::Interrupted,
             Err(why) => ItemOutcome::Failed(why),
         };
         if let Some(w) = &watch
@@ -203,6 +205,22 @@ impl Work for BuildWork<'_, '_> {
         // The other-architecture waits of the run end `--arch-wait-minutes`
         // after the last build ends (see `ArchDeadline`).
         self.ctx.arch_deadline.build_ended(Instant::now());
+        report
+    }
+
+    /// A job the user's stop keeps from starting: neither a failure nor a
+    /// warning. The run's summary counts it (see `report::interrupt_summary`).
+    fn not_started(&self, job: Job) -> Report {
+        let outcome = ItemOutcome::NotStarted;
+        if let Some(row) = self.row(&job) {
+            close_row(self.ctx, &row, &job.item, &outcome);
+        }
+        let mut report = Report::default();
+        report.results.push(ItemResult {
+            item: job.item,
+            outcome,
+            sr: SrOutcome::NotRequested,
+        });
         report
     }
 

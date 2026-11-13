@@ -484,3 +484,65 @@ fn a_run_is_told_ended_before_its_post_step_ends() {
         sched.finish();
     });
 }
+
+/// What an interrupt does to a run, as the update's builds see it: the job
+/// in flight when the stop comes is stopped by it, and the jobs queued behind
+/// it are not started. Outputs are `stopped`, `not started` or `failed`, and
+/// `warnings` counts what `not_run` (a warning) was asked to report.
+#[derive(Default)]
+struct Interrupt {
+    stop: AtomicBool,
+    warnings: Mutex<Vec<String>>,
+}
+
+impl Work for Interrupt {
+    type Job = &'static str;
+    type Out = String;
+    fn keys(job: &&'static str) -> Vec<String> {
+        vec![job.to_string()]
+    }
+    fn after(_: &&'static str) -> Vec<String> {
+        Vec::new()
+    }
+    fn queued(&self, _: &&'static str) {}
+    fn run(&self, job: &'static str) -> String {
+        // The user presses Ctrl-C while this job is in flight.
+        self.stop.store(true, Ordering::SeqCst);
+        format!("stopped {job}")
+    }
+    fn not_run(&self, job: &'static str, why: String) -> String {
+        self.warnings.lock().unwrap().push(format!("{job}: {why}"));
+        format!("failed {job}")
+    }
+    fn not_started(&self, job: &'static str) -> String {
+        format!("not started {job}")
+    }
+    fn stopping(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn an_interrupt_stops_the_job_in_flight_and_starts_no_more_quietly() {
+    let fake = Interrupt::default();
+    let out = std::thread::scope(|s| {
+        let mut sched = Scheduler::new(s, &fake, 1);
+        sched.submit(vec!["a", "b", "c", "d"], 0);
+        sched
+            .finish()
+            .into_iter()
+            .map(|(_, out)| out)
+            .collect::<Vec<_>>()
+    });
+    // One job in flight, three queued: none is a failure and none warns.
+    assert_eq!(
+        out,
+        vec![
+            "stopped a",
+            "not started b",
+            "not started c",
+            "not started d"
+        ]
+    );
+    assert!(fake.warnings.lock().unwrap().is_empty());
+}

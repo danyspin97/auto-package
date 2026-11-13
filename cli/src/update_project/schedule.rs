@@ -31,6 +31,11 @@ pub(super) trait Work: Sync {
     fn run(&self, job: Self::Job) -> Self::Out;
     /// What `job` ends with when it is not run, or its run panicked: `why`.
     fn not_run(&self, job: Self::Job, why: String) -> Self::Out;
+    /// What `job` ends with when the run is stopping before it starts. Default:
+    /// `not_run` with the reason.
+    fn not_started(&self, job: Self::Job) -> Self::Out {
+        self.not_run(job, "interrupted before it started".to_string())
+    }
     /// The post step of `job`, given what its run ended with. It runs once the
     /// slot is released and the jobs waiting for the run have started, so it
     /// may take long. Default: nothing to do.
@@ -233,7 +238,7 @@ where
 
 fn run_one<W: Work>(work: &W, job: W::Job) -> W::Out {
     if work.stopping() {
-        return work.not_run(job, "interrupted before it started".to_string());
+        return work.not_started(job);
     }
     let copy = job.clone();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work.run(job))).unwrap_or_else(|p| {
