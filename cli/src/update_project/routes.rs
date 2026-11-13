@@ -12,6 +12,8 @@ pub(super) struct Route {
     /// The branch leftovers the tool cleans, by finding name
     /// (`changes.dependency-bullet`, `FLAG`).
     pub(super) tool: Vec<String>,
+    /// The versions the tool fills the missing upstream recap for (`1.7.5..1.9.0`).
+    pub(super) recap: Option<String>,
 }
 
 /// The routes of the packages prepared in a run, by package name.
@@ -32,6 +34,11 @@ impl Routes {
     pub(super) fn tool(&self, pkg: &str) -> &[String] {
         self.0.get(pkg).map_or(&[], |r| r.tool.as_slice())
     }
+
+    /// The versions the tool fills the upstream recap of `pkg` for, if it does.
+    pub(super) fn recap(&self, pkg: &str) -> Option<&str> {
+        self.0.get(pkg).and_then(|r| r.recap.as_deref())
+    }
 }
 
 #[cfg(test)]
@@ -46,6 +53,7 @@ mod tests {
             Route {
                 style_only: true,
                 tool: vec!["changes.dependency-bullet".to_string(), "FLAG".to_string()],
+                recap: None,
             },
         );
         routes.insert("pyenv", Route::default());

@@ -51,6 +51,9 @@ pub enum MechanicalFix {
     HeaderFormat,
     /// A bullet that only says a dependency changed is dropped.
     DropDependencyBullet,
+    /// The `Update to` entry has no upstream notes under it: `lint` fills them in
+    /// from the releases between the origin's version and the new one.
+    UpstreamNotes,
     /// A leftover file of a tool or an editor is removed.
     RemoveLeftover,
 }
@@ -78,6 +81,7 @@ impl MechanicalFix {
         match self {
             MechanicalFix::PatchBullet
             | MechanicalFix::UpdateBullet
+            | MechanicalFix::UpstreamNotes
             | MechanicalFix::DropDependencyBullet => FindingRoute::Agent,
             MechanicalFix::RefreshBullets
             | MechanicalFix::RestoreOldEntries
@@ -110,13 +114,13 @@ pub fn route(f: &ReviewFinding) -> FindingRoute {
         ids::CHANGES_VERSION_MISMATCH => Tool(M::UpdateBullet),
         ids::CHANGES_HEADER_FORMAT => Tool(M::HeaderFormat),
         ids::CHANGES_DEPENDENCY_BULLET => Tool(M::DropDependencyBullet),
+        ids::CHANGES_NO_UPSTREAM_NOTES => Tool(M::UpstreamNotes),
         ids::CHANGES_DATE_ORDER => {
             Maintainer("an entry's date is the author's record: the tool does not rewrite it")
         }
         ids::FILES_LEFTOVER | ids::SOURCE_OLD_ARCHIVE_KEPT => Tool(M::RemoveLeftover),
         ids::CHANGES_MISSING_ENTRY
         | ids::CHANGES_UPDATE_WITHOUT_VERSION_CHANGE
-        | ids::CHANGES_NO_UPSTREAM_NOTES
         | ids::CHANGES_FORBIDDEN_TEXT
         | ids::PATCH_HEADER
         | ids::PATCH_COMMENT

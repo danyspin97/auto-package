@@ -46,15 +46,17 @@ pub(super) fn say_dry_run(
             a.source
         ));
         for i in ready {
-            let tool = routes.tool(&i.pkg);
+            let phrase = tool_phrase(routes.tool(&i.pkg), routes.recap(&i.pkg));
             let how = if routes.mechanical(&i.pkg) {
-                if tool.is_empty() {
-                    "style fixes committed as they are (no build, no agent pass)".to_string()
-                } else {
-                    format!(
-                        "the tool cleans the branch leftovers {} and commits them without a build (no agent pass)",
-                        tool.join(", ")
-                    )
+                match &phrase {
+                    None => {
+                        "style fixes committed as they are (no build, no agent pass)".to_string()
+                    }
+                    Some(phrase) => {
+                        format!(
+                            "the tool {phrase} and commits them without a build (no agent pass)"
+                        )
+                    }
                 }
             } else {
                 let rebuilt = if a.no_agent {
@@ -64,13 +66,9 @@ pub(super) fn say_dry_run(
                 } else {
                     "rebuilt by the pipeline, the agent fixing the findings"
                 };
-                if tool.is_empty() {
-                    rebuilt.to_string()
-                } else {
-                    format!(
-                        "the tool cleans the branch leftovers {} first; {rebuilt}",
-                        tool.join(", ")
-                    )
+                match &phrase {
+                    None => rebuilt.to_string(),
+                    Some(phrase) => format!("the tool {phrase} first; {rebuilt}"),
                 }
             };
             ctx.say(format!("  {}: {how}", i.pkg));
@@ -114,4 +112,56 @@ pub(super) fn say_dry_run(
         ctx.say(line);
     }
     report.paths.clear();
+}
+
+/// What the tool does to a package's branch, for a dry run: the leftovers it
+/// cleans and the upstream recap it fills in (`fill` is the versions it covers).
+/// `None` when it does neither.
+fn tool_phrase(tool: &[String], fill: Option<&str>) -> Option<String> {
+    const NO_NOTES: &str = ap_build::request_review::ids::CHANGES_NO_UPSTREAM_NOTES;
+    let cleans: Vec<&str> = tool
+        .iter()
+        .map(String::as_str)
+        .filter(|n| *n != NO_NOTES)
+        .collect();
+    let mut parts = Vec::new();
+    if !cleans.is_empty() {
+        parts.push(format!("cleans the branch leftovers {}", cleans.join(", ")));
+    }
+    if fill.is_some() || tool.iter().any(|n| n == NO_NOTES) {
+        parts.push(match fill {
+            Some(versions) => format!("fills in the upstream recap for {versions}"),
+            None => "fills in the upstream recap".to_string(),
+        });
+    }
+    (!parts.is_empty()).then(|| parts.join(" and "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dry_run_names_the_recap_the_tool_fills_in() {
+        let fill = ap_build::request_review::ids::CHANGES_NO_UPSTREAM_NOTES;
+        assert_eq!(
+            tool_phrase(&[fill.to_string()], Some("1.7.5..1.9.0")).as_deref(),
+            Some("fills in the upstream recap for 1.7.5..1.9.0")
+        );
+        assert_eq!(
+            tool_phrase(
+                &["changes.dependency-bullet".to_string(), fill.to_string()],
+                Some("1.7.5..1.9.0")
+            )
+            .as_deref(),
+            Some(
+                "cleans the branch leftovers changes.dependency-bullet and fills in the upstream recap for 1.7.5..1.9.0"
+            )
+        );
+        assert_eq!(
+            tool_phrase(&["FLAG".to_string()], None).as_deref(),
+            Some("cleans the branch leftovers FLAG")
+        );
+        assert_eq!(tool_phrase(&[], None), None);
+    }
 }

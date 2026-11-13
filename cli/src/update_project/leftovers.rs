@@ -15,7 +15,7 @@ use ap_build::request_review::gather::ActionInputs;
 use ap_build::request_review::provenance_check::NO_FORGE;
 use ap_build::request_review::run::{Deps, Options};
 use ap_build::request_review::synthetic::review_branch;
-use ap_build::request_review::{Finding, Severity};
+use ap_build::request_review::{Finding, Severity, ids};
 use ap_build::update::Candidate;
 use ap_build::update_project::branch_version;
 
@@ -44,6 +44,9 @@ pub(super) struct PreGate {
     /// Build results are not among them: the pre-pass does not build, and the
     /// ready check judges the branch's build once it has one.
     pub(super) refusals: Vec<String>,
+    /// The versions the tool's recap fill covers, `origin..branch` (`1.7.5..1.9.0`),
+    /// when the pre-pass names a missing recap and both versions are read.
+    pub(super) recap: Option<String>,
 }
 
 impl PreGate {
@@ -177,7 +180,22 @@ pub(super) fn pre_gate(
                 .to_string(),
         );
     }
+    if gate
+        .tool
+        .iter()
+        .any(|l| l.starts_with(ids::CHANGES_NO_UPSTREAM_NOTES))
+    {
+        gate.recap = recap_range(carry, pkg, emit);
+    }
     Ok(gate)
+}
+
+/// The versions a recap covers: the origin's `Version:` and the branch's, as
+/// `origin..branch`. `None` when either is not read.
+fn recap_range(carry: &Carry, pkg: &str, emit: Emit<'_>) -> Option<String> {
+    let old = origin_version(&carry.origin, &carry.origin_pkg, emit).ok()?;
+    let new = branch_version(&carry.work, pkg, emit).ok()??;
+    Some(format!("{old}..{new}"))
 }
 
 /// Splits review findings by who fixes them: the tool, the agent, or neither
@@ -268,6 +286,14 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_recap_is_a_tool_fix_and_not_a_refusal() {
+        let found = [finding(ids::CHANGES_NO_UPSTREAM_NOTES, Severity::Warning)];
+        let gate = classify(found.iter());
+        assert_eq!(gate.tool_names(), [ids::CHANGES_NO_UPSTREAM_NOTES]);
+        assert!(gate.agent.is_empty() && gate.refusals.is_empty());
+    }
+
+    #[test]
     fn a_clean_branch_has_nothing_to_send() {
         let none: [Finding; 0] = [];
         assert!(!classify(none.iter()).has_tool());
@@ -279,6 +305,7 @@ mod tests {
             tool: vec!["changes.dependency-bullet: x".to_string()],
             agent: vec!["spec.style: y".to_string()],
             refusals: vec!["spec.style".to_string(), "request.competing".to_string()],
+            ..Default::default()
         };
         assert_eq!(
             gate.report_lines(),

@@ -180,6 +180,8 @@ fn run_tool(
             edit_changes(checkout, |t| drop_dependency_bullets(t, base))?;
             Ok("dropped the dependency bullet".into())
         }
+        // `lint` fills the notes in: it knows the origin's version, a fix does not.
+        MechanicalFix::UpstreamNotes => Err("the notes are filled in by lint".into()),
         MechanicalFix::RemoveLeftover => {
             let name = f.file.as_deref().ok_or("the finding names no file")?;
             let had_series = job.target_files.iter().any(|n| n == "series");

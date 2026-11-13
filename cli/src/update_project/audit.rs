@@ -244,6 +244,7 @@ impl Audit {
                                 let route = Route {
                                     style_only,
                                     tool: gate.tool_names(),
+                                    recap: gate.recap.clone(),
                                 };
                                 // A closed channel means the run gave up.
                                 go_on = tx.send((item, route)).is_ok();
@@ -462,6 +463,7 @@ mod tests {
             tool: vec!["changes.dependency-bullet: x".to_string()],
             agent: Vec::new(),
             refusals: Vec::new(),
+            ..Default::default()
         };
         for agent in [true, false] {
             assert!(
@@ -482,6 +484,7 @@ mod tests {
             tool: vec!["files.leftover: old.tar.gz".to_string()],
             agent: vec!["spec.style: x".to_string()],
             refusals: Vec::new(),
+            ..Default::default()
         };
         assert!(sent_to_pipeline(&none, false, &mixed));
         assert!(
@@ -497,6 +500,7 @@ mod tests {
             tool: Vec::new(),
             agent: vec!["spec.style: x".to_string()],
             refusals: Vec::new(),
+            ..Default::default()
         };
         assert!(
             !sent_to_pipeline(&none, false, &agent_only),
@@ -528,6 +532,7 @@ mod tests {
             tool: vec!["files.leftover: old.tar.gz".to_string()],
             agent: Vec::new(),
             refusals: Vec::new(),
+            ..Default::default()
         };
         assert!(is_style_only(&style, &tool, false, false));
         assert!(!is_style_only(&style, &tool, false, true));

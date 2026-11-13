@@ -51,7 +51,7 @@ fn every_id_of_the_review_is_routed_as_listed() {
         ("changes.date-order", "maintainer"),
         ("changes.version-mismatch", "tool"),
         ("changes.update-without-version-change", "agent"),
-        ("changes.no-upstream-notes", "agent"),
+        ("changes.no-upstream-notes", "tool"),
         ("changes.dependency-bullet", "tool"),
         ("changes.refresh-not-grouped", "tool"),
         ("changes.patch-not-named", "tool"),
@@ -141,6 +141,7 @@ fn a_note_and_an_agent_finding_are_never_acted_on() {
 fn a_tool_fix_that_refuses_falls_back_to_the_agent_or_a_person() {
     assert_eq!(MechanicalFix::PatchBullet.fallback(), FindingRoute::Agent);
     assert_eq!(MechanicalFix::UpdateBullet.fallback(), FindingRoute::Agent);
+    assert_eq!(MechanicalFix::UpstreamNotes.fallback(), FindingRoute::Agent);
 }
 
 #[test]
