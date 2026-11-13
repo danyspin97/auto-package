@@ -132,7 +132,7 @@ pub(super) fn with_release_notes(changes: &str, releases: &[ReleaseNotes]) -> Op
         if !l.starts_with(' ') && !l.trim().is_empty() {
             dropping = releases[1..].iter().any(|(v, _)| is_bullet_of(l, v));
         }
-        if !dropping {
+        if !dropping || l.trim().is_empty() {
             out.push(l.to_string());
         }
     }
@@ -265,6 +265,18 @@ mod tests {
             out.contains("- Update to 1.9:\n  * b\n- Fix the build\n"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_rerun_keeps_the_blank_line_that_closes_the_entry() {
+        let working = entry("- Update to 2.0\n- Fix the build\n");
+        let releases = vec![
+            ("2.0".to_string(), lines(&["* a"])),
+            ("1.9".to_string(), lines(&["* b"])),
+        ];
+        let once = with_release_notes(&working, &releases).unwrap();
+        assert!(once.contains("- Fix the build\n\n----"), "{once}");
+        assert_eq!(with_release_notes(&once, &releases).unwrap(), once);
     }
 
     #[test]
