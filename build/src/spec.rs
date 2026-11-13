@@ -153,6 +153,11 @@ mod console_script_tests;
 #[cfg(test)]
 mod dollar_macro_block_tests;
 
+mod nested_python_expand;
+pub use nested_python_expand::*;
+#[cfg(test)]
+mod nested_python_expand_tests;
+
 #[cfg(test)]
 mod check_probe_tests;
 mod deps;

@@ -169,6 +169,11 @@ pub enum SpecRejection {
     RepeatedSource {
         urls: Vec<String>,
     },
+    /// The edit put a `%python_expand` line inside a braced `%{python_expand ...}`
+    /// block (convention 19 (section 80)), as `line N: text`.
+    NestedPythonExpand {
+        lines: Vec<String>,
+    },
     /// The edit left an rpmlintrc with lines convention 39 does not allow, as
     /// `file: line N (...) ...`.
     BadRpmlintrc {

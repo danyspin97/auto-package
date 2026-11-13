@@ -12,6 +12,9 @@ use crate::pipeline::rpmlintrc_guard::*;
 use crate::pipeline::service_edit::*;
 use crate::pipeline::source_guard::*;
 
+mod python_expand;
+use python_expand::*;
+
 /// How many times the same validation error rejected an edit of one spec, in
 /// this process. A fourth identical turn would be re-prompting for the same
 /// failure (python-torch: eleven rejections of one inherited patch, $2.64).
@@ -409,6 +412,20 @@ fn accept_checked(
                 &e.to_string(),
             );
         }
+    }
+
+    // A `%python_expand` line inside a braced block is a mistake rpm accepts, so
+    // only this check catches it (convention 19 (section 80)).
+    if let Some(problem) = reject_nested_python_expand(
+        spec_path,
+        before,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
+    ) {
+        return Err(problem);
     }
 
     // A patch header naming an absolute path or a `..` component would let the
