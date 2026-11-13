@@ -30,25 +30,43 @@ fn a_named_rpmlintrc_the_checkout_lacks_is_skipped() {
 #[test]
 fn the_commit_says_what_it_changed() {
     assert_eq!(
-        commit_message(true, false),
+        commit_message(true, false, false),
         "Tidy the spec (auto-package lint)"
     );
     assert_eq!(
-        commit_message(false, true),
+        commit_message(false, true, false),
         "Add upstream provenance to patch headers (auto-package lint)"
     );
     assert_eq!(
-        commit_message(true, true),
+        commit_message(true, true, false),
         "Tidy the spec (auto-package lint); Add upstream provenance to patch headers (auto-package lint)"
+    );
+    assert_eq!(
+        commit_message(false, false, true),
+        "Clean the branch leftovers (auto-package lint)"
+    );
+    assert_eq!(
+        commit_message(true, false, true),
+        "Tidy the spec (auto-package lint); Clean the branch leftovers (auto-package lint)"
     );
 }
 
 #[test]
 fn a_header_only_tidy_is_not_a_change_to_submit() {
-    assert_eq!(tidy_done(false, false, true), TidyDone::ProvenanceOnly);
-    assert_eq!(tidy_done(true, false, true), TidyDone::Changed);
-    assert_eq!(tidy_done(false, true, false), TidyDone::Changed);
-    assert_eq!(tidy_done(false, false, false), TidyDone::AlreadyTidy);
+    assert_eq!(
+        tidy_done(false, false, true, false),
+        TidyDone::ProvenanceOnly
+    );
+    assert_eq!(tidy_done(true, false, true, false), TidyDone::Changed);
+    assert_eq!(tidy_done(false, true, false, false), TidyDone::Changed);
+    assert_eq!(tidy_done(false, false, false, false), TidyDone::AlreadyTidy);
+}
+
+#[test]
+fn a_leftover_cleanup_alone_is_a_change_to_submit() {
+    assert_eq!(tidy_done(false, false, false, true), TidyDone::Changed);
+    assert_eq!(tidy_done(false, false, true, true), TidyDone::Changed);
+    assert_eq!(tidy_skip(tidy_done(false, false, false, true)), None);
 }
 
 #[test]

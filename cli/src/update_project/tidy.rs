@@ -35,10 +35,10 @@ pub(super) fn tidy_item(
     let after = edits.spec.clone();
     let tidy_changed = tidied != before;
     let provenance_changed = after != tidied || !edits.patches.is_empty();
-    if !tidy_changed && rpm_fixes.is_empty() && !provenance_changed {
-        ctx.say(format!("{}: already tidy in {branch}", item.pkg));
-        return Ok(TidyDone::AlreadyTidy);
-    }
+    // Without a style change the spec and the rpmlintrc files are not written,
+    // and only the leftover cleanup can change the checkout: it commits only
+    // when it did (see the closure below).
+    let style_changed = tidy_changed || !rpm_fixes.is_empty() || provenance_changed;
     let mut bullets = Vec::new();
     if tidy_changed {
         bullets.push(quality::tidy_bullet(&before, ldconfig));
@@ -74,7 +74,8 @@ pub(super) fn tidy_item(
     .map_err(|e| format!("cannot keep the OBS baseline of {branch}: {e}"))?;
     ap_core::fsx::write_atomic(&spec_path, after.as_bytes()).map_err(|e| e.to_string())?;
     let mut cleaned: Vec<String> = Vec::new();
-    let committed = (|| -> Result<(), String> {
+    let mut leftovers = false;
+    let committed = (|| -> Result<bool, String> {
         for fix in &rpm_fixes {
             ap_core::fsx::write_atomic(&dir.join(&fix.name), fix.after.as_bytes())
                 .map_err(|e| e.to_string())?;
@@ -95,6 +96,12 @@ pub(super) fn tidy_item(
         // The leftovers the build commit cleans too, so both leave the same ones.
         let named = osc::spec_source_names(&after);
         cleaned = osc::clean_branch_leftovers(&dir, branch, &item.pkg, &named, emit);
+        // Before the bullet is added the `.changes` is the cleanup's alone.
+        leftovers = !cleaned.is_empty()
+            || (!style_changed && changes_differ(&changes_path, changes_before.as_deref()));
+        if !style_changed && !leftovers {
+            return Ok(false);
+        }
         if changes_differ(&changes_path, changes_before.as_deref())
             && !commit_files.contains(&changes)
         {
@@ -104,20 +111,25 @@ pub(super) fn tidy_item(
         osc::commit_attempt(
             &baseline,
             &dir,
-            commit_message(tidy_changed || !rpm_fixes.is_empty(), provenance_changed),
+            &commit_message(
+                tidy_changed || !rpm_fixes.is_empty(),
+                provenance_changed,
+                leftovers,
+            ),
             &commit_files,
             None,
             emit,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        Ok(true)
     })();
     for message in &cleaned {
         ctx.say(format!("{}: {message}", item.pkg));
     }
     let committed = match committed {
-        Ok(()) => {
+        Ok(committed) => {
             let _ = std::fs::remove_dir_all(&baseline);
-            Ok(())
+            Ok(committed)
         }
         Err(why) => match osc::restore_baseline(&baseline, &dir, &discard, emit) {
             Ok(()) => Err(why),
@@ -150,14 +162,24 @@ pub(super) fn tidy_item(
         }
         return Err(why);
     }
+    if committed == Ok(false) {
+        ctx.say(format!("{}: already tidy in {branch}", item.pkg));
+        return Ok(TidyDone::AlreadyTidy);
+    }
     ctx.say(format!(
-        "{}: committed the style fixes to {branch}",
-        item.pkg
+        "{}: committed the {} to {branch}",
+        item.pkg,
+        if style_changed {
+            "style fixes"
+        } else {
+            "leftover cleanup"
+        }
     ));
     Ok(tidy_done(
         tidy_changed,
         !rpm_fixes.is_empty(),
         provenance_changed,
+        leftovers,
     ))
 }
 
@@ -189,9 +211,15 @@ pub(super) fn tidy_skip(done: TidyDone) -> Option<&'static str> {
     }
 }
 
-/// The kind of a tidy commit (see [`TidyDone`]).
-fn tidy_done(tidy_changed: bool, rpm_changed: bool, provenance_changed: bool) -> TidyDone {
-    if tidy_changed || rpm_changed {
+/// The kind of a tidy commit (see [`TidyDone`]). A commit that only cleaned
+/// the branch's leftovers is a change to submit.
+fn tidy_done(
+    tidy_changed: bool,
+    rpm_changed: bool,
+    provenance_changed: bool,
+    leftovers: bool,
+) -> TidyDone {
+    if tidy_changed || rpm_changed || leftovers {
         TidyDone::Changed
     } else if provenance_changed {
         TidyDone::ProvenanceOnly
@@ -200,15 +228,22 @@ fn tidy_done(tidy_changed: bool, rpm_changed: bool, provenance_changed: bool) ->
     }
 }
 
-/// The commit message of a tidy: the spec tidy, the provenance headers, or both.
-fn commit_message(tidy: bool, provenance: bool) -> &'static str {
-    match (tidy, provenance) {
-        (false, true) => "Add upstream provenance to patch headers (auto-package lint)",
-        (true, true) => {
-            "Tidy the spec (auto-package lint); Add upstream provenance to patch headers (auto-package lint)"
-        }
-        _ => "Tidy the spec (auto-package lint)",
+/// The commit message of a tidy: each change it makes, in order.
+fn commit_message(tidy: bool, provenance: bool, leftovers: bool) -> String {
+    let mut parts = Vec::new();
+    if tidy {
+        parts.push("Tidy the spec (auto-package lint)");
     }
+    if provenance {
+        parts.push("Add upstream provenance to patch headers (auto-package lint)");
+    }
+    if leftovers {
+        parts.push("Clean the branch leftovers (auto-package lint)");
+    }
+    if parts.is_empty() {
+        parts.push("Tidy the spec (auto-package lint)");
+    }
+    parts.join("; ")
 }
 
 /// An rpmlintrc file of the spec whose tidy changes it, with both texts.

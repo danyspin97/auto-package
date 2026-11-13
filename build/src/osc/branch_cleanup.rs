@@ -50,6 +50,28 @@ pub fn clean_branch_leftovers(
     )
 }
 
+/// Whether [`clean_branch_leftovers`] would drop a FLAG line of `pkg`'s
+/// unpublished entries in `project` that the origin `origin_project/origin_pkg`
+/// already explains. Read only: an unreadable text counts as not stale.
+pub fn has_explained_flags(
+    project: &str,
+    pkg: &str,
+    origin_project: &str,
+    origin_pkg: &str,
+    emit: Emit<'_>,
+) -> bool {
+    let read = |p: &str, q: &str, ext: &str| cat_file(p, q, &format!("{q}.{ext}"), emit);
+    let (Some(changes), Some(spec), Some(origin_changes), Some(origin_spec)) = (
+        read(project, pkg, "changes"),
+        read(project, pkg, "spec"),
+        read(origin_project, origin_pkg, "changes"),
+        read(origin_project, origin_pkg, "spec"),
+    ) else {
+        return false;
+    };
+    without_explained_flags(&changes, &origin_changes, &origin_spec, &spec).is_some()
+}
+
 /// [`clean_branch_leftovers`] with the origin's `.changes` and spec texts
 /// given (`None` when the package has no readable origin).
 pub(super) fn clean_with_origin(

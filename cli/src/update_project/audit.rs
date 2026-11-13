@@ -40,7 +40,11 @@ impl Audit {
         let (source, distro, arch) = (a.source.clone(), a.distro.clone(), a.arch.clone());
         let (only, exclude) = (a.only.clone(), a.exclude.clone());
         let agent = !a.no_agent;
-        let (branch, continues) = (branch.to_string(), super::existing_lint::applies(a));
+        let (branch, continues, in_place) = (
+            branch.to_string(),
+            super::existing_lint::applies(a),
+            a.in_place,
+        );
         let handle = std::thread::spawn(move || {
             let say = |message: String| {
                 reporter.report(&Event::Progress {
@@ -154,14 +158,37 @@ impl Audit {
                         }
                         update::Decision::Skipped(_) => (None, String::new()),
                     };
+                    // A package with unpublished work on its branch is checked against
+                    // its origin first: its branch leftovers are the tool's to clean.
+                    let carrying = super::leftovers::carry(
+                        &source,
+                        &branch,
+                        pkg,
+                        in_place,
+                        continues,
+                        ecosystem_of,
+                        emit,
+                    );
+                    let gate = match carrying {
+                        Some(carry) => {
+                            let obs = ap_build::request_review::fetch::LiveRequestObs { emit };
+                            super::leftovers::pre_gate(&obs, &carry, pkg, ldconfig, emit)
+                                .unwrap_or_else(|why| {
+                                    warn(format!(
+                                        "{pkg}: its branch work was not checked before the build: {why}"
+                                    ));
+                                    Default::default()
+                                })
+                        }
+                        None => Default::default(),
+                    };
                     let mut go_on = true;
-                    if sent_to_pipeline(&findings, agent) {
+                    if sent_to_pipeline(&findings, agent, &gate) {
                         match ecosystem {
                             Some(ecosystem) => {
-                                // Only a package with a fix to make is style-only; a
-                                // package with no findings is reviewed by the agent.
-                                let style_only =
-                                    fixable(&findings) && !quality::needs_pipeline(&findings);
+                                let style_only = is_style_only(&findings, &gate, agent);
+                                let mut lines = fixable_lines(&findings);
+                                lines.extend(gate.agent.iter().cloned());
                                 let item = Item {
                                     pkg: pkg.to_string(),
                                     origin: source.clone(),
@@ -172,7 +199,7 @@ impl Audit {
                                     held_version: None,
                                     dependency_of: None,
                                     requires: Vec::new(),
-                                    findings: fixable_lines(&findings),
+                                    findings: lines,
                                 };
                                 // A closed channel means the run gave up.
                                 go_on = tx.send((item, style_only)).is_ok();
@@ -231,10 +258,29 @@ fn fixable(findings: &[quality::Finding]) -> bool {
 }
 
 /// Whether an audited package goes to the pipeline: one with a finding to fix,
-/// or one with no finding at all when an agent runs, for its review pass. A
-/// package whose only findings are report-only is only reported.
-pub(super) fn sent_to_pipeline(findings: &[quality::Finding], agent: bool) -> bool {
-    fixable(findings) || (agent && findings.is_empty())
+/// one with no finding at all when an agent runs (its review pass), one the
+/// pre-pass found a tool fix or an agent fix in, when an agent runs. A package
+/// whose only findings are report-only is only reported.
+pub(super) fn sent_to_pipeline(
+    findings: &[quality::Finding],
+    agent: bool,
+    gate: &super::leftovers::PreGate,
+) -> bool {
+    fixable(findings)
+        || (agent && (findings.is_empty() || !gate.agent.is_empty()))
+        || gate.has_tool()
+}
+
+/// Whether a sent package is committed without a build: its findings are style
+/// slips or the pre-pass found branch leftovers for the tool, and no agent is
+/// needed for them (with an agent, the pre-pass's agent findings need one).
+pub(super) fn is_style_only(
+    findings: &[quality::Finding],
+    gate: &super::leftovers::PreGate,
+    agent: bool,
+) -> bool {
+    let agent_needed = agent && !gate.agent.is_empty();
+    !agent_needed && !quality::needs_pipeline(findings) && (fixable(findings) || gate.has_tool())
 }
 
 /// The findings an item hands the agent, one line each. Report-only findings
@@ -266,6 +312,7 @@ pub(super) fn improve_problem(item: &Item) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::leftovers::PreGate;
     use super::*;
     use ap_build::quality::{Finding, Kind};
 
@@ -284,12 +331,13 @@ mod tests {
     #[test]
     fn a_package_without_findings_takes_the_agent_pass_only_when_an_agent_runs() {
         let none: [Finding; 0] = [];
+        let clean = PreGate::default();
         assert!(
-            sent_to_pipeline(&none, true),
+            sent_to_pipeline(&none, true, &clean),
             "a clean package gets its review pass"
         );
         assert!(
-            !sent_to_pipeline(&none, false),
+            !sent_to_pipeline(&none, false, &clean),
             "--no-agent keeps the package out"
         );
         let report_only = [Finding {
@@ -297,7 +345,7 @@ mod tests {
             detail: "y.rpmlintrc".to_string(),
         }];
         assert!(
-            !sent_to_pipeline(&report_only, true),
+            !sent_to_pipeline(&report_only, true, &clean),
             "a report-only finding is only reported"
         );
         let style = [Finding {
@@ -305,8 +353,54 @@ mod tests {
             detail: "a style slip".to_string(),
         }];
         assert!(
-            sent_to_pipeline(&style, false),
+            sent_to_pipeline(&style, false, &clean),
             "a fixable finding is sent either way"
+        );
+    }
+
+    #[test]
+    fn a_clean_package_with_a_branch_leftover_is_sent_and_committed_without_a_build() {
+        let none: [Finding; 0] = [];
+        let leftover = PreGate {
+            tool: vec!["changes.dependency-bullet: x".to_string()],
+            agent: Vec::new(),
+        };
+        for agent in [true, false] {
+            assert!(
+                sent_to_pipeline(&none, agent, &leftover),
+                "a tool fix sends the package (agent {agent})"
+            );
+            assert!(
+                is_style_only(&none, &leftover, agent),
+                "a tool fix is committed by the tidy path (agent {agent})"
+            );
+        }
+    }
+
+    #[test]
+    fn no_agent_commits_the_tool_fixes_and_leaves_the_agent_findings_for_the_gate() {
+        let none: [Finding; 0] = [];
+        let mixed = PreGate {
+            tool: vec!["files.leftover: old.tar.gz".to_string()],
+            agent: vec!["spec.style: x".to_string()],
+        };
+        assert!(sent_to_pipeline(&none, false, &mixed));
+        assert!(
+            is_style_only(&none, &mixed, false),
+            "--no-agent: the tool's cleanup is committed through the tidy path"
+        );
+        assert!(
+            !is_style_only(&none, &mixed, true),
+            "with an agent, the agent's findings go to the build instead"
+        );
+        assert!(sent_to_pipeline(&none, true, &mixed));
+        let agent_only = PreGate {
+            tool: Vec::new(),
+            agent: vec!["spec.style: x".to_string()],
+        };
+        assert!(
+            !sent_to_pipeline(&none, false, &agent_only),
+            "--no-agent: an agent-only finding alone does not send the package"
         );
     }
 
