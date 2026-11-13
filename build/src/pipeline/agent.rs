@@ -204,6 +204,10 @@ pub(super) fn agent_turn(
     if let Err(why) = can_start(config.budget_usd, *spent_usd, &signals) {
         return Err((why, FailureKind::Exhausted));
     }
+    // A quilt series the commit moved out is what this turn's quilt reads.
+    if let Some(checkout) = ctx.checkout_dir {
+        restore_scratch_series(checkout, ws.dir());
+    }
     // The spec's Version is the package's before every turn, and a turn may not
     // change it (see `version_stop`): a change made between turns stops here.
     let version_spec = ctx.checkout_dir.map(|d| d.join(format!("{obs_name}.spec")));

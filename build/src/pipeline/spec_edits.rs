@@ -227,6 +227,46 @@ pub(super) fn sync_quilt_series(expanded_spec: &str, checkout_dir: &Path) {
     write_or_warn(&series_path, &wanted);
 }
 
+/// The file name, in the state directory, of a checkout's `series` that
+/// [`stash_scratch_series`] moved out.
+const STASHED_SERIES: &str = "series.stashed";
+
+/// Moves the checkout's `series` into the state directory when OBS does not
+/// track one: [`sync_quilt_series`] wrote it for the agent's quilt turns, so it
+/// is not a file of the package, and the commit would report it as one on every
+/// run. [`restore_scratch_series`] puts it back before the next agent turn,
+/// which reads it through `QUILT_PATCHES`. Returns whether a file was moved.
+pub(super) fn stash_scratch_series(checkout_dir: &Path, state_dir: &Path) -> bool {
+    let series = checkout_dir.join("series");
+    if !series.is_file()
+        || osc::tracked_files(checkout_dir)
+            .iter()
+            .any(|n| n == "series")
+    {
+        return false;
+    }
+    match std::fs::rename(&series, state_dir.join(STASHED_SERIES)) {
+        Ok(()) => true,
+        Err(e) => {
+            ap_core::diag!("  cannot move {}: {e}", series.display());
+            false
+        }
+    }
+}
+
+/// Puts back the `series` [`stash_scratch_series`] moved, when the checkout has
+/// none. Nothing is restored over a series the checkout already has.
+pub(super) fn restore_scratch_series(checkout_dir: &Path, state_dir: &Path) {
+    let stashed = state_dir.join(STASHED_SERIES);
+    let series = checkout_dir.join("series");
+    if series.exists() || !stashed.is_file() {
+        return;
+    }
+    if let Err(e) = std::fs::rename(&stashed, &series) {
+        ap_core::diag!("  cannot restore {}: {e}", series.display());
+    }
+}
+
 /// `current` with only the lines that no longer match the spec removed (a
 /// patch the spec stopped declaring) and the spec's new patches appended, in
 /// spec order. Every other line keeps its place and text, so a series that is

@@ -54,6 +54,62 @@ fn sync_quilt_series_is_a_no_op_when_already_in_sync() {
     assert!(!dir.path().join("series").exists());
 }
 
+/// A checkout whose `.osc/_files` lists `tracked` (OBS's file list).
+fn checkout_tracking(tracked: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".osc")).unwrap();
+    let entries: String = tracked
+        .iter()
+        .map(|n| format!("<entry name=\"{n}\" md5=\"0\" size=\"0\" mtime=\"0\" />"))
+        .collect();
+    std::fs::write(
+        dir.path().join(".osc").join("_files"),
+        format!("<directory name=\"foo\">{entries}</directory>"),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn an_untracked_scratch_series_is_stashed_and_restored_for_the_next_turn() {
+    let checkout = checkout_tracking(&["foo.spec"]);
+    let state = tempfile::tempdir().unwrap();
+    let series = checkout.path().join("series");
+    std::fs::write(&series, "a.patch\n").unwrap();
+
+    assert!(stash_scratch_series(checkout.path(), state.path()));
+    assert!(
+        !series.exists(),
+        "the commit must not see the scratch series"
+    );
+
+    restore_scratch_series(checkout.path(), state.path());
+    assert_eq!(std::fs::read_to_string(&series).unwrap(), "a.patch\n");
+}
+
+#[test]
+fn a_tracked_series_is_never_stashed() {
+    let checkout = checkout_tracking(&["foo.spec", "series"]);
+    let state = tempfile::tempdir().unwrap();
+    let series = checkout.path().join("series");
+    std::fs::write(&series, "a.patch\n").unwrap();
+
+    assert!(!stash_scratch_series(checkout.path(), state.path()));
+    assert!(series.exists());
+}
+
+#[test]
+fn a_restore_does_not_overwrite_the_checkouts_series() {
+    let checkout = checkout_tracking(&["foo.spec"]);
+    let state = tempfile::tempdir().unwrap();
+    std::fs::write(state.path().join("series.stashed"), "old.patch\n").unwrap();
+    let series = checkout.path().join("series");
+    std::fs::write(&series, "new.patch\n").unwrap();
+
+    restore_scratch_series(checkout.path(), state.path());
+    assert_eq!(std::fs::read_to_string(&series).unwrap(), "new.patch\n");
+}
+
 /// Earlier review probe: a fake `python-foo-0.1-1.1.x86_64.rpm`
 /// satisfied `python-foo>=99` because the pre-fix check only matched
 /// the name prefix. Must now actually compare versions.

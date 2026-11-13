@@ -205,6 +205,9 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         });
     }
     osc::wrap_unpublished_changes(&ctx.checkout_dir);
+    // The quilt series the agent's turns read is scratch while OBS has none: it
+    // is moved out before the plan, so the plan does not report it as a stray.
+    stash_scratch_series(&ctx.checkout_dir, ctx.ws.dir());
     let plan = osc::publish_plan(&ctx.checkout_dir);
     if let Some(why) = osc::filter_claim_without_rpmlintrc(&ctx.checkout_dir, &plan.files) {
         commit_step.finish(StepOutcome::Failed);
