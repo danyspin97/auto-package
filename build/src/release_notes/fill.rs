@@ -3,7 +3,10 @@
 //! update stage writes (see [`gather`]), one bullet per release when the jump
 //! crosses several, so a package gets the same recap whichever tool wrote it.
 //! A published entry, an entry whose bullet already has notes, and a recap
-//! nothing was found for are left as they are.
+//! nothing was found for are left as they are. A bullet whose only lines are
+//! the fallback an earlier update wrote (see [`is_fallback_line`]) has no
+//! notes: its fallback is replaced by the recap, unless the recap is only links
+//! again, in which case the entry stays as it is.
 
 use std::path::Path;
 
@@ -83,12 +86,19 @@ pub(super) fn fill_with(
     if old == new || !needs_recap(&text, origin_changes, &new) {
         return Ok(Fill::Nothing);
     }
+    let legacy = has_fallback(&text, origin_changes, &new);
     let repo = repo_of_spec(&spec, pkg, pypi);
     let archive = archive_in(checkout, &new);
     let found = recap(repo.as_deref(), archive.as_deref(), &old, &new, no_agent);
     let nothing = found.releases.iter().all(|(_, lines)| lines.is_empty());
     // The first release is the update's own: the bullet the notes go under.
-    if nothing || found.releases.first().is_none_or(|(v, _)| *v != new) {
+    // A fallback is only replaced by notes: a recap of links is no better.
+    let links_only = legacy
+        && found
+            .releases
+            .iter()
+            .all(|(_, lines)| lines.iter().all(|l| is_link_line(l)));
+    if nothing || links_only || found.releases.first().is_none_or(|(v, _)| *v != new) {
         return Ok(Fill::NotFound {
             old,
             new,
@@ -121,32 +131,74 @@ pub(super) fn pypi_name_of(spec: &str, pkg: &str) -> Option<String> {
         })
 }
 
-/// Whether the newest entry of `text` is unpublished (the origin's `.changes`
-/// has neither its text nor its header), has the `Update to <new>` bullet, and
-/// has no notes under it: a flag line and a placeholder are not notes.
-fn needs_recap(text: &str, origin_changes: &str, new: &str) -> bool {
-    let Some(entry) = entries_of(text).into_iter().next() else {
-        return false;
-    };
+/// The lines under the `Update to <new>` bullet of the newest entry of `text`
+/// (up to the next bullet of the entry), when that entry is unpublished (the
+/// origin's `.changes` has neither its text nor its header) and has the bullet.
+fn bullet_block<'a>(text: &'a str, origin_changes: &str, new: &str) -> Option<Vec<&'a str>> {
+    let entry = entries_of(text).into_iter().next()?;
     if published(&entry, origin_changes) {
-        return false;
+        return None;
     }
-    let Some(at) = entry.iter().position(|l| {
+    let at = entry.iter().position(|l| {
         !l.starts_with(' ') && is_release_bullet(l.trim().trim_start_matches(['-', '*', ' ']), new)
-    }) else {
-        return false;
-    };
+    })?;
     let rest = &entry[at + 1..];
     let block_end = rest
         .iter()
         .position(|l| !l.starts_with(' ') && !l.trim().is_empty())
         .unwrap_or(rest.len());
-    let block = &rest[..block_end];
-    let flags = flag_line_mask(block);
-    !block
-        .iter()
-        .enumerate()
-        .any(|(i, l)| l.starts_with(' ') && !l.trim().is_empty() && !flags[i] && !is_placeholder(l))
+    Some(rest[..block_end].to_vec())
+}
+
+/// Whether the newest entry of `text` is unpublished, has the `Update to <new>`
+/// bullet, and has no notes under it: a flag line, a placeholder and a fallback
+/// line are not notes.
+fn needs_recap(text: &str, origin_changes: &str, new: &str) -> bool {
+    let Some(block) = bullet_block(text, origin_changes, new) else {
+        return false;
+    };
+    let flags = flag_line_mask(&block);
+    !block.iter().enumerate().any(|(i, l)| {
+        l.starts_with(' ')
+            && !l.trim().is_empty()
+            && !flags[i]
+            && !is_placeholder(l)
+            && !is_fallback_line(l)
+    })
+}
+
+/// Whether the bullet of the entry [`needs_recap`] is about holds a fallback
+/// line an earlier update wrote.
+fn has_fallback(text: &str, origin_changes: &str, new: &str) -> bool {
+    bullet_block(text, origin_changes, new).is_some_and(|block| {
+        block
+            .iter()
+            .any(|l| l.starts_with(' ') && is_fallback_line(l))
+    })
+}
+
+/// Whether `line`, under an `Update to` bullet, is a fallback the update stage
+/// wrote in place of notes it could not list: the `Too many changes to list`
+/// line (with its `see:` links or the changelog file it names), or a bare
+/// release-page link of such a list. A `see <link>` line is the newer form of a
+/// release's notes, not a fallback.
+pub(super) fn is_fallback_line(line: &str) -> bool {
+    let text = line.trim().trim_start_matches(['*', '-']).trim_start();
+    text.starts_with("Too many changes to list") || is_bare_link(line.trim())
+}
+
+/// Whether `line` is a recap line that only points at upstream: a fallback
+/// line, or a `see <link>` line (with its bullet optional).
+fn is_link_line(line: &str) -> bool {
+    let text = line.trim().trim_start_matches('*').trim_start();
+    let text = text.strip_prefix("see ").unwrap_or(text).trim();
+    is_fallback_line(line) || is_bare_link(text)
+}
+
+/// Whether `text` is one URL, without a space.
+fn is_bare_link(text: &str) -> bool {
+    (text.starts_with("http://") || text.starts_with("https://"))
+        && !text.contains(char::is_whitespace)
 }
 
 /// Whether `entry` is an entry of `origin_changes`: the same text, or the same

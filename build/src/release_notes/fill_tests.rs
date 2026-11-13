@@ -369,3 +369,103 @@ fn a_forge_named_by_the_spec_is_used_without_asking_pypi() {
         Some("https://github.com/axanthos/LTTL")
     );
 }
+
+#[test]
+fn a_legacy_too_many_line_and_its_links_are_replaced_by_the_recap() {
+    // The shape the update stage wrote before the per-release recap (python-Delorean).
+    let legacy = "- Update to 1.9.0\n  * Too many changes to list, see:\n    https://github.com/x/y/releases/tag/1.9.0";
+    let dir = checkout("1.9.0", &changes(legacy));
+    let recap = changelog_of(NEWS);
+    assert!(matches!(fill(&dir, &recap, true), Ok(Fill::Written { .. })));
+    let out = read(&dir);
+    assert!(!out.contains("Too many changes"), "{out}");
+    assert!(!out.contains("releases/tag/1.9.0"), "{out}");
+    assert!(
+        out.contains("- Update to 1.9.0:\n  * Add a new option"),
+        "{out}"
+    );
+    assert!(
+        out.contains("- Update to 1.8.0:\n  * Support TOML files"),
+        "{out}"
+    );
+    assert!(out.ends_with(OLD_ENTRY), "{out}");
+}
+
+#[test]
+fn a_legacy_changelog_file_line_is_replaced_by_the_recap() {
+    // The shape of python-ConfigUpdater: the changelog file it names.
+    let legacy =
+        "- Update to 1.9.0\n  * Too many changes to list, see CHANGELOG.rst in the sources";
+    let dir = checkout("1.9.0", &changes(legacy));
+    let recap = |_: Option<&str>, _: Option<&Path>, _: &str, _: &str, _: bool| Recap {
+        releases: vec![("1.9.0".to_string(), lines(&["* Add a new option"]))],
+        fetch_problem: None,
+    };
+    assert!(matches!(fill(&dir, &recap, true), Ok(Fill::Written { .. })));
+    let out = read(&dir);
+    assert!(
+        out.contains("- Update to 1.9.0\n  * Add a new option\n"),
+        "{out}"
+    );
+    assert!(!out.contains("CHANGELOG.rst"), "{out}");
+}
+
+#[test]
+fn a_bullet_with_real_notes_beside_a_legacy_line_is_untouched() {
+    let text = changes(
+        "- Update to 1.9.0\n  * Too many changes to list, see:\n    https://x/1\n  * Real note",
+    );
+    let dir = checkout("1.9.0", &text);
+    let never = |_: Option<&str>, _: Option<&Path>, _: &str, _: &str, _: bool| -> Recap {
+        panic!("a recap with real notes is not asked for")
+    };
+    assert_eq!(fill(&dir, &never, false), Ok(Fill::Nothing));
+    assert_eq!(read(&dir), text);
+}
+
+#[test]
+fn a_see_link_line_is_a_note_not_a_fallback() {
+    // The newer no-agent form of a release's notes: a line of its own link.
+    let text = changes("- Update to 1.9.0\n  * see https://github.com/x/y/releases/tag/1.9.0");
+    let dir = checkout("1.9.0", &text);
+    let never = |_: Option<&str>, _: Option<&Path>, _: &str, _: &str, _: bool| -> Recap {
+        panic!("a see-link line is not asked to be replaced")
+    };
+    assert_eq!(fill(&dir, &never, true), Ok(Fill::Nothing));
+    assert_eq!(read(&dir), text);
+}
+
+#[test]
+fn a_legacy_line_is_replaced_once_and_a_second_run_changes_nothing() {
+    let legacy = "- Update to 1.9.0\n  * Too many changes to list, see:\n    https://x/1";
+    let dir = checkout("1.9.0", &changes(legacy));
+    let recap = changelog_of(NEWS);
+    assert!(matches!(fill(&dir, &recap, true), Ok(Fill::Written { .. })));
+    let once = read(&dir);
+    assert_eq!(fill(&dir, &recap, true), Ok(Fill::Nothing));
+    assert_eq!(read(&dir), once);
+}
+
+#[test]
+fn a_legacy_line_is_kept_when_no_agent_only_finds_links() {
+    let legacy = "- Update to 1.9.0\n  * Too many changes to list, see:\n    https://x/1\n  FLAG: tests skipped: -k x";
+    let text = changes(legacy);
+    let dir = checkout("1.9.0", &text);
+    // What the no-agent recap gives for notes too long to list: links only.
+    let links = |_: Option<&str>, _: Option<&Path>, _: &str, _: &str, _: bool| Recap {
+        releases: vec![(
+            "1.9.0".to_string(),
+            lines(&["* see https://github.com/x/y/releases/tag/1.9.0"]),
+        )],
+        fetch_problem: None,
+    };
+    assert_eq!(
+        fill(&dir, &links, true),
+        Ok(Fill::NotFound {
+            old: "1.7.5".into(),
+            new: "1.9.0".into(),
+            problem: None,
+        })
+    );
+    assert_eq!(read(&dir), text, "the entry comes out unchanged");
+}
