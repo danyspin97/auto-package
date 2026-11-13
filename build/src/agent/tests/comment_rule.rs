@@ -20,3 +20,14 @@ fn a_looked_up_buildrequires_gets_no_comment() {
     let skill = include_str!("../../../../packaging-skills/rust-cargo-packaging/SKILL.md");
     assert!(!skill.contains("with a comment naming the crate or file"));
 }
+
+/// A fixup line the edit adds always carries its comment: the prompt says so, and
+/// convention 40 (the changelog and comment rules) says what the comment is.
+#[test]
+fn a_fixup_line_always_carries_its_comment() {
+    let p = static_system_prompt();
+    assert!(p.contains("is the exception: it always gets a `#` comment directly above"));
+    let c = crate::conventions_table::CONVENTIONS[39].1;
+    assert!(c.contains("always gets a `#` comment"), "{c}");
+    assert!(c.contains("the pipeline rejects the edit"), "{c}");
+}

@@ -52,6 +52,9 @@ const PRIORITIES: &str = r#"
    found the information, or what a line does. When unsure, write no comment,
    but never drop a comment another rule requires (a patch tag, `unverified`
    evidence, a licence or legal note).
+   A fixup line you add to a build phase (`sed -i`, `chmod`, `rm`, `mv`, `ln -s`,
+   `echo >`, `export`) is the exception: it always gets a `#` comment directly above
+   it that says why, with no `%` macro, or the pipeline rejects the edit.
    Give a fact one comment, on the line it explains: a `%check` comment is
    only for the decision to skip or omit tests and does not restate a
    `BuildRequires` comment. Evidence comments may be longer than one line.

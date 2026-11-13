@@ -11,7 +11,9 @@ fn convention_19_has_the_braced_python_expand_worked_example() {
         .find("Worked example, `%install`")
         .expect("convention 19 has the worked example");
     let example = &text[at..];
-    assert!(example.contains("%install\n       %{python_expand #\n"));
+    assert!(example.contains(
+        "%install\n       # the wheel ships test files that no flavor should package\n       %{python_expand #\n"
+    ));
     assert!(example.contains("rm -f %{buildroot}%{$python_sitelib}/<pkg>/conftest.py\n"));
     assert!(
         example.contains("\n       }\n"),
