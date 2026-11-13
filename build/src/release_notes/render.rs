@@ -69,34 +69,48 @@ pub(super) fn classify(releases: &[RepoRelease]) -> Notes {
 
 /// The bullets of release notes in markdown, one line each, without the
 /// markup, the "by @user in <pull request>" tails of generated notes, and the
-/// contributor and full-changelog sections they end with.
+/// contributor and full-changelog sections they end with. A bullet wrapped
+/// onto indented lines below it is one bullet: its lines are joined.
 pub(super) fn bullets_of(body: &str) -> Vec<String> {
     let mut skip = false;
-    let mut out = Vec::new();
+    let mut items: Vec<String> = Vec::new();
+    // Whether the last line was a bullet's, so that an indented line after it
+    // continues that bullet.
+    let mut open = false;
     let body = strip_comments(body);
     for raw in body.lines() {
         let line = raw.trim();
         if let Some(head) = line.strip_prefix('#') {
             let head = head.trim_start_matches('#').to_ascii_lowercase();
             skip = head.contains("contributor") || head.contains("full changelog");
+            open = false;
             continue;
         }
         if skip || line.to_ascii_lowercase().contains("full changelog") {
+            open = false;
             continue;
         }
-        let Some(item) = ["- ", "* ", "+ "]
+        if let Some(item) = ["- ", "* ", "+ "]
             .iter()
             .find_map(|m| line.strip_prefix(m))
             .map(str::trim)
-        else {
-            continue;
-        };
-        let item = tidy(item);
-        if item.chars().any(char::is_alphanumeric) {
-            out.push(item);
+        {
+            items.push(item.to_string());
+            open = true;
+        } else if open && raw.starts_with([' ', '\t']) && !line.is_empty() {
+            if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(line);
+            }
+        } else {
+            open = false;
         }
     }
-    out
+    items
+        .iter()
+        .map(|item| tidy(item))
+        .filter(|item| item.chars().any(char::is_alphanumeric))
+        .collect()
 }
 
 /// One bullet's text without markdown links, emphasis and code ticks, and

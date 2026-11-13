@@ -402,3 +402,23 @@ fn a_changelog_named_in_any_case_is_read_from_an_archive() {
     assert!(got.text.contains("Add support for JPEG XL"));
     assert!(!got.text.contains("3.3.2"));
 }
+
+#[test]
+fn a_wrapped_bullet_is_one_bullet_with_its_lines_joined() {
+    // Deprecated 3.0.1's CHANGELOG.md: the bullet wraps onto indented lines.
+    let body = "### Fixed\n\n\
+        - Preserve constructor signatures on deprecated classes, including in Sphinx autodoc,\n\
+        \x20 instead of displaying the warning wrapper's generic arguments ([#86](https://github.com/o/r/issues/86)).\n\
+        \x20 See PR #115 (Mirochill).\n\n\
+        ### Other\n\n\
+        - Bump the dev-dependencies group (Dependabot). See PR #114.\n";
+    let got = render::bullets_of(body);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(
+        got[0].starts_with(
+            "Preserve constructor signatures on deprecated classes, including in Sphinx autodoc, instead of displaying the warning wrapper's generic arguments"
+        ),
+        "{got:?}"
+    );
+    assert!(got[0].ends_with("See PR #115 (Mirochill)."), "{got:?}");
+}
