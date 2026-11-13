@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use crate::obs_status::ResultEntry;
 use crate::osc::{DiffSpec, Listing, OpenRequest};
 use crate::request_review::fetch::{ReadFailure, RequestObs};
-use crate::request_review::request::{ActionSource, ActionTarget, RequestDoc};
+use crate::request_review::gather::ReviewError;
+use crate::request_review::report::Report;
+use crate::request_review::request::{ActionSource, ActionTarget, RequestDoc, RequestState};
+use crate::request_review::run::{Deps, Options, review};
 
 /// The request as it is after the fix: the same request with its source
 /// pinned to `rev`. Every other read is the live one.
@@ -85,4 +88,52 @@ pub fn pinned_xml(
         escape(&doc.state.when),
         escape(&doc.state.created),
     )
+}
+
+/// Review `pkg` of `branch_prj` at `rev` as a submit of that revision to
+/// `origin_prj/origin_pkg`, with no request behind it. The checks are those of
+/// `run::review`, run on a synthetic request with no id, creator or state (so no
+/// request-level finding, and no request-date check, applies). `opts.id` is not
+/// used. Nothing is written to OBS.
+#[allow(clippy::too_many_arguments)]
+pub fn review_branch(
+    obs: &dyn RequestObs,
+    branch_prj: &str,
+    pkg: &str,
+    rev: &str,
+    origin_prj: &str,
+    origin_pkg: &str,
+    opts: &Options<'_>,
+    deps: &Deps<'_>,
+) -> Result<Report, ReviewError> {
+    let source = ActionSource {
+        project: branch_prj.to_string(),
+        package: pkg.to_string(),
+        rev: Some(rev.to_string()),
+    };
+    let target = ActionTarget {
+        project: origin_prj.to_string(),
+        package: origin_pkg.to_string(),
+    };
+    let doc = RequestDoc {
+        id: String::new(),
+        creator: String::new(),
+        state: RequestState::default(),
+        description: String::new(),
+        actions: Vec::new(),
+        reviews: Vec::new(),
+    };
+    let pinned = Pinned {
+        live: obs,
+        xml: pinned_xml(&doc, &source, &target, rev),
+    };
+    let options = Options {
+        id: "",
+        download: opts.download,
+        scratch: opts.scratch,
+        fail_on: opts.fail_on,
+        fail_on_agent: opts.fail_on_agent,
+        build: opts.build,
+    };
+    review(&pinned, &options, deps).map(|reviewed| reviewed.report)
 }
