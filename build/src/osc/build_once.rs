@@ -129,7 +129,7 @@ pub(super) fn obs_build_once(
                         ),
                     });
                 }
-                reporter.report(&Event::Warning {
+                reporter.report(&Event::Progress {
                     step,
                     message: format!(
                         "OBS status poll failed ({poll_errors}/{MAX_CONSECUTIVE_POLL_ERRORS}), retrying: {e}"
@@ -146,7 +146,7 @@ pub(super) fn obs_build_once(
                 // build is a dead end, anything else is a slow scheduler
                 // and MAX_WAIT bounds the wait.
                 ensure_builds_for(project, repo, arch)?;
-                reporter.report(&Event::Warning {
+                reporter.report(&Event::Progress {
                     step,
                     message: format!(
                         "OBS has reported no build result for {pkg_name} on {repo}/{arch} \
@@ -220,7 +220,7 @@ pub(super) fn obs_build_once(
             // Non-terminal and unchanged: make sure the user can always
             // tell this is still alive and polling, not silently wedged.
             if wait_view::warning_due(&status, last_warning.elapsed()) {
-                reporter.report(&Event::Warning {
+                reporter.report(&Event::Progress {
                     step,
                     message: format!(
                         "OBS build status still {prev_status} after {}s with no change",

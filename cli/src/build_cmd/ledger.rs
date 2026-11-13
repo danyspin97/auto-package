@@ -152,7 +152,7 @@ impl DepLedger<'_> {
                             )
                         },
                     );
-                    (self.pkg_reporter)(&dep_rpm).report(&Event::Warning {
+                    (self.pkg_reporter)(&dep_rpm).report(&Event::Progress {
                         step: None,
                         message: if step == RepeatStep::Instruct {
                             format!(

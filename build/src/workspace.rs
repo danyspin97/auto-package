@@ -95,7 +95,7 @@ fn await_disk_space_with(
         limit,
         free,
         |now| {
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step,
                 message: format!(
                     "waiting for disk space: {} free, need {}",
@@ -501,14 +501,14 @@ mod tests {
     struct Collect(std::sync::Mutex<Vec<String>>);
     impl Reporter for Collect {
         fn report(&self, event: &Event) {
-            if let Event::Warning { message, .. } = event {
+            if let Event::Progress { message, .. } = event {
                 self.0.lock().unwrap().push(message.clone());
             }
         }
     }
 
     #[test]
-    fn a_package_waits_with_warnings_then_fails_as_enospc() {
+    fn a_package_waits_with_progress_then_fails_as_enospc() {
         let rep = Collect(Default::default());
         let mut reads = 0;
         let r = await_disk_space_with(

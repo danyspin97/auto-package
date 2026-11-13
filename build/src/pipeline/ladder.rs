@@ -221,7 +221,7 @@ pub(super) fn resolve_blocked_with(
     } else {
         why.clone()
     };
-    reporter.report(&Event::Warning {
+    reporter.report(&Event::Progress {
         step: Some(site.step.id),
         message: format!(
             "{rpm_name}: a turn answered `blocked` ({}); that is not accepted: starting the \

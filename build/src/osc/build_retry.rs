@@ -72,7 +72,7 @@ pub(super) fn build_with_retriggers(
                     return Err(Error::NotActionable(BROKEN_MESSAGE.to_string()));
                 }
                 retriggers += 1;
-                emit.reporter.report(&Event::Warning {
+                emit.reporter.report(&Event::Progress {
                     step: emit.step,
                     message: format!(
                         "OBS says {pkg_name} is broken but has no build log to confirm it; \

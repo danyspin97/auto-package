@@ -261,13 +261,18 @@ pub(super) fn fix_after_build(
                     build_step.id,
                 ) =>
             {
-                let message = match flaky_retry(osc::local_build().is_some()) {
+                // The retry is routine. Only a rebuild that could not be asked for
+                // is a warning: the failures then cannot be told apart.
+                let (routine, message) = match flaky_retry(osc::local_build().is_some()) {
                     // Under `--local` the retry is the next round's local build:
                     // nothing is asked of OBS.
-                    FlakyRetry::LocalBuild => format!(
-                        "only {} test(s) failed: running one more local build of the same \
-                         sources to tell flaky tests from stable failures",
-                        ids.len()
+                    FlakyRetry::LocalBuild => (
+                        true,
+                        format!(
+                            "only {} test(s) failed: running one more local build of the same \
+                             sources to tell flaky tests from stable failures",
+                            ids.len()
+                        ),
                     ),
                     FlakyRetry::ObsRebuild => {
                         match osc::rebuild(
@@ -277,22 +282,30 @@ pub(super) fn fix_after_build(
                             &config.arch,
                             Emit::new(reporter, build_step.id),
                         ) {
-                            Ok(_) => format!(
-                                "only {} test(s) failed: asked OBS for one more build of the \
-                                 same sources to tell flaky tests from stable failures",
-                                ids.len()
+                            Ok(_) => (
+                                true,
+                                format!(
+                                    "only {} test(s) failed: asked OBS for one more build of the \
+                                     same sources to tell flaky tests from stable failures",
+                                    ids.len()
+                                ),
                             ),
-                            Err(e) => format!(
-                                "only {} test(s) failed; the rebuild that would tell whether \
-                                 they are flaky could not be requested: {e}",
-                                ids.len()
+                            Err(e) => (
+                                false,
+                                format!(
+                                    "only {} test(s) failed; the rebuild that would tell whether \
+                                     they are flaky could not be requested: {e}",
+                                    ids.len()
+                                ),
                             ),
                         }
                     }
                 };
-                reporter.report(&Event::Warning {
-                    step: Some(build_step.id),
-                    message,
+                let step = Some(build_step.id);
+                reporter.report(&if routine {
+                    Event::Progress { step, message }
+                } else {
+                    Event::Warning { step, message }
                 });
                 return Ok(RoundEnd::Retry);
             }
@@ -355,14 +368,19 @@ pub(super) fn fix_after_build(
                     &config.arch,
                     emit,
                 );
-                reporter.report(&Event::Warning {
-                    step: Some(build_step.id),
-                    message: match &started {
-                        Ok(true) => "the build log is identical to the last attempt's: asked OBS for a rebuild".to_string(),
-                        Ok(false) => "the build log is identical to the last attempt's: asked OBS for a rebuild, \
-                                      but it had not started after 90 s".to_string(),
-                        Err(e) => format!("the build log is identical to the last attempt's, and the rebuild request failed: {e}"),
-                    },
+                // Routine when OBS took the rebuild request; the other two are not.
+                let routine = matches!(started, Ok(true));
+                let message = match &started {
+                    Ok(true) => "the build log is identical to the last attempt's: asked OBS for a rebuild".to_string(),
+                    Ok(false) => "the build log is identical to the last attempt's: asked OBS for a rebuild, \
+                                  but it had not started after 90 s".to_string(),
+                    Err(e) => format!("the build log is identical to the last attempt's, and the rebuild request failed: {e}"),
+                };
+                let step = Some(build_step.id);
+                reporter.report(&if routine {
+                    Event::Progress { step, message }
+                } else {
+                    Event::Warning { step, message }
                 });
                 st.attempts += 1;
                 persist_attempts(ws, &config.run_id, st.attempts);
@@ -507,7 +525,7 @@ pub(super) fn fix_after_build(
         RoundVerdict::Refuse => {
             // The turn is put back as a whole: the spec and every file it touched.
             checkout_snapshot.restore(reporter, Some(build_step));
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: Some(build_step.id),
                 message: format!(
                     "{}: edit rolled back: a second diagnostic-only round in a row \

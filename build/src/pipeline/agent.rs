@@ -375,7 +375,7 @@ pub(super) fn agent_turn(
         if matches!(&result, Err(crate::agent::Error::Parse { message, .. })
             if message.contains("no usable turn response"))
         {
-            reporter.report(&Event::Warning {
+            reporter.report(&Event::Progress {
                 step: Some(step.id),
                 message: "the agent ended its turn without calling StructuredOutput; \
                           retrying once in a fresh session"
@@ -414,7 +414,7 @@ pub(super) fn agent_turn(
             {
                 rate_limit_retries += 1;
                 model_rotation.set(model_rotation.get() + 1);
-                reporter.report(&Event::Warning {
+                reporter.report(&Event::Progress {
                     step: Some(step.id),
                     message: format!(
                         "model API rate-limited (429) on {}; pausing, then retrying on {} ({rate_limit_retries}/{MAX_IMMEDIATE_RATE_LIMIT_RETRIES})",
@@ -518,7 +518,7 @@ pub(super) fn agent_turn(
         } else {
             String::new()
         };
-        reporter.report(&Event::Warning {
+        reporter.report(&Event::Progress {
             step: Some(step.id),
             message: format!(
                 "claude ended turn early ({}): {} — a StructuredOutput \

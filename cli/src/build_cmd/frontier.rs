@@ -173,7 +173,7 @@ impl Frontier<'_> {
                     // Another process is building this package, so nothing
                     // was tried here. It is deferred to a later round and
                     // does not count toward giving up.
-                    (self.pkg_reporter)(&rpm_name).report(&Event::Warning {
+                    (self.pkg_reporter)(&rpm_name).report(&Event::Progress {
                         step: None,
                         message: format!(
                             "{rpm_name} is being built by another process ({reason}); \
@@ -329,7 +329,7 @@ impl Frontier<'_> {
                         },
                     });
                 } else {
-                    (self.pkg_reporter)(&rpm_name).report(&Event::Warning {
+                    (self.pkg_reporter)(&rpm_name).report(&Event::Progress {
                         step: None,
                         message: if step == RepeatStep::Instruct {
                             format!(
