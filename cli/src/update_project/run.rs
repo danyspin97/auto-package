@@ -121,6 +121,7 @@ pub(super) fn run_on(
         &branch_project,
         &osc::choose_repository(&branch_project, a.distro.as_deref(), &a.arch).0,
         &a.arch,
+        a.dry_run,
     );
     let nvidia_choice = a
         .nvidia

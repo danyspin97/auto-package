@@ -206,7 +206,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                     .map_err(|e| color_eyre::eyre::eyre!(e))?,
             );
 
-            init_disk_guard(&project_dir, min_free_gb, &project, &distro, &arch);
+            init_disk_guard(&project_dir, min_free_gb, &project, &distro, &arch, false);
             let run_dir = RunDir::allocate(&project_dir)?;
             let work_dir = project_dir;
 
