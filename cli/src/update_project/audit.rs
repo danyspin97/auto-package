@@ -253,6 +253,7 @@ impl Audit {
                     audits.push(quality::PackageAudit {
                         pkg: pkg.to_string(),
                         findings,
+                        pre_pass: pre_pass_lines(&gate),
                     });
                     go_on
                 },
@@ -290,6 +291,19 @@ impl Audit {
 /// purpose (no spec, a maintainer's call).
 pub(super) fn nothing_found(candidates: usize, absent: usize) -> Option<bool> {
     (candidates == absent).then_some(absent > 0)
+}
+
+/// The pre-pass findings of a package as the report lists them: the tool's and
+/// the agent's, and each stop that is not already listed as an agent finding.
+fn pre_pass_lines(gate: &super::leftovers::PreGate) -> Vec<String> {
+    let mut lines: Vec<String> = gate.tool.iter().chain(&gate.agent).cloned().collect();
+    lines.extend(
+        gate.refusals
+            .iter()
+            .filter(|id| !gate.agent.iter().any(|l| l.starts_with(&format!("{id}: "))))
+            .cloned(),
+    );
+    lines
 }
 
 /// Whether any finding is one the pipeline can fix (not report-only).
@@ -556,6 +570,23 @@ mod tests {
             details(&new),
             ["a new slip", "the spec has no %check"],
             "a finding the origin lacks is new"
+        );
+    }
+
+    #[test]
+    fn the_pre_pass_lists_each_finding_once() {
+        let gate = PreGate {
+            tool: vec!["changes.dependency-bullet: x".to_string()],
+            agent: vec!["spec.style: y".to_string()],
+            refusals: vec!["spec.style".to_string(), "request.competing".to_string()],
+        };
+        assert_eq!(
+            pre_pass_lines(&gate),
+            [
+                "changes.dependency-bullet: x",
+                "spec.style: y",
+                "request.competing"
+            ]
         );
     }
 }

@@ -293,38 +293,8 @@ pub fn needs_pipeline(findings: &[Finding]) -> bool {
         .any(|f| !f.kind.is_mechanical() && !f.kind.is_report_only())
 }
 
-/// One package's findings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackageAudit {
-    pub pkg: String,
-    pub findings: Vec<Finding>,
-}
-
-/// The audit as text: a line per package with its findings, then totals.
-pub fn report_lines(audits: &[PackageAudit]) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut totals: BTreeMap<Kind, usize> = BTreeMap::new();
-    let mut clean = 0;
-    for a in audits {
-        if a.findings.is_empty() {
-            clean += 1;
-            continue;
-        }
-        out.push(a.pkg.clone());
-        for f in &a.findings {
-            *totals.entry(f.kind).or_default() += 1;
-            out.push(format!("  {}: {}", f.kind.label(), f.detail));
-        }
-    }
-    out.push(format!(
-        "{} package(s) checked, {clean} without findings",
-        audits.len()
-    ));
-    for (kind, n) in totals {
-        out.push(format!("  {}: {n}", kind.label()));
-    }
-    out
-}
+mod report;
+pub use report::*;
 
 #[cfg(test)]
 mod tests {
@@ -452,28 +422,6 @@ mod tests {
         };
         assert!(!needs_pipeline(std::slice::from_ref(&style)));
         assert!(needs_pipeline(&[style, warn]));
-    }
-
-    #[test]
-    fn the_report_lists_findings_and_totals() {
-        let audits = vec![
-            PackageAudit {
-                pkg: "a".into(),
-                findings: vec![Finding {
-                    kind: Kind::NoCheck,
-                    detail: "the spec has no %check".into(),
-                }],
-            },
-            PackageAudit {
-                pkg: "b".into(),
-                findings: vec![],
-            },
-        ];
-        let lines = report_lines(&audits);
-        assert_eq!(lines[0], "a");
-        assert_eq!(lines[1], "  no-check: the spec has no %check");
-        assert!(lines.contains(&"2 package(s) checked, 1 without findings".to_string()));
-        assert!(lines.contains(&"  no-check: 1".to_string()));
     }
 
     /// The VulkanMemoryAllocator spec of X11:Wayland as it is in the project.
