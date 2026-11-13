@@ -140,7 +140,7 @@ pub(super) fn proof_of(
                     .to_string(),
             ),
             _ => Err(
-                "quilt checked it, it does not `can be reverse-applied` on the new sources, \
+                "quilt checked it, it cannot be reverse-applied on the new sources, \
                  and its hunks are not all in the new tarball"
                     .to_string(),
             ),

@@ -97,7 +97,7 @@ fn the_refusal_text_states_why_no_proof_was_made() {
         kind: RemovalKind::Removed,
         security: false,
         renamed_to: None,
-        reason: "quilt checked it, it does not `can be reverse-applied`".into(),
+        reason: "quilt checked it, it cannot be reverse-applied".into(),
     }]);
     assert!(text.contains("quilt checked it"), "{text}");
     assert!(!text.contains("fails and is not upstream"), "{text}");
