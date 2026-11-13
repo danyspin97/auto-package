@@ -459,3 +459,34 @@ fn contributor_credits_and_pull_request_numbers_are_left_out() {
         "Fix CVE-2026-1234 in the parser (#7)"
     );
 }
+
+#[test]
+fn the_deprecated_3_0_1_recap_has_no_dangling_comma_or_housekeeping() {
+    // python-Deprecated 3.0.1: the CHANGELOG.md section as the package ships it.
+    let changelog = "## v3.0.1 (2026-10-30)\n\n\
+        Patch release: preserve the constructor signatures of deprecated classes\n\n\
+        ### Fixed\n\n\
+        - Preserve constructor signatures on deprecated classes, including in Sphinx autodoc,\n\
+        \x20 instead of displaying the warning wrapper's generic arguments ([#86](https://github.com/o/r/issues/86)).\n\
+        \x20 See PR #115 (Mirochill).\n\n\
+        ### Other\n\n\
+        - Bump the dev-dependencies group (Dependabot). See PR #114.\n\
+        - Add the social preview image of the repository and document its release steps. See PR #113.\n\n\
+        ## v3.0.0 (2026-09-26)\n";
+    let section = super::changelog::section_between(changelog, "3.0.0", "3.0.1").unwrap();
+    let got = recap(
+        Some(super::changelog::Section {
+            file: "CHANGELOG.md".into(),
+            text: section,
+        }),
+        &[],
+        never,
+    );
+    // Wrapped at the `.changes` width: the words, once joined, are the bullet.
+    let flat = got.join(" ");
+    let flat: Vec<&str> = flat.split_whitespace().collect();
+    assert_eq!(
+        flat.join(" "),
+        "* Preserve constructor signatures on deprecated classes, including in Sphinx autodoc, instead of displaying the warning wrapper's generic arguments."
+    );
+}
