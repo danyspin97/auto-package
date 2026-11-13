@@ -1,4 +1,4 @@
-use crate::pipeline::build_round::{review_baseline, review_wanted};
+use crate::pipeline::build_round::{post_review_scope, review_baseline, review_wanted};
 
 #[test]
 fn a_kept_recipe_is_diffed_against_the_spec_the_run_started_with() {
@@ -39,4 +39,17 @@ fn an_ordinary_review_needs_a_change_to_look_at() {
 fn an_empty_spec_is_never_reviewed() {
     assert!(!review_wanted(true, false, true));
     assert!(!review_wanted(true, true, false));
+}
+
+#[test]
+fn a_scoped_lint_review_is_told_to_change_only_its_own_diff() {
+    let note = post_review_scope(true);
+    assert!(note.contains("Change only the lines the Context diff"));
+    assert!(note.contains("inherited: leave it untouched"));
+}
+
+#[test]
+fn an_unscoped_lint_review_has_no_scope_note() {
+    // A fresh package, or `--fix`: the whole package is for the review to change.
+    assert_eq!(post_review_scope(false), "");
 }

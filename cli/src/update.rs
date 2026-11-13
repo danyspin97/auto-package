@@ -374,6 +374,7 @@ fn cmd_update(
             resolver: None,
             improve: None,
             lint: false,
+            scoped: false,
             from_version: None,
             upstream_tag: None,
             update: true,

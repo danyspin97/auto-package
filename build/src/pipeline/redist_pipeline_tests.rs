@@ -87,6 +87,7 @@ fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {
         request_text: None,
         branch_build: false,
         lint_review: false,
+        lint_scoped: false,
         run_id: "test".into(),
         source_urls: Default::default(),
         python_flavors: Default::default(),

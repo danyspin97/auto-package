@@ -201,6 +201,7 @@ pub(crate) fn cmd_build(
         request_text: typed,
         branch_build: branch.is_some(),
         lint_review: branch.is_some_and(|b| b.lint),
+        lint_scoped: branch.is_some_and(|b| b.scoped),
     };
 
     let mut config = config;

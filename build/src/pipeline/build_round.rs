@@ -302,6 +302,20 @@ pub(super) fn review_wanted(spec_empty: bool, diff_empty: bool, lint_review: boo
     !spec_empty && (!diff_empty || lint_review)
 }
 
+/// The scope note of a `lint` review of a package that carries unpublished
+/// work, without `--fix` (see `PipelineConfig::lint_scoped`); empty otherwise.
+pub(super) fn post_review_scope(scoped: bool) -> &'static str {
+    if scoped {
+        "Scope: this package carries unpublished work on its branch, and only that \
+         work is for this review to change. Change only the lines the Context diff \
+         shows, and what the build warnings point at within them. A problem the \
+         origin's spec also has is inherited: leave it untouched, it is reported and \
+         not fixed here.\n\n"
+    } else {
+        ""
+    }
+}
+
 /// One cheap clean-up turn on a spec that has just built, when the agent
 /// changed it on the way (a fix attempt or the pre-build review). `Some` is
 /// the round to run next: the turn edited the spec, so it is built again, and
@@ -363,11 +377,12 @@ fn post_build_review(ctx: &RunCtx, st: &mut RunState, build_log: &Path) -> Optio
         .rev()
         .collect();
     let context = format!(
-        "Changes the earlier turns made to the spec (`-` removed, `+` added), against the \
+        "{}Changes the earlier turns made to the spec (`-` removed, `+` added), against the \
          generated spec or, for a kept recipe, the spec the run started with; `(none)` when \
          nothing changed:\n{}\n\
          Warnings of the build (a capped extract; the log itself is not needed):\n{}\n\
          End of the attempt journal:\n{}",
+        post_review_scope(config.lint_scoped),
         crate::agent::fenced_data(&diff),
         crate::agent::fenced_data(if warnings.is_empty() {
             "(none)"

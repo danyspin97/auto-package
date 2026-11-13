@@ -178,6 +178,7 @@ pub(crate) fn config(pkg: &str, state_root: &Path) -> PipelineConfig {
         request_text: None,
         branch_build: false,
         lint_review: false,
+        lint_scoped: false,
         run_id: "test".into(),
         source_urls: Default::default(),
         python_flavors: Default::default(),

@@ -485,6 +485,7 @@ fn branch_build(update: bool, improve: Option<&str>) -> BranchBuild {
         resolver: None,
         improve: improve.map(str::to_string),
         lint: false,
+        scoped: false,
         from_version: None,
         upstream_tag: None,
         update,

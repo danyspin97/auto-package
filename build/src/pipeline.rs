@@ -139,6 +139,10 @@ pub struct PipelineConfig {
     /// one the run started with (a kept recipe has no generated spec), and runs
     /// even when that diff is empty.
     pub lint_review: bool,
+    /// Set for a `lint` review of a package that carries unpublished work
+    /// without `--fix`: the review's scope note says to change only what the
+    /// package's own diff shows (see `build_round::post_review_scope`).
+    pub lint_scoped: bool,
 }
 mod state;
 pub use state::*;

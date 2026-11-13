@@ -330,6 +330,24 @@ fn skipped(ctx: &Ctx<'_>, report: &mut Report, item: Item, why: String) {
     });
 }
 
+/// Whether a `lint` build reviews `item` as its own work only (see
+/// `BranchBuild::scoped`): the package carries unpublished work, and `--fix`
+/// is not given. The carry is read as the audit reads it.
+fn lint_scoped(a: &UpdateProjectArgs, branch: &str, item: &Item, ctx: &Ctx<'_>) -> bool {
+    a.improve
+        && !a.fix_inherited
+        && super::leftovers::carry(
+            &a.source,
+            branch,
+            &item.pkg,
+            a.in_place,
+            super::existing_lint::applies(a),
+            Some(&item.ecosystem),
+            Emit::run(ctx.reporter.as_ref()),
+        )
+        .is_some()
+}
+
 /// Build `item` in the branch project with the ordinary pipeline.
 fn build_item(
     a: &UpdateProjectArgs,
@@ -368,6 +386,7 @@ fn build_item(
             .map(|job| job.problem(&item.pkg, &item.new_version))
             .or_else(|| improve_problem(item)),
         lint: a.improve,
+        scoped: lint_scoped(a, branch, item, ctx),
         from_version: Some(item.from_version().to_string()),
         upstream_tag: item.upstream_tag.clone(),
         // A maintenance run (its code streams and backports) keeps its own
