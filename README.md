@@ -310,8 +310,25 @@ gets a bullet of its own after it, with its notes under it:
 A single release keeps the plain `- Update to <version>` form. Tools read the
 bullets of such an entry this way: the newest one is the version check and the
 one that needs notes, an older one is kept as it is, and a bullet for a newer
-release than the spec's goes. The recap generation does not write this form
-yet; a later change will.
+release than the spec's goes. A release with no notes gets no bullet and no
+placeholder.
+
+Within those limits, a recap over several releases lists at most 12 bullets per
+release and 40 in all, each bullet at most 100 characters, cut at a word
+boundary with `...`. Security-fix lines (`CVE-`, `bsc#`, `boo#`, `gh#`
+references) are never cut and never dropped. Breaking-looking bullets come
+first in their release, then security fixes, then the rest.
+
+When the notes are too many or too long for those limits (prose notes, or more
+bullets than fit), one model call condenses them per release, newest first,
+with breaking changes first and marked with the plain prefix `Breaking:`. The
+answer is used only when it names each release that has notes, in order, nothing
+else, lists only bullets within the limits, and keeps every security reference
+of the notes; otherwise, or when the model fails, the releases are shrunk. With
+`--no-agent` no model is called and the shrink is used: the newest release keeps
+its 12 lines, the older ones go to 6 bullets each, oldest first, and then to a
+single `see <release page or changelog file>` line each. A recap that fits the
+limits is never sent to the model.
 
 A package packaged for the first time gets the recap of its own version only
 when it is a Rust package built from a `tar_scm` service, today. Other new

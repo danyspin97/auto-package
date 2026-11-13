@@ -94,7 +94,8 @@ fn archive_in(dir: &std::path::Path, version: &str) -> Option<std::path::PathBuf
 /// `new` for the first time (`old` is `None`: then only what upstream says of
 /// `new` itself counts). The changelog file in the new source archive is read
 /// first; the notes of the releases on the forge of `repo_url` are the
-/// fallback. Empty lines when neither has notes: the recap then says nothing.
+/// fallback. Empty when neither has notes: the recap then says nothing. Over
+/// several releases the result is one group per release (see `per_release`).
 /// With `no_agent` long notes are not condensed by a model: the links or the
 /// changelog file are named instead.
 pub fn gather(
