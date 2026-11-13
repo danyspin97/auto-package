@@ -1,7 +1,7 @@
 //! Turning the notes of releases into the lines of a `.changes` recap: the
 //! bullets of the notes, cleaned, or the link-only form when they are too many.
 
-use super::caps::cut;
+use super::caps::{cut, is_security};
 use super::markdown::{is_rule, strip_comments, strip_emoji, strip_links};
 use super::routine::is_routine;
 use crate::sources::RepoRelease;
@@ -104,9 +104,118 @@ pub(super) fn bullets_of(body: &str) -> Vec<String> {
     }
     items
         .iter()
-        .map(|item| tidy(item))
+        .map(|item| {
+            let text = tidy(item);
+            strip_credits(&text, is_security(&text))
+        })
         .filter(|item| item.chars().any(char::is_alphanumeric))
         .collect()
+}
+
+/// `text` without the contributor credits (`by @user`, `(@user)`, `(#NN by
+/// Name)`, a `by Name` after a PR reference, `See PR #NN (Name).`) and, unless
+/// `keep_refs` (a security line, whose numbers name the fix), without the
+/// issue and pull request numbers. Its words are single-spaced.
+pub(super) fn strip_credits(text: &str, keep_refs: bool) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i];
+        let lower = w.to_ascii_lowercase();
+        // `by @user`, with the mark that ends a sentence kept.
+        if lower == "by" && words.get(i + 1).is_some_and(|n| n.starts_with('@')) {
+            push_trailing(&mut out, words[i + 1]);
+            i += 2;
+            continue;
+        }
+        if w.starts_with("(@") && w.contains(')') {
+            push_trailing(&mut out, w);
+            i += 1;
+            continue;
+        }
+        if !keep_refs && is_reference(w) {
+            // A group `(#NN by Name)` runs to its closing parenthesis.
+            let mut next = i + 1;
+            if w.starts_with('(') && !w.contains(')') {
+                while next < words.len() && !words[next].contains(')') {
+                    next += 1;
+                }
+                next += 1;
+            }
+            let pr = out.last().is_some_and(|l| {
+                let l = l.trim_start_matches('(').to_ascii_lowercase();
+                ["pr", "issue", "pull"].contains(&l.as_str())
+            });
+            if pr {
+                out.pop();
+                if out.last().is_some_and(|l| l.eq_ignore_ascii_case("see")) {
+                    out.pop();
+                }
+            }
+            push_trailing(&mut out, words[next.saturating_sub(1).min(words.len() - 1)]);
+            i = next.min(words.len());
+            // The `by Name` a reference is credited with, after it.
+            if words.get(i).is_some_and(|n| n.eq_ignore_ascii_case("by"))
+                && let Some(end) = name_run(&words[i + 1..])
+            {
+                i += 1 + end;
+                continue;
+            }
+            // The `(Name)` of `See PR #NN (Name).`.
+            if pr
+                && let Some(n) = words.get(i)
+                && n.starts_with('(')
+                && !n.contains('#')
+            {
+                push_trailing(&mut out, n);
+                i += 1;
+            }
+            continue;
+        }
+        out.push(w.to_string());
+        i += 1;
+    }
+    out.join(" ")
+}
+
+/// The number of the words at the start of `words` that name a person after a
+/// `by`: capitalised words, to the end of the bullet or a lowercase word. `None`
+/// when the first word is not capitalised.
+fn name_run(words: &[&str]) -> Option<usize> {
+    let run = words
+        .iter()
+        .take_while(|w| w.chars().next().is_some_and(char::is_uppercase))
+        .count();
+    (run > 0).then_some(run)
+}
+
+/// Whether `word` is an issue or pull request number (`#86`, `(#86)`, `(#86).`).
+fn is_reference(word: &str) -> bool {
+    let core = word
+        .trim_start_matches('(')
+        .trim_end_matches(|c: char| ")., ;:".contains(c));
+    core.strip_prefix('#')
+        .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Appends the sentence marks at the end of `word` to the last word of `out`,
+/// unless that word has them already.
+fn push_trailing(out: &mut [String], word: &str) {
+    let marks: String = word
+        .chars()
+        .rev()
+        .take_while(|c| ".,;:".contains(*c))
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if let Some(last) = out.last_mut()
+        && !marks.is_empty()
+        && !last.ends_with(marks.chars().next().unwrap_or(' '))
+    {
+        last.push_str(&marks);
+    }
 }
 
 /// One bullet's text without markdown links, emphasis and code ticks, and

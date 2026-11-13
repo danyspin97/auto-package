@@ -420,5 +420,42 @@ fn a_wrapped_bullet_is_one_bullet_with_its_lines_joined() {
         ),
         "{got:?}"
     );
-    assert!(got[0].ends_with("See PR #115 (Mirochill)."), "{got:?}");
+    assert!(
+        got[0].ends_with("generic arguments."),
+        "the PR reference and its credit are left out: {got:?}"
+    );
+    assert_eq!(got[1], "Bump the dev-dependencies group (Dependabot).");
+}
+
+#[test]
+fn contributor_credits_and_pull_request_numbers_are_left_out() {
+    use super::render::strip_credits;
+    assert_eq!(
+        strip_credits(
+            "Preserve constructor signatures, including in Sphinx autodoc, instead of showing the wrapper's arguments (#86). See PR #115 (Mirochill).",
+            false
+        ),
+        "Preserve constructor signatures, including in Sphinx autodoc, instead of showing the wrapper's arguments."
+    );
+    assert_eq!(
+        strip_credits("Don't raise an exception (#243) by Nathan Olson", false),
+        "Don't raise an exception"
+    );
+    assert_eq!(
+        strip_credits("Add a cache (#240 by Martins Bruvelis)", false),
+        "Add a cache"
+    );
+    assert_eq!(
+        strip_credits("Fix the parser by @bob", false),
+        "Fix the parser"
+    );
+    assert_eq!(
+        strip_credits("Fix the parser (@bob)", true),
+        "Fix the parser"
+    );
+    // A security line keeps its numbers.
+    assert_eq!(
+        strip_credits("Fix CVE-2026-1234 in the parser (#7) by @bob", true),
+        "Fix CVE-2026-1234 in the parser (#7)"
+    );
 }
