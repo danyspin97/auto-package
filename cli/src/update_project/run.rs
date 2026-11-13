@@ -213,6 +213,7 @@ pub(super) fn run_on(
                 allow_arch: a.allow_arch_failures,
                 include_ports: super::arch::gate_counts_ports(&a),
                 arch_checked: arch_checked.clone(),
+                ready: ready::check_for(&a),
                 arch_deadline: ctx.arch_deadline.clone(),
                 untied_wait: Default::default(),
                 reporter: reporter.clone(),

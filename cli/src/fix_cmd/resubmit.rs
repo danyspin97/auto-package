@@ -19,7 +19,9 @@ use super::FixArgs;
 use super::findings::*;
 use super::plan::*;
 use super::request::exit;
-use crate::update_project::{ArchWait, confirm_with, prepare_request, review_gate, yes_refusal};
+use crate::update_project::{
+    ArchWait, ReadyCheck, confirm_with, prepare_request, review_gate, yes_refusal,
+};
 
 /// What the submit step needs from the run.
 pub(super) struct SubmitCtx<'a> {
@@ -114,6 +116,8 @@ pub(super) fn submit(a: &FixArgs, c: SubmitCtx<'_>) -> color_eyre::Result<()> {
         ArchWait::Until(&wait),
         c.sink,
         Some(c.id),
+        // A fix run's request is not judged by the ready gate (that is lint's).
+        ReadyCheck::Skip,
     ) {
         Ok(sr) => sr,
         Err(SrOutcome::Failed(why)) => return Err(eyre!("{why}")),

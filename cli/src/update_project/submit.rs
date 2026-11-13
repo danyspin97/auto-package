@@ -19,6 +19,8 @@ pub(super) struct SubmitBackend {
     pub(super) include_ports: bool,
     /// The packages whose other-architecture check ran (see [`ArchChecked`]).
     pub(super) arch_checked: ArchChecked,
+    /// Whether the ready gate judges a request (see `ready::ReadyCheck`).
+    pub(super) ready: ready::ReadyCheck,
     /// The run's other-architecture deadline (see `ArchDeadline`).
     pub(super) arch_deadline: Arc<ArchDeadline>,
     /// The one bounded wait of the submits made before any build of the run
@@ -83,6 +85,7 @@ impl SubmitBackend {
             arch_wait,
             self.reporter.as_ref(),
             None,
+            self.ready,
         ) {
             Ok(sr) => Ok((item, sr)),
             Err(outcome) => Err(submit_failure(outcome)),
@@ -233,6 +236,7 @@ pub(super) fn submit_requests(
             },
             ctx.reporter.as_ref(),
             None,
+            ready::check_for(a),
         ) {
             Ok(sr) => pending.push((idx, sr)),
             Err(sr) => r.sr = sr,

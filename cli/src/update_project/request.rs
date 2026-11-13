@@ -16,7 +16,8 @@ pub(crate) enum ArchWait<'a> {
 /// reason it may not be made comes back as the `SrOutcome` to record. Shared by
 /// `--submit` and the TUI's submit keys, so both ask exactly the same.
 /// `superseding` is the open request a new one replaces (see
-/// [`first_open_request`]); `None` for every other caller.
+/// [`first_open_request`]); `None` for every other caller. `ready_check` is
+/// whether the ready gate judges the package first (see `ready::submit_gate`).
 pub(crate) fn prepare_request(
     branch: &str,
     distro: Option<&str>,
@@ -29,6 +30,7 @@ pub(crate) fn prepare_request(
     arch_wait: ArchWait<'_>,
     reporter: &(dyn Reporter + Send + Sync),
     superseding: Option<&str>,
+    ready_check: ready::ReadyCheck,
 ) -> Result<osc::SubmitRequest, SrOutcome> {
     let emit = Emit::run(reporter);
     let say = |m: String| {
@@ -197,6 +199,21 @@ pub(crate) fn prepare_request(
             return Err(SrOutcome::Failed(format!(
                 "could not check for an open request: {e}"
             )));
+        }
+    }
+    // The ready gate: a package that is not ready is not requested, and the
+    // others go ahead (the caller decides for each package).
+    if let (ready::ReadyCheck::Gate { agent }, Some(rev)) = (ready_check, source_rev.as_deref()) {
+        match ready::submit_gate(state_root, branch, item, rev, agent, reporter) {
+            ready::GateOutcome::Ready => {}
+            ready::GateOutcome::NotReady(why) => {
+                say(format!("no request for {}: {why}", item.pkg));
+                return Err(SrOutcome::NotEligible(why));
+            }
+            ready::GateOutcome::Failed(why) => {
+                warn(format!("no request for {}: {why}", item.pkg));
+                return Err(SrOutcome::Failed(why));
+            }
         }
     }
     // The dependency updates it requires are named by their open request.
