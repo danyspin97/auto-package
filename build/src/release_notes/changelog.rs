@@ -7,34 +7,35 @@ use std::path::Path;
 use super::markdown::strip_links;
 use crate::version;
 
-/// The changelog file names looked for at the top of the source tree, in the
-/// order they are preferred.
-const NAMES: &[&str] = &[
-    "NEWS",
-    "NEWS.md",
-    "NEWS.txt",
-    "NEWS.rst",
-    "CHANGELOG",
-    "CHANGELOG.md",
-    "CHANGELOG.txt",
-    "CHANGELOG.rst",
-    "changelog.md",
-    "ChangeLog",
-    "Changelog.md",
-    "CHANGES",
-    "CHANGES.md",
-    "CHANGES.txt",
-    "CHANGES.rst",
-    "HISTORY",
-    "HISTORY.md",
-    "HISTORY.rst",
-    "RELEASES.md",
-    "RELEASE_NOTES.md",
+/// The stems of a changelog file name, in the order they are preferred, and
+/// the extensions one may carry (`NEWS`, `ChangeLog.rst`, `changelog.md`).
+const STEMS: &[&str] = &[
+    "news",
+    "changelog",
+    "changes",
+    "history",
+    "releases",
+    "release_notes",
+    "release-notes",
 ];
+const EXTENSIONS: &[&str] = &["", ".md", ".markdown", ".txt", ".rst"];
 /// A changelog bigger than this is not read.
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// The section kept is cut to this many characters.
 const MAX_SECTION_CHARS: usize = 20_000;
+
+/// The rank of `name` among the changelog file names (a lower rank is
+/// preferred), `None` when it is not one. The case of the name does not count:
+/// `ChangeLog.rst` (the exif-py sources) is one, as `CHANGES.rst` is.
+fn changelog_rank(name: &str) -> Option<usize> {
+    let lower = name.to_ascii_lowercase();
+    STEMS.iter().enumerate().find_map(|(s, stem)| {
+        EXTENSIONS
+            .iter()
+            .position(|ext| lower == format!("{stem}{ext}"))
+            .map(|e| s * EXTENSIONS.len() + e)
+    })
+}
 
 /// The part of a changelog between two versions, with the file it came from.
 #[derive(Debug, PartialEq, Eq)]
@@ -56,7 +57,7 @@ pub(super) fn section_of_archive(archive: &Path, old: &str, new: &str) -> Option
         let parts: Vec<_> = p.components().collect();
         let part = |i: usize| parts[i].as_os_str().to_string_lossy().into_owned();
         (2..=4).contains(&parts.len())
-            && NAMES.contains(&part(parts.len() - 1).as_str())
+            && changelog_rank(&part(parts.len() - 1)).is_some()
             && (parts.len() == 2
                 || ["docs", "doc"].contains(&part(parts.len() - 2).to_lowercase().as_str()))
     })
@@ -72,18 +73,24 @@ pub(super) fn section_of_archive(archive: &Path, old: &str, new: &str) -> Option
         }
     }
     dirs.iter().find_map(|dir| {
-        NAMES.iter().find_map(|name| {
-            let path = dir.join(name);
+        let mut names: Vec<(usize, String)> = std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                changelog_rank(&name).map(|rank| (rank, name))
+            })
+            .collect();
+        names.sort();
+        names.into_iter().find_map(|(_, name)| {
+            let path = dir.join(&name);
             let meta = std::fs::symlink_metadata(&path).ok()?;
             if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
                 return None;
             }
             let bytes = std::fs::read(&path).ok()?;
             let text = String::from_utf8_lossy(&bytes);
-            section_between(&text, old, new).map(|text| Section {
-                file: (*name).to_string(),
-                text,
-            })
+            section_between(&text, old, new).map(|text| Section { file: name, text })
         })
     })
 }

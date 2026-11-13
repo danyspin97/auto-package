@@ -352,3 +352,53 @@ fn the_routine_bullets_do_not_count_toward_the_limit() {
     let got = recap(None, &[rel("v2", &body)], never);
     assert_eq!(got.len(), 9);
 }
+
+/// The top of the exif-py `ChangeLog.rst` (3.5.1 to 3.4.0), copied as it ships.
+const EXIF_CHANGELOG: &str = "3.5.1 — 2025-08-23
+    * Don't raise exception from decode_maker_note() if strict==False (#243) by Nathan Olson
+
+3.5.0 — 2025-08-23
+    * Add support for JPEG XL (#242) by Nathan Olson
+    * Add Image SubIFDs decoding and Nikon Z 9 sample (#240) by Martins Bruvelis
+    * Make it easier to add new file types to testing
+
+3.4.0 — 2025-08-04
+    * better typing of serialize module, varius code cleanup
+    * fix for invalid slice length (#235)
+    * Add tests and document usage of truncate_tags (#232)
+    * Add support for files with signature \"ftypavif\" or \"ftypmif1\" (#237) by Markus Vogt
+    * Add basic makernote tags for Sony (#236)
+
+3.3.2 — 2025-07-17
+    * Fix for import error (#230)
+";
+
+#[test]
+fn a_changelog_named_in_any_case_is_read_from_an_archive() {
+    use super::changelog::{releases_of_section, section_between, section_of_archive};
+    let text = section_between(EXIF_CHANGELOG, "3.3.2", "3.5.1").unwrap();
+    let versions: Vec<_> = releases_of_section(&text, "3.3.2", "3.5.1")
+        .into_iter()
+        .map(|(v, _)| v)
+        .collect();
+    assert_eq!(versions, ["3.5.1", "3.5.0", "3.4.0"]);
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("exifread-3.5.1");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("ChangeLog.rst"), EXIF_CHANGELOG).unwrap();
+    std::fs::write(src.join("exifread.py"), "print('not read')\n").unwrap();
+    let archive = dir.path().join("exifread-3.5.1.tar.gz");
+    let status = std::process::Command::new("tar")
+        .arg("czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(dir.path())
+        .arg("exifread-3.5.1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let got = section_of_archive(&archive, "3.3.2", "3.5.1").unwrap();
+    assert_eq!(got.file, "ChangeLog.rst");
+    assert!(got.text.contains("Add support for JPEG XL"));
+    assert!(!got.text.contains("3.3.2"));
+}
