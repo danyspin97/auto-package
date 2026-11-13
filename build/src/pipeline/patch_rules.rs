@@ -66,19 +66,15 @@ pub(super) fn patch_key(raw: &str, name: &str) -> String {
 }
 
 /// The `Patch` declarations of `spec`: `(line index, value as written, file name)`.
-/// The file name of a URL is its last path segment, and the spec's macros are expanded.
+/// The file name is the one rpm and OBS give it: the `#/<file>` fragment of a URL,
+/// else its last path segment; the spec's macros are expanded.
 pub(crate) fn declared_patches(spec: &str) -> Vec<(usize, String, String)> {
     spec.lines()
         .enumerate()
         .filter_map(|(index, line)| {
             let patch = crate::spec::parse_source_line(line, &["patch"], str::to_string)?;
-            let raw = patch.url.trim().to_string();
-            let name = if is_web_address(&raw) {
-                let path = raw.split(['?', '#']).next().unwrap_or("");
-                path.rsplit('/').next().unwrap_or("").to_string()
-            } else {
-                expand_patch_macros(&raw, spec)
-            };
+            let raw = patch.value.trim().to_string();
+            let name = expand_patch_macros(&raw, spec);
             Some((index, raw, name))
         })
         .collect()

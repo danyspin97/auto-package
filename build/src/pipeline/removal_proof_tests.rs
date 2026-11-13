@@ -373,3 +373,28 @@ fn a_patch_whose_every_file_is_gone_from_the_archive_is_proven() {
     // Without the archive nothing is judged.
     assert!(proof_of(&fails, None, Some(gone), 1, "p.patch").is_err());
 }
+
+#[test]
+fn a_patch_renamed_by_a_fragment_is_judged_by_the_renamed_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let checkout = dir.path();
+    let spec = "Name: easydev\nVersion: 0.12\nPatch:  https://github.com/cokelaer/easydev/commit/8cf50c9177936e771e158ea9b249b4aa5e2cc1ee.patch#/fix-version.patch\n%prep\n%autosetup -p1\n";
+    std::fs::write(checkout.join("fix-version.patch"), "--- a/x\n+++ b/x\n").unwrap();
+    let files = super::removal_proof::patch_files_of(checkout, spec, None);
+    assert_eq!(files.keys().collect::<Vec<_>>(), vec!["fix-version.patch"]);
+    assert!(files["fix-version.patch"].is_some());
+    assert_eq!(
+        crate::patch_check::declared_patches(spec)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect::<Vec<_>>(),
+        vec!["fix-version.patch"]
+    );
+    assert_eq!(
+        crate::pipeline::declared_patches(spec)
+            .into_iter()
+            .map(|(_, _, n)| n)
+            .collect::<Vec<_>>(),
+        vec!["fix-version.patch"]
+    );
+}

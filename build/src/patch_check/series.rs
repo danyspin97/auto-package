@@ -179,7 +179,7 @@ pub enum Refresh {
 pub(super) fn patch_lines(spec: &str) -> Vec<(String, String)> {
     spec.lines()
         .filter_map(|l| crate::spec::parse_source_line(l, &["patch"], str::to_string))
-        .map(|patch| (patch.index.to_string(), patch.url.trim().to_string()))
+        .map(|patch| (patch.index.to_string(), patch.value.trim().to_string()))
         .collect()
 }
 

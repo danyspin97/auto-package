@@ -86,7 +86,7 @@ pub(super) fn proof_tarball(checkout_dir: &Path, version: &str) -> Option<PathBu
 
 /// The patch files of `spec` as the gate reads them: by name, the content as the
 /// snapshot kept it, else on disk.
-fn patch_files_of(
+pub(super) fn patch_files_of(
     checkout_dir: &Path,
     before: &str,
     snapshot: Option<&CheckoutSnapshot>,
