@@ -64,7 +64,7 @@ pub fn resolve_project_dir(
         .map_err(|e| format!("cannot read {}: {e}", work_dir.display()))?
         .flatten()
         .map(|e| e.path())
-        .filter(|d| d.join("state").join(package).is_dir())
+        .filter(|d| names_match(package, &entry_names(&d.join("state"))))
         .collect();
     known.sort();
     match known.len() {
@@ -101,7 +101,12 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
         project_dir: dir.display().to_string(),
         ..Default::default()
     };
-    let state = read_json(&dir.join("state").join(pkg).join("state.json"));
+    // The directories are read by the spelling they have: `state/<dir>` may
+    // differ from `pkg` in case or separators (see names.rs).
+    let state_names = entry_names(&dir.join("state"));
+    let state_dir = spelling(pkg, &state_names)?;
+    let state_dir_name = state_dir.clone().unwrap_or_else(|| pkg.to_string());
+    let state = read_json(&dir.join("state").join(&state_dir_name).join("state.json"));
     let runs = runs_touching(dir, pkg);
     let chosen = match q.run {
         Some(r) => {
@@ -122,18 +127,26 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
         .cloned()
         .collect();
     ex.run = chosen.clone();
-    let obs_name = state
-        .as_ref()
-        .and_then(|s| s["obs_name"].as_str())
-        .unwrap_or(pkg)
-        .to_string();
+    let (mut records, tries_unreadable) = chosen
+        .as_deref()
+        .map(|r| run_records(dir, r))
+        .unwrap_or_default();
+    let obs_name = canonical_name(pkg, state.as_ref(), &records);
+    canonicalise(&mut records, pkg, &obs_name);
     if state.is_none() && chosen.is_none() {
         return Err(format!(
             "nothing about {pkg} in {} (no state/{pkg} and no run touched it)",
             dir.display()
         ));
     }
-    let run_pkg_dir = chosen.as_ref().map(|r| dir.join("runs").join(r).join(pkg));
+    let run_names = chosen
+        .as_ref()
+        .map(|r| entry_names(&dir.join("runs").join(r)))
+        .unwrap_or_default();
+    let run_pkg_name = spelling(pkg, &run_names)?.unwrap_or_else(|| pkg.to_string());
+    let run_pkg_dir = chosen
+        .as_ref()
+        .map(|r| dir.join("runs").join(r).join(&run_pkg_name));
     let mut p = Parsed::default();
     if let Some(r) = &chosen {
         p = parse_run(&dir.join("runs").join(r).join("run.jsonl"), pkg);
@@ -160,7 +173,7 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
         state.as_ref(),
         dir,
         &obs_name,
-        pkg,
+        &state_dir_name,
         run_pkg_dir.as_deref(),
     );
     // A built package that fails on another arch says so where its result is.
@@ -170,7 +183,13 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
     {
         ex.outcome.result = badge;
     }
-    ex.flaky = flaky_lines(&p, &q.package_notes, dir, pkg, chosen.as_deref());
+    ex.flaky = flaky_lines(
+        &p,
+        &q.package_notes,
+        dir,
+        &state_dir_name,
+        chosen.as_deref(),
+    );
     ex.ladder = Ladder {
         max_round: p.attempts.iter().filter_map(|a| a.round).max(),
         reason: state
@@ -199,7 +218,8 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
     ex.progress = progress(&p);
     ex.skipped = p.skipped.clone();
     let run_notes =
-        std::fs::read_to_string(dir.join("state").join(pkg).join("notes.md")).unwrap_or_default();
+        std::fs::read_to_string(dir.join("state").join(&state_dir_name).join("notes.md"))
+            .unwrap_or_default();
     ex.notes = Notes {
         run_note_headings: run_notes
             .lines()
@@ -208,13 +228,16 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
             .collect(),
         package_notes: q.package_notes.clone(),
     };
-    let (records, tries_unreadable) = chosen
-        .as_deref()
-        .map(|r| run_records(dir, r))
-        .unwrap_or_default();
-    ex.tries = per_package(&records).into_iter().find(|t| t.pkg == pkg);
+    ex.obs_name = obs_name.clone();
+    ex.tries = per_package(&records)
+        .into_iter()
+        .find(|t| t.pkg == obs_name);
     ex.attempts = p.attempts;
     ex.unknown = unknowns(&ex, state.is_some());
+    ex.unknown
+        .extend(case_copies("state", pkg, &state_names, &state_dir_name));
+    ex.unknown
+        .extend(case_copies("the run", pkg, &run_names, &run_pkg_name));
     if tries_unreadable > 0 {
         ex.unknown.push(format!(
             "{tries_unreadable} line(s) of run.jsonl named a build or package event that could not be read: the tries may be short."
@@ -267,13 +290,13 @@ pub(super) fn list_runs(dir: &Path) -> Vec<String> {
 
 /// Runs that touched the package, newest first (run ids start with the time).
 pub(super) fn runs_touching(dir: &Path, pkg: &str) -> Vec<String> {
-    let needle = format!("\"pkg\":\"{pkg}\"");
     let mut out: Vec<String> = list_runs(dir)
         .into_iter()
         .filter(|r| {
             let run = dir.join("runs").join(r);
-            run.join(pkg).is_dir()
-                || std::fs::read_to_string(run.join("run.jsonl")).is_ok_and(|t| t.contains(&needle))
+            names_match(pkg, &entry_names(&run))
+                || std::fs::read_to_string(run.join("run.jsonl"))
+                    .is_ok_and(|t| t.lines().any(|l| names_package(l, pkg)))
         })
         .collect();
     out.reverse();

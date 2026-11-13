@@ -143,6 +143,9 @@ pub fn render(ex: &Explanation, width: usize) -> Vec<Line> {
         span("Package ", Kind::Label),
         span(head, Kind::Heading),
     ]);
+    if ex.obs_name != ex.package {
+        o.kv("OBS name", Kind::Dim, &ex.obs_name);
+    }
     o.kv("work dir", Kind::Dim, &ex.project_dir);
     match &ex.run {
         Some(r) => {

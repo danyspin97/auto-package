@@ -1,18 +1,18 @@
 use super::*;
+use crate::osc::project_key;
 
 pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
     let mut p = Parsed::default();
     let Ok(text) = std::fs::read_to_string(path) else {
         return p;
     };
-    let needle = format!("\"pkg\":\"{pkg}\"");
     let mut agent_turns = 0;
     for line in text.lines() {
         let run_level = line.starts_with("{\"event\":\"run_started\"")
             || line.starts_with("{\"event\":\"run_finished\"")
             || line.starts_with("{\"event\":\"host_allowed\"");
         let arch_check = line.starts_with("{\"event\":\"arch_check\"");
-        if !run_level && !arch_check && !line.contains(&needle) {
+        if !run_level && !arch_check && !may_name_package(line, pkg) {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -20,8 +20,9 @@ pub(super) fn parse_run(path: &Path, pkg: &str) -> Parsed {
             continue;
         };
         // `arch_check` names its package in `package`, the others in `pkg`.
+        // The owner is the package up to case and separators (`--only`'s rule).
         let owner = v["pkg"].as_str().or(v["package"].as_str());
-        if !run_level && owner != Some(pkg) {
+        if !run_level && !owner.is_some_and(|o| project_key(o) == project_key(pkg)) {
             continue;
         }
         let step = v["step"].as_u64();

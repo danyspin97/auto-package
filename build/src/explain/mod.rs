@@ -24,6 +24,9 @@ mod humanise;
 mod humanise_tests;
 mod logs;
 mod model;
+mod names;
+#[cfg(test)]
+mod names_tests;
 mod parse;
 mod progress_section;
 mod render;
@@ -37,6 +40,8 @@ mod tries_view;
 pub use collect::*;
 use logs::*;
 pub use model::*;
+pub use names::package_notes_name;
+use names::*;
 use parse::*;
 pub use render::*;
 pub use tries::*;

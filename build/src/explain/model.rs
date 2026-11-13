@@ -18,7 +18,11 @@ pub(super) const PROGRESS_LINES: usize = 40;
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 pub struct Explanation {
+    /// The package as the caller named it.
     pub package: String,
+    /// The name OBS lists the package under, as the state or the run's events
+    /// carry it (`package` when neither says).
+    pub obs_name: String,
     pub project_dir: String,
     /// The run the report is about (`None`: no run touched the package).
     pub run: Option<String>,

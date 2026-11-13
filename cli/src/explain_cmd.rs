@@ -131,9 +131,14 @@ fn explain_command(
         // Says which directory was read: after `update` it is the branch's.
         ap_core::sink::eprint_coloured(&format!("note: reading {}", dir.display()));
     }
-    ap_build::package_notes::set_notes_dir(std::path::absolute(notes_dir)?);
-    let package_notes = ap_build::package_notes::path_for(name)
-        .map(|_| ap_build::package_notes::read(name))
+    let notes_dir = std::path::absolute(notes_dir)?;
+    ap_build::package_notes::set_notes_dir(notes_dir.clone());
+    // The notes file is named by the package's spelling, which may differ in
+    // case or separators from the name given (`python-genshi.md`).
+    let package_notes = ap_build::explain::package_notes_name(&notes_dir, name)
+        .map_err(err)?
+        .filter(|n| ap_build::package_notes::path_for(n).is_some())
+        .map(|n| ap_build::package_notes::read(&n))
         .unwrap_or_default();
     let ex = ap_build::explain::explain(&ap_build::explain::Query {
         project_dir: &dir,
