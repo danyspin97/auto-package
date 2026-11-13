@@ -9,15 +9,15 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use ap_build::bugfix::{FindingRoute, FindingsJob, FixTask, ReviewFinding, route};
-use ap_build::obs_status::ResultEntry;
-use ap_build::osc::{self, DiffSpec, OpenRequest};
+use ap_build::osc;
 use ap_build::proc::Emit;
-use ap_build::request_review::fetch::{LiveRequestObs, ReadFailure, RequestObs};
+use ap_build::request_review::fetch::{LiveRequestObs, RequestObs};
 use ap_build::request_review::gather::{Inputs, gather};
 use ap_build::request_review::render::{render_json, render_text};
 use ap_build::request_review::request::{ActionSource, ActionTarget};
 use ap_build::request_review::run::{Deps, Options, Reviewed, review};
 use ap_build::request_review::save::{review_dir, save};
+use ap_build::request_review::synthetic::{Pinned, pinned_xml};
 use ap_build::request_review::upstream_check::{live_plan, live_repology};
 use ap_build::workspace::Workspace;
 use ap_core::sink::{HumanSink, LogLevel};
@@ -181,83 +181,6 @@ fn run_checks(
         build: env!("AP_BUILD_REVISION"),
     };
     review(obs, &options, &deps).map_err(|e| e.to_string())
-}
-
-/// The request as it is after the fix: the same request with its source
-/// pinned to `rev`. Every other read is the live one.
-struct Pinned<'a> {
-    live: &'a dyn RequestObs,
-    xml: String,
-}
-
-impl RequestObs for Pinned<'_> {
-    fn request(&self, _id: &str) -> Result<String, ReadFailure> {
-        Ok(self.xml.clone())
-    }
-    fn listing(
-        &self,
-        project: &str,
-        pkg: &str,
-        rev: Option<&str>,
-    ) -> Result<Option<ap_build::osc::Listing>, ReadFailure> {
-        self.live.listing(project, pkg, rev)
-    }
-    fn file(
-        &self,
-        project: &str,
-        pkg: &str,
-        file: &str,
-        rev: Option<&str>,
-    ) -> Result<String, ReadFailure> {
-        self.live.file(project, pkg, file, rev)
-    }
-    fn download(
-        &self,
-        project: &str,
-        pkg: &str,
-        file: &str,
-        rev: &str,
-        into: &Path,
-    ) -> Result<PathBuf, ReadFailure> {
-        self.live.download(project, pkg, file, rev, into)
-    }
-    fn diff(&self, spec: &DiffSpec<'_>) -> Result<String, ReadFailure> {
-        self.live.diff(spec)
-    }
-    fn results(&self, project: &str, pkg: &str) -> Result<Option<Vec<ResultEntry>>, String> {
-        self.live.results(project, pkg)
-    }
-    fn open_requests_to(&self, project: &str, pkg: &str) -> Result<Vec<OpenRequest>, ReadFailure> {
-        self.live.open_requests_to(project, pkg)
-    }
-    fn current_srcmd5(&self, project: &str, pkg: &str) -> Result<String, ReadFailure> {
-        self.live.current_srcmd5(project, pkg)
-    }
-}
-
-/// A request document with one submit action from `source` (pinned to `rev`)
-/// to `target`, in the state and by the creator of `doc`.
-pub(super) fn pinned_xml(
-    doc: &ap_build::request_review::request::RequestDoc,
-    source: &ActionSource,
-    target: &ActionTarget,
-    rev: &str,
-) -> String {
-    use ap_build::obs_xml::escape;
-    format!(
-        "<request id=\"{}\" creator=\"{}\"><action type=\"submit\"><source project=\"{}\" package=\"{}\" rev=\"{}\"/><target project=\"{}\" package=\"{}\"/></action><state name=\"{}\" who=\"{}\" when=\"{}\" created=\"{}\"/></request>",
-        escape(&doc.id),
-        escape(&doc.creator),
-        escape(&source.project),
-        escape(&source.package),
-        escape(rev),
-        escape(&target.project),
-        escape(&target.package),
-        escape(&doc.state.name),
-        escape(&doc.state.who),
-        escape(&doc.state.when),
-        escape(&doc.state.created),
-    )
 }
 
 /// A run id that is unique enough for one fix: the clock and the process.

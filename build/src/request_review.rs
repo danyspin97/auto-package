@@ -46,6 +46,7 @@ pub mod source_checks;
 #[cfg(test)]
 mod source_checks_tests;
 pub mod spec_checks;
+pub mod synthetic;
 pub mod upstream_check;
 #[cfg(test)]
 mod upstream_check_tests;

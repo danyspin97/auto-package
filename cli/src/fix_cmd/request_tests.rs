@@ -143,7 +143,7 @@ fn a_request_by_someone_else_is_refused_even_from_the_users_branch() {
 fn a_pinned_request_keeps_markup_in_its_values_as_text() {
     use ap_build::request_review::request::{ActionSource, ActionTarget};
 
-    use super::request::pinned_xml;
+    use ap_build::request_review::synthetic::pinned_xml;
     let mut doc = parse_request(&request_xml(
         "review",
         "submit",
