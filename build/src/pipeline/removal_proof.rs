@@ -134,6 +134,19 @@ pub(super) fn proof_of(
             {
                 Ok(DropProof::TargetsAbsent)
             }
+            // A patch whose hunks are partly applied and partly on gone files:
+            // each hunk is judged alone, and a gone file counts only off a
+            // security patch.
+            (Some(t), Some(d))
+                if crate::patch_check::every_hunk_dead_in_tarball(
+                    t,
+                    d,
+                    level,
+                    !is_security_patch(name, d),
+                ) =>
+            {
+                Ok(DropProof::Mixed)
+            }
             _ if output.contains(REVERSE_APPLIED) => Err(
                 "quilt says it `can be reverse-applied` only with fuzz, and not every hunk \
                  is in the new tarball with its added and removed lines"

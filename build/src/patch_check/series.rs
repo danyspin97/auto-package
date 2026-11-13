@@ -317,6 +317,10 @@ pub enum DropProof {
     /// project still needs the patch (say, for another Python version) is not
     /// judged.
     TargetsAbsent,
+    /// Every hunk is dead in the new tarball: each one's change is in it, or
+    /// its files are gone from it (never for a security patch). A patch may
+    /// mix the two, with some hunks applied and others on files that are gone.
+    Mixed,
 }
 
 /// The `.changes` bullet for a patch removed because its change is already
@@ -329,6 +333,9 @@ pub fn proven_drop_bullet(name: &str, proof: DropProof) -> String {
         }
         DropProof::TargetsAbsent => {
             format!("Drop {name}: the file it patches is gone from the new tarball")
+        }
+        DropProof::Mixed => {
+            format!("Drop {name}: already applied upstream or its files are gone")
         }
     }
 }

@@ -374,6 +374,41 @@ fn a_patch_whose_every_file_is_gone_from_the_archive_is_proven() {
     assert!(proof_of(&fails, None, Some(gone), 1, "p.patch").is_err());
 }
 
+/// A patch with one hunk on `f.py` (applied in the archive when `added` is
+/// `int answer = 42;`) and one hunk on the absent `gone.py`.
+fn applied_and_gone(added: &str) -> Vec<u8> {
+    format!(
+        "--- a/f.py\n+++ b/f.py\n@@ -1,3 +1,3 @@\n start\n-int answer = 41;\n+{added}\n end\n\
+         --- a/gone.py\n+++ b/gone.py\n@@ -1 +1 @@\n-import old_module\n+import new_module\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn a_patch_with_an_applied_hunk_and_a_gone_file_is_proven() {
+    let dir = tempfile::tempdir().unwrap();
+    archive(
+        dir.path(),
+        "foo-1.0.tar.gz",
+        &[("f.py", "start\nint answer = 42;\nend\n")],
+    );
+    let tar = dir.path().join("foo-1.0.tar.gz");
+    let fails = failed("p.patch", "Patching file f.py\nfailed\n");
+    let mixed = applied_and_gone("int answer = 42;");
+    assert_eq!(
+        proof_of(&fails, Some(&tar), Some(&mixed), 1, "p.patch"),
+        Ok(DropProof::Mixed)
+    );
+    // A security patch is not dropped for its file being gone: refused.
+    let cve = failed("fix-CVE-2024-1234.patch", "Patching file f.py\nfailed\n");
+    assert!(proof_of(&cve, Some(&tar), Some(&mixed), 1, "fix-CVE-2024-1234.patch").is_err());
+    // A hunk on a file that is there, whose added line is not in the archive,
+    // keeps the patch refused even with the other file gone.
+    let unapplied = applied_and_gone("int answer = 43;");
+    let refused = proof_of(&fails, Some(&tar), Some(&unapplied), 1, "p.patch").unwrap_err();
+    assert!(refused.contains("not all in the new tarball"), "{refused}");
+}
+
 #[test]
 fn a_patch_renamed_by_a_fragment_is_judged_by_the_renamed_file() {
     let dir = tempfile::tempdir().unwrap();
