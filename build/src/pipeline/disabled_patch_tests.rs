@@ -334,7 +334,7 @@ fn a_fix_turn_finishes_a_proven_disable_as_a_removal() {
     assert!(!checkout.join("up.patch").exists());
     let changes = std::fs::read_to_string(checkout.join("foo.changes")).unwrap();
     assert!(
-        changes.contains("- Drop up.patch: already applied upstream (reverse-applies cleanly)"),
+        changes.contains("- Drop up.patch: already applied upstream"),
         "{changes}"
     );
 }

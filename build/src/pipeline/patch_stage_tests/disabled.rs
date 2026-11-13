@@ -66,10 +66,7 @@ fn a_disable_quilt_proves_is_finished_as_a_removal() {
     assert!(!case.spec.contains("up.patch"), "{}", case.spec);
     assert!(!case.checkout.join("up.patch").exists());
     assert_eq!(
-        bullets(
-            &case.changes,
-            "Drop up.patch: already applied upstream (reverse-applies cleanly)"
-        ),
+        bullets(&case.changes, "Drop up.patch: already applied upstream"),
         1,
         "{}",
         case.changes

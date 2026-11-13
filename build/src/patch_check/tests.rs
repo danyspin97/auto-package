@@ -234,11 +234,11 @@ fn bullets_are_one_line_per_patch_without_the_version() {
     assert_eq!(refresh_bullet(&[]), "");
     assert_eq!(
         proven_drop_bullet("fix-bar.patch", DropProof::ReverseApplies),
-        "Drop fix-bar.patch: already applied upstream (reverse-applies cleanly)"
+        "Drop fix-bar.patch: already applied upstream"
     );
     assert_eq!(
         proven_drop_bullet("fix-bar.patch", DropProof::InTarball),
-        "Drop fix-bar.patch: already applied upstream (already in the new tarball)"
+        "Drop fix-bar.patch: already applied upstream"
     );
     assert_eq!(
         proven_drop_bullet("fix-bar.patch", DropProof::TargetsAbsent),

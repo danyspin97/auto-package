@@ -322,12 +322,13 @@ pub enum DropProof {
 /// The `.changes` bullet for a patch removed because its change is already
 /// upstream: the bullet states the proof.
 pub fn proven_drop_bullet(name: &str, proof: DropProof) -> String {
-    let how = match proof {
-        DropProof::ReverseApplies => "reverse-applies cleanly",
-        DropProof::InTarball => "already in the new tarball",
-        DropProof::TargetsAbsent => {
-            return format!("Drop {name}: the file it patches is gone from the new tarball");
+    match proof {
+        // "Already applied upstream" says why; the proof adds nothing.
+        DropProof::ReverseApplies | DropProof::InTarball => {
+            format!("Drop {name}: already applied upstream")
         }
-    };
-    format!("Drop {name}: already applied upstream ({how})")
+        DropProof::TargetsAbsent => {
+            format!("Drop {name}: the file it patches is gone from the new tarball")
+        }
+    }
 }

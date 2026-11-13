@@ -445,10 +445,7 @@ fn a_patch_quilt_proves_already_applied_is_removed_without_a_turn() {
     assert!(!case.spec.contains("up.patch"), "{}", case.spec);
     assert!(!case.checkout.join("up.patch").exists());
     assert_eq!(
-        bullets(
-            &case.changes,
-            "Drop up.patch: already applied upstream (reverse-applies cleanly)"
-        ),
+        bullets(&case.changes, "Drop up.patch: already applied upstream"),
         1,
         "{}",
         case.changes
@@ -516,10 +513,7 @@ fn a_removal_quilt_proves_is_kept_with_its_bullet() {
     assert!(!case.spec.contains("up.patch"), "{}", case.spec);
     assert!(!case.checkout.join("up.patch").exists());
     assert_eq!(
-        bullets(
-            &case.changes,
-            "Drop up.patch: already applied upstream (reverse-applies cleanly)"
-        ),
+        bullets(&case.changes, "Drop up.patch: already applied upstream"),
         1,
         "{}",
         case.changes
