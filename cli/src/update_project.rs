@@ -64,6 +64,7 @@ mod parked;
 #[cfg(test)]
 mod parked_tests;
 mod provenance;
+mod ready;
 mod request;
 mod requested;
 mod rpmlint_audit;

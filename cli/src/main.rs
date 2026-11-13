@@ -265,7 +265,8 @@ enum Commands {
     /// origin: its findings the origin's spec has too are inherited, listed
     /// and not fixed, unless `--fix` is given. Its branch leftovers (a
     /// dependency bullet, a leftover file, a stale FLAG line) are cleaned and
-    /// committed without a build.
+    /// committed without a build. After its build, each such package gets a
+    /// ready verdict (what would stop its submit), kept with its revision.
     #[command(mut_arg("source", |a| a.long("project").value_name("PROJECT")))]
     Lint(update_project::LintArgs),
 

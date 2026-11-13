@@ -93,6 +93,10 @@ pub(super) fn cmd_update_project(
         prepared
     });
     merge_built(report, built);
+    // The ready gate of the packages that carry unpublished work, now they are built.
+    if !a.dry_run {
+        ready::check_built(a, branch, &report.results, ctx);
+    }
     for line in unbuilt_waits::unbuilt_waits(&report.results) {
         ctx.warn(line);
     }

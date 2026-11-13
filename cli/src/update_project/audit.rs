@@ -46,6 +46,7 @@ impl Audit {
             a.in_place,
         );
         let fix_inherited = a.fix_inherited;
+        let a_dry_run = a.dry_run;
         let handle = std::thread::spawn(move || {
             let say = |message: String| {
                 reporter.report(&Event::Progress {
@@ -209,6 +210,12 @@ impl Audit {
                         }
                         None => Default::default(),
                     };
+                    if a_dry_run && !gate.refusals.is_empty() {
+                        say(format!(
+                            "{pkg}: would be refused: {}",
+                            gate.refusals.join(", ")
+                        ));
+                    }
                     // A carrying package whose only findings are inherited has nothing of
                     // its own for the agent's review pass.
                     let review = agent && !(findings.is_empty() && !inherited.is_empty());
@@ -449,6 +456,7 @@ mod tests {
         let leftover = PreGate {
             tool: vec!["changes.dependency-bullet: x".to_string()],
             agent: Vec::new(),
+            refusals: Vec::new(),
         };
         for agent in [true, false] {
             assert!(
@@ -468,6 +476,7 @@ mod tests {
         let mixed = PreGate {
             tool: vec!["files.leftover: old.tar.gz".to_string()],
             agent: vec!["spec.style: x".to_string()],
+            refusals: Vec::new(),
         };
         assert!(sent_to_pipeline(&none, false, &mixed));
         assert!(
@@ -482,6 +491,7 @@ mod tests {
         let agent_only = PreGate {
             tool: Vec::new(),
             agent: vec!["spec.style: x".to_string()],
+            refusals: Vec::new(),
         };
         assert!(
             !sent_to_pipeline(&none, false, &agent_only),
@@ -512,6 +522,7 @@ mod tests {
         let tool = PreGate {
             tool: vec!["files.leftover: old.tar.gz".to_string()],
             agent: Vec::new(),
+            refusals: Vec::new(),
         };
         assert!(is_style_only(&style, &tool, false, false));
         assert!(!is_style_only(&style, &tool, false, true));

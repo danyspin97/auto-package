@@ -39,6 +39,9 @@ pub(super) struct PreGate {
     pub(super) tool: Vec<String>,
     /// Findings the agent fixes.
     pub(super) agent: Vec<String>,
+    /// The ids of the findings the tool does not fix and that stop the package
+    /// from being ready (see `ready::stops`): what `--dry-run` says would be refused.
+    pub(super) refusals: Vec<String>,
 }
 
 impl PreGate {
@@ -94,7 +97,7 @@ pub(super) fn carry(
 }
 
 /// The revision (expanded srcmd5) of `pkg` in `project`.
-fn srcmd5(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
+pub(super) fn srcmd5(project: &str, pkg: &str, emit: Emit<'_>) -> Option<String> {
     osc::package_entries_at_revision(project, pkg, None, emit)
         .ok()??
         .srcmd5
@@ -156,10 +159,14 @@ pub(super) fn classify<'a>(findings: impl IntoIterator<Item = &'a Finding>) -> P
     let mut gate = PreGate::default();
     for f in findings {
         let line = format!("{}: {}", f.id, f.message);
-        match route(&ReviewFinding::from(f)) {
+        let routed = route(&ReviewFinding::from(f));
+        match routed {
             FindingRoute::Tool(_) => gate.tool.push(line),
             FindingRoute::Agent => gate.agent.push(line),
             _ => {}
+        }
+        if !matches!(routed, FindingRoute::Tool(_)) && ready::stops(f) {
+            gate.refusals.push(f.id.to_string());
         }
     }
     gate
@@ -199,13 +206,27 @@ mod tests {
     }
 
     #[test]
-    fn a_maintainer_finding_and_a_note_are_left_to_the_ready_gate() {
+    fn a_maintainer_finding_is_refused_and_a_note_is_not() {
         let found = [
             finding(ids::REQUEST_COMPETING, Severity::Warning),
             finding(ids::BUILD_FAILS_IN_TARGET_TOO, Severity::Blocker),
             finding(ids::VERSION_NOT_CHECKED, Severity::Note),
         ];
-        assert_eq!(classify(found.iter()), PreGate::default());
+        let gate = classify(found.iter());
+        assert!(gate.tool.is_empty() && gate.agent.is_empty());
+        assert_eq!(
+            gate.refusals,
+            [ids::REQUEST_COMPETING, ids::BUILD_FAILS_IN_TARGET_TOO]
+        );
+    }
+
+    #[test]
+    fn a_tool_fix_is_not_a_refusal_and_an_agent_finding_is() {
+        let found = [
+            finding(ids::FILES_LEFTOVER, Severity::Warning),
+            finding(ids::SPEC_STYLE, Severity::Warning),
+        ];
+        assert_eq!(classify(found.iter()).refusals, [ids::SPEC_STYLE]);
     }
 
     #[test]
