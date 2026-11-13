@@ -351,6 +351,73 @@ only reported. Takes the options of
 `update`, except `--update-deps`; `--in-place` cannot be combined with
 `--submit` or `--branch-project`.
 
+#### Branch work, leftovers and the ready check
+
+A package whose branch already holds unpublished work (its version is ahead of
+its origin, or, with `--in-place`, its source differs from its origin) is
+compared with its origin rather than checked as a whole:
+
+- by default, its fixes and its ready check cover only what the branch changes
+  against its origin. A problem the origin's spec has too is reported as
+  inherited and left as it is, and the agent's review pass is told to change
+  only what the branch's own diff shows;
+- `lint --fix` (not the `fix` command) also fixes those inherited problems in
+  place, in that package.
+
+A package with no unpublished branch work is checked as a whole, with or
+without `--fix`.
+
+Before the build, the leftovers of the branch's own work are cleaned with no
+model call: the normalisation of its unpublished `.changes` entries (which
+drops their dependency and placeholder bullets), a FLAG line that the origin's
+spec already explains, and the service directories a service run left at the
+top of the checkout. A package whose findings are only such leftovers and style
+slips is committed without a build, also with `--no-agent`, unless that rewrite
+would also touch an inherited problem. Stray files, old
+archives and the quilt `series` are removed by the pipeline's commit after its
+build; the commit without a build does not remove them.
+
+After the build, each package that carries branch work gets a ready check: its
+branch is reviewed against its origin once more (with downloads and the live
+lookups, no model call), and the verdict is kept in the package's state
+directory (in a file named `ready.json`) with the source revision it judged. The
+summary has one line per package: `<pkg>: ready to submit`, or
+`<pkg>: not ready: <ids>`, with `(needs the agent)` when an agent finding stops
+it under `--no-agent`. A kept verdict is reused while the branch's revision is
+unchanged. `--in-place` gets the check too; nothing is submitted from it.
+
+A package is not ready when the review has a Warning or a Blocker, when a build
+result is not a pass (a pending one too), when its `.changes` entry's version is
+not the update's (`changes.version-mismatch`), or when one of three maintainer
+findings is present: another open request to the target (`request.competing`),
+a carried patch whose upstream was closed (`patch.upstream-closed`), or a target
+that fails to build too (`build.fails-in-target-too`).
+
+`--submit` judges each package again before its request: a kept verdict of the
+package's current revision is reused, otherwise the review runs. A package that
+is not ready gets no request, and the run says why (`no request for <pkg>: not
+ready to submit: <id> <file>: <message>`); the other packages of the run go
+ahead. `--yes` does not override that refusal (it still refuses a batch whose
+changes need a review). Only `lint` makes this check: `update`, `build` and
+`fix --resubmit` submit as they did before.
+
+`--dry-run` prints the plan for each package, and a `would be refused` line for
+each maintainer finding that would stop a submit. It branches, builds, edits,
+commits and submits nothing, and makes no ready check.
+
+`--no-agent` makes no model call: the tool cleanups above are still committed,
+and a package whose findings need the agent is not submitted (when it was built,
+its ready check says `not ready: ... (needs the agent)`).
+
+A cookiecutter-style case: the branch's leftovers are fixed in the branch
+project, then the request is made from the devel project, which reuses the
+verdict while the branch's revision is unchanged:
+
+```bash
+auto-package lint --project home:you:auto-package:branches:devel:languages:python --only cookiecutter --in-place
+auto-package lint --project devel:languages:python --only cookiecutter --branch-project home:you:auto-package:branches:devel:languages:python --submit
+```
+
 #### Dependencies in other projects
 
 A package in `Base:System` may build-require packages published by another
