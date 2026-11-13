@@ -31,6 +31,10 @@ fn changes(body: &str) -> String {
     format!("{SEP}\nTue Jan  2 00:00:00 UTC 2024 - A <a@b.c>\n\n{body}\n{old}")
 }
 
+fn no_model(_: &str) -> Option<String> {
+    None
+}
+
 fn lines(l: &[&str]) -> Vec<String> {
     l.iter().map(|s| s.to_string()).collect()
 }
@@ -53,7 +57,7 @@ fn the_changelog_splits_into_one_group_per_release_newest_first() {
     let found = beaker_found();
     let versions: Vec<_> = found.iter().map(|f| f.version.as_str()).collect();
     assert_eq!(versions, ["1.14.1", "1.14.0"]);
-    let got = several("1.14.1", "1.13.0", found, Vec::new()).unwrap();
+    let got = several("1.14.1", "1.13.0", found, Vec::new(), no_model).unwrap();
     assert_eq!(
         got,
         vec![
@@ -81,7 +85,7 @@ fn the_beaker_jump_is_written_newest_first_under_its_own_bullets() {
     let file = dir.path().join("python-Beaker.changes");
     std::fs::write(&file, changes("- Update to 1.14.1\n")).unwrap();
     let releases: Vec<ReleaseNotes> =
-        several("1.14.1", "1.13.0", beaker_found(), Vec::new()).unwrap();
+        several("1.14.1", "1.13.0", beaker_found(), Vec::new(), no_model).unwrap();
     crate::osc::set_release_notes(dir.path(), &releases).unwrap();
     let text = std::fs::read_to_string(&file).unwrap();
     let want = [
@@ -107,7 +111,7 @@ fn forge_releases_give_one_group_each_and_prose_links_its_release() {
         rel("v1.14.0", "A big rewrite of the cache."),
     ];
     let found = from_releases(repo, &all);
-    let got = several("1.14.1", "1.13.0", Vec::new(), found).unwrap();
+    let got = several("1.14.1", "1.13.0", Vec::new(), found, no_model).unwrap();
     assert_eq!(
         got,
         vec![
@@ -128,7 +132,14 @@ fn a_release_with_no_notes_gets_no_bullet_and_no_placeholder() {
         rel("v1.14.0", "<!-- template only -->"),
         rel("v1.13.5", "* Older fix\n"),
     ];
-    let got = several("1.14.1", "1.13.0", Vec::new(), from_releases(repo, &all)).unwrap();
+    let got = several(
+        "1.14.1",
+        "1.13.0",
+        Vec::new(),
+        from_releases(repo, &all),
+        no_model,
+    )
+    .unwrap();
     let versions: Vec<_> = got.iter().map(|(v, _)| v.as_str()).collect();
     assert_eq!(versions, ["1.14.1", "1.13.5"]);
     assert!(
@@ -151,7 +162,7 @@ fn the_own_release_stays_first_even_without_notes() {
             body: "* Add a memory cache backend\n".into(),
         },
     ];
-    let got = several("1.14.1", "1.13.0", no_own, Vec::new()).unwrap();
+    let got = several("1.14.1", "1.13.0", no_own, Vec::new(), no_model).unwrap();
     assert_eq!(got[0], ("1.14.1".to_string(), Vec::new()));
     assert_eq!(got[1].0, "1.14.0");
 }
@@ -163,7 +174,7 @@ fn one_release_in_the_window_is_not_a_several_release_recap() {
         link: "NEWS in the sources".into(),
         body: "* Fix the cookie\n".into(),
     }];
-    assert!(several("1.14.1", "1.14.0", one, Vec::new()).is_none());
+    assert!(several("1.14.1", "1.14.0", one, Vec::new(), no_model).is_none());
 }
 
 #[test]
@@ -176,6 +187,7 @@ fn a_window_without_any_notes_gives_no_releases() {
             "https://github.com/o/r",
             &[rel("v1.14.1", ""), rel("v1.14.0", "")],
         ),
+        no_model,
     );
     assert_eq!(got, Some(Vec::new()));
 }
@@ -292,4 +304,198 @@ fn prose_is_not_listed_without_condensing_and_shrinks_to_its_link() {
 
 fn lens(lists: &[Vec<String>]) -> Vec<usize> {
     lists.iter().map(Vec::len).collect()
+}
+
+fn pair(version: &str, l: &[&str]) -> (String, Vec<String>) {
+    (version.to_string(), lines(l))
+}
+
+/// The Beaker jump from the forge, with 1.14.0 as prose (it needs the model).
+fn prose_jump() -> Vec<Found> {
+    from_releases(
+        "https://github.com/o/r",
+        &[
+            rel(
+                "v1.14.1",
+                "- Drop the deprecated beaker.session.type alias\n- Fix the session cookie\n",
+            ),
+            rel(
+                "v1.14.0",
+                "A rewrite of the cache layer.\n\nSecurity: fixes CVE-2024-9 in the file lock.",
+            ),
+        ],
+    )
+}
+
+const GOOD_REPLY: &str = "## 1.14.1\n* Fix the session cookie\n\
+    * Breaking: the beaker.session.type alias is gone\n\
+    ## 1.14.0\n* Rewrite the cache layer\n* Fix CVE-2024-9 in the file lock\n";
+
+#[test]
+fn a_model_recap_that_holds_is_used_breaking_changes_first() {
+    let got = several("1.14.1", "1.13.0", Vec::new(), prose_jump(), |notes| {
+        assert!(notes.contains("## 1.14.0"), "{notes}");
+        Some(GOOD_REPLY.to_string())
+    })
+    .unwrap();
+    assert_eq!(
+        got,
+        vec![
+            pair(
+                "1.14.1",
+                &[
+                    "* Breaking: the beaker.session.type alias is gone",
+                    "* Fix the session cookie",
+                ]
+            ),
+            pair(
+                "1.14.0",
+                &[
+                    "* Fix CVE-2024-9 in the file lock",
+                    "* Rewrite the cache layer"
+                ]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_model_recap_that_breaks_a_rule_falls_back_to_the_shrunk_lists() {
+    let fallback = several("1.14.1", "1.13.0", Vec::new(), prose_jump(), no_model).unwrap();
+    assert_eq!(
+        fallback[1],
+        pair(
+            "1.14.0",
+            &[
+                "* Security: fixes CVE-2024-9 in the file lock.",
+                "* see https://github.com/o/r/releases/tag/v1.14.0",
+            ]
+        )
+    );
+    let long = "x ".repeat(60);
+    let many: String = (0..13).map(|i| format!("* item {i}\n")).collect();
+    let bad = [
+        // A release is dropped.
+        "## 1.14.1\n* Fix the cookie\n".to_string(),
+        // A security reference of the notes is dropped.
+        "## 1.14.1\n* Fix the cookie\n## 1.14.0\n* Rewrite the cache layer\n".to_string(),
+        // A release name that is not one of the notes.
+        "## 1.14.1\n* Fix the cookie\n## 1.14.2\n* Rewrite\n".to_string(),
+        // More bullets than a release may list.
+        format!("## 1.14.1\n{many}## 1.14.0\n* Fix CVE-2024-9 in the file lock\n"),
+        // A bullet longer than its limit.
+        format!("## 1.14.1\n* {long}\n## 1.14.0\n* Fix CVE-2024-9 in the file lock\n"),
+        // Prose where bullets are required.
+        "## 1.14.1\nFixes the cookie.\n## 1.14.0\n* Fix CVE-2024-9 in the file lock\n".to_string(),
+        // A release with no bullet.
+        "## 1.14.1\n## 1.14.0\n* Fix CVE-2024-9 in the file lock\n".to_string(),
+        // A bullet before any release.
+        "* Fix the cookie\n## 1.14.1\n## 1.14.0\n* Fix CVE-2024-9 in the file lock\n".to_string(),
+    ];
+    for reply in bad {
+        let got = several("1.14.1", "1.13.0", Vec::new(), prose_jump(), |_| {
+            Some(reply.clone())
+        });
+        assert_eq!(got.as_ref(), Some(&fallback), "reply {reply:?} was used");
+    }
+}
+
+#[test]
+fn the_total_limit_holds_for_a_model_recap() {
+    let releases: Vec<_> = (1..=4)
+        .rev()
+        .map(|v| super::per_release::Release {
+            version: format!("1.{v}.0"),
+            link: String::new(),
+            bullets: vec!["Fix a thing".into()],
+            prose: None,
+        })
+        .collect();
+    let answer = |n: usize| {
+        (1..=4)
+            .rev()
+            .map(|v| format!("## 1.{v}.0\n{}", "* Fix a thing\n".repeat(n)))
+            .collect::<String>()
+    };
+    assert!(super::agent_recap::checked(&releases, &answer(11)).is_err());
+    assert!(super::agent_recap::checked(&releases, &answer(10)).is_ok());
+}
+
+#[test]
+fn a_model_is_not_asked_when_the_notes_fit() {
+    let found = from_releases(
+        "https://github.com/o/r",
+        &[
+            rel("v1.14.1", "- Fix the cookie\n"),
+            rel("v1.14.0", "- Add a cache\n"),
+        ],
+    );
+    let got = several("1.14.1", "1.13.0", Vec::new(), found, |_| {
+        panic!("the notes fit: no model call")
+    })
+    .unwrap();
+    assert_eq!(got.len(), 2);
+}
+
+#[test]
+fn a_release_with_no_notes_gets_no_bullet_in_a_model_recap() {
+    let found = from_releases(
+        "https://github.com/o/r",
+        &[
+            rel("v1.14.1", "A rewrite of the cache."),
+            rel("v1.14.0", "<!-- template -->"),
+            rel("v1.13.5", "- Fix the lock\n"),
+        ],
+    );
+    let reply = "## 1.14.1\n* Rewrite the cache layer\n## 1.13.5\n* Fix the lock\n";
+    let got = several("1.14.1", "1.13.0", Vec::new(), found, |_| {
+        Some(reply.to_string())
+    })
+    .unwrap();
+    assert_eq!(
+        got,
+        vec![
+            pair("1.14.1", &["* Rewrite the cache layer"]),
+            pair("1.13.5", &["* Fix the lock"]),
+        ]
+    );
+}
+
+#[test]
+fn the_prompt_states_the_limits_once_from_caps() {
+    let p = super::summarize::release_prompt("notes");
+    assert!(p.contains("at most 12 bullets per release"), "{p}");
+    assert!(p.contains("at most 40 bullets in all"), "{p}");
+    assert!(p.contains("at most 100 characters"), "{p}");
+    assert!(p.contains("`Breaking: `"), "{p}");
+}
+
+#[test]
+fn no_agent_gives_the_shrunk_recap_and_calls_no_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let top = dir.path().join("pkg-1.14.1");
+    std::fs::create_dir(&top).unwrap();
+    std::fs::write(
+        top.join("NEWS"),
+        "## 1.14.1\n- Fix the cookie\n\n## 1.14.0\nA rewrite of the cache layer.\n\n## 1.13.0\n- Older\n",
+    )
+    .unwrap();
+    let archive = dir.path().join("pkg-1.14.1.tar.gz");
+    let status = std::process::Command::new("tar")
+        .arg("czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(dir.path())
+        .arg("pkg-1.14.1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let got = super::gather(None, Some(&archive), Some("1.13.0"), "1.14.1", true);
+    assert_eq!(
+        got.releases,
+        vec![
+            pair("1.14.1", &["* Fix the cookie"]),
+            pair("1.14.0", &["* see NEWS in the sources"]),
+        ]
+    );
 }

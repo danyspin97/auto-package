@@ -5,6 +5,7 @@
 //! condensed by one model call, and when they still are too many the entry
 //! links the release pages. A package with no notes says so.
 
+mod agent_recap;
 mod caps;
 mod changelog;
 #[cfg(test)]
@@ -142,7 +143,14 @@ pub fn gather(
         let forge = repo_url
             .map(|u| per_release::from_releases(u, &releases))
             .unwrap_or_default();
-        if let Some(several) = per_release::several(new, old, changelog, forge) {
+        let condense = |notes: &str| {
+            if no_agent {
+                None
+            } else {
+                summarize::condense(notes)
+            }
+        };
+        if let Some(several) = per_release::several(new, old, changelog, forge, condense) {
             return Recap {
                 releases: several,
                 fetch_problem,

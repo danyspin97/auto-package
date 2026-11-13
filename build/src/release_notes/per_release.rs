@@ -4,6 +4,7 @@
 
 use std::cmp::Ordering;
 
+use super::agent_recap;
 use super::caps::{self, BULLET_CHARS, PER_RELEASE, SHRUNK, cut, is_security, rank};
 use super::changelog;
 use super::markdown::strip_comments;
@@ -37,7 +38,7 @@ pub(super) struct Release {
 }
 
 impl Release {
-    fn has_notes(&self) -> bool {
+    pub(super) fn has_notes(&self) -> bool {
         !self.bullets.is_empty() || self.prose.is_some()
     }
 }
@@ -204,6 +205,35 @@ pub(super) fn shrunk(releases: &[Release]) -> Vec<Vec<String>> {
     lists
 }
 
+/// The lists of `releases` when the notes do not fit the limits: the model's
+/// per-release recap when `condense` gives one that holds (see
+/// [`agent_recap::checked`]), else the mechanical shrink. `condense` is asked
+/// only here, never for notes that fit; it returns `None` without a model.
+fn condensed(releases: &[Release], condense: impl Fn(&str) -> Option<String>) -> Vec<Vec<String>> {
+    let Some(answer) = condense(&agent_recap::notes_of(releases)) else {
+        return shrunk(releases);
+    };
+    match agent_recap::checked(releases, &answer) {
+        Ok(sections) => {
+            let mut sections = sections.into_iter();
+            releases
+                .iter()
+                .map(|r| {
+                    if r.has_notes() {
+                        sections.next().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect()
+        }
+        Err(why) => {
+            ap_core::diag!("  ✗ release notes recap not used ({why}): shrinking it instead");
+            shrunk(releases)
+        }
+    }
+}
+
 /// The recap over several releases of the jump `old` to `new`, or `None` when
 /// the window holds one release (the single-release form applies). `changelog`
 /// and `forge` are the releases each source finds in the window; the changelog
@@ -216,6 +246,7 @@ pub(super) fn several(
     old: &str,
     changelog: Vec<Found>,
     forge: Vec<Found>,
+    condense: impl Fn(&str) -> Option<String>,
 ) -> Option<Vec<ReleaseNotes>> {
     let mut versions: Vec<String> = changelog
         .iter()
@@ -253,7 +284,10 @@ pub(super) fn several(
             },
         );
     }
-    let lists = fitting(&releases).unwrap_or_else(|| shrunk(&releases));
+    let lists = match fitting(&releases) {
+        Some(lists) => lists,
+        None => condensed(&releases, condense),
+    };
     let out: Vec<ReleaseNotes> = releases
         .iter()
         .zip(lists)
