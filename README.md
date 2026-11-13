@@ -382,7 +382,8 @@ over a large project builds every package), and the agent takes one clean-up rev
 pass over its built spec, even when the spec is unchanged; the review diffs
 against the spec the run started with. `--no-agent` leaves such a package
 alone, as before. A package whose source auto-package does not recognise is
-only reported. Takes the options of
+not built: its branch leftovers are cleaned as for a tool-only package, and it
+is reported as skipped. Takes the options of
 `update`, except `--update-deps`; `--in-place` cannot be combined with
 `--submit` or `--branch-project`.
 

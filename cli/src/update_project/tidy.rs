@@ -5,12 +5,16 @@ use super::*;
 /// target defines `%ldconfig_scriptlets`. The rpmlintrc files the spec names
 /// lose their `from Config import *` line in the same commit. `no_agent` is the
 /// run's `--no-agent`, which the upstream recap of the entry is filled in under.
+/// Without `style` (a source auto-package does not recognise, see
+/// `unrecognised`) the spec, the rpmlintrc files and the upstream headers are
+/// left as they are: only the leftover cleanup and the recap run.
 pub(super) fn tidy_item(
     branch: &str,
     item: &Item,
     ctx: &Ctx<'_>,
     ldconfig: bool,
     no_agent: bool,
+    style: bool,
 ) -> Result<TidyDone, String> {
     let _obs_write = ap_build::proc::obs_write();
     let emit = Emit::run(ctx.reporter.as_ref());
@@ -25,15 +29,26 @@ pub(super) fn tidy_item(
         .ok_or_else(|| "the package has no spec".to_string())?;
     let spec_path = dir.join(&spec_name);
     let before = std::fs::read_to_string(&spec_path).map_err(|e| e.to_string())?;
-    let tidied = quality::tidy(&before, ldconfig);
-    let rpm_fixes = rpmlintrc_fixes(&dir, &before)?;
+    let tidied = if style {
+        quality::tidy(&before, ldconfig)
+    } else {
+        before.clone()
+    };
+    let rpm_fixes = if style {
+        rpmlintrc_fixes(&dir, &before)?
+    } else {
+        Vec::new()
+    };
     // The provenance of the upstream patches: headers and spec comments. They
     // are not style changes, so they get no `.changes` bullet.
-    let hosts = ap_build::allowed_hosts::load_default();
-    let patches = super::provenance::checkout_patches(&dir, &tidied);
-    let changes_text = super::provenance::checkout_changes(&dir, &item.pkg, &files);
-    let edits =
-        super::provenance::header_edits(&item.pkg, &tidied, &patches, &changes_text, &hosts);
+    let edits = if style {
+        provenance_edits(&dir, &item.pkg, &files, &tidied)
+    } else {
+        super::provenance::ProvenanceEdits {
+            spec: before.clone(),
+            patches: Vec::new(),
+        }
+    };
     let after = edits.spec.clone();
     let tidy_changed = tidied != before;
     let provenance_changed = after != tidied || !edits.patches.is_empty();
@@ -191,6 +206,19 @@ pub(super) fn tidy_item(
         provenance_changed,
         leftovers,
     ))
+}
+
+/// The provenance edits of the checkout `dir` of `pkg`, its spec being `tidied`.
+fn provenance_edits(
+    dir: &Path,
+    pkg: &str,
+    files: &[String],
+    tidied: &str,
+) -> super::provenance::ProvenanceEdits {
+    let hosts = ap_build::allowed_hosts::load_default();
+    let patches = super::provenance::checkout_patches(dir, tidied);
+    let changes_text = super::provenance::checkout_changes(dir, pkg, files);
+    super::provenance::header_edits(pkg, tidied, &patches, &changes_text, &hosts)
 }
 
 /// Whether the `.changes` at `path` no longer holds `before`: its bytes before

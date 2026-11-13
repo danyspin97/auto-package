@@ -109,9 +109,7 @@ impl<'a, 'c> BuildWork<'a, 'c> {
         } else if a.improve {
             ctx.say(format!("improving {} in {branch}", item.pkg));
             if job.mechanical {
-                let target = osc::choose_repository(branch, a.distro.as_deref(), &a.arch).0;
-                let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&target);
-                match tidy_item(branch, &item, ctx, ldconfig, a.no_agent) {
+                match tidy_of(a, branch, &item, ctx, true) {
                     Ok(done) => {
                         skip = super::tidy::tidy_skip(done).map(str::to_string);
                         Ok(())
@@ -121,6 +119,16 @@ impl<'a, 'c> BuildWork<'a, 'c> {
             } else if agent_needed(a.no_agent, &item.findings) {
                 skipped(ctx, report, item, "the findings need the agent".to_string());
                 return;
+            } else if super::unrecognised::unrecognised(&item, &super::unrecognised::probe_archive)
+            {
+                // The tool's cleanups only: the pipeline would refuse the source.
+                match tidy_of(a, branch, &item, ctx, false) {
+                    Ok(_) => {
+                        skip = Some(super::unrecognised::SKIPPED.to_string());
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
             } else {
                 build_item(&item)
             }
@@ -346,6 +354,20 @@ fn lint_scoped(a: &UpdateProjectArgs, branch: &str, item: &Item, ctx: &Ctx<'_>) 
             Emit::run(ctx.reporter.as_ref()),
         )
         .is_some()
+}
+
+/// The tidy of `item` in `branch` (see `tidy_item`), with the ldconfig macro of
+/// the branch's target. `style` says whether its style fixes are made too.
+fn tidy_of(
+    a: &UpdateProjectArgs,
+    branch: &str,
+    item: &Item,
+    ctx: &Ctx<'_>,
+    style: bool,
+) -> Result<super::tidy::TidyDone, String> {
+    let target = osc::choose_repository(branch, a.distro.as_deref(), &a.arch).0;
+    let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&target);
+    super::tidy::tidy_item(branch, item, ctx, ldconfig, a.no_agent, style)
 }
 
 /// Build `item` in the branch project with the ordinary pipeline.

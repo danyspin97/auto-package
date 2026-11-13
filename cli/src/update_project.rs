@@ -90,6 +90,7 @@ mod throttle;
 mod tidy;
 mod tui_row;
 mod unbuilt_waits;
+mod unrecognised;
 
 #[cfg(test)]
 mod tests;
