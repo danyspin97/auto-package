@@ -11,8 +11,11 @@ pub(super) const MAX_BULLETS: usize = 10;
 const MAX_LINKS: usize = 5;
 /// Width of a `.changes` line, including its two-space indent.
 const WIDTH: usize = 67;
-/// A bullet is cut to this many characters: release bodies are untrusted.
+/// A single-release bullet is cut to this many characters: release bodies are
+/// untrusted.
 const MAX_BULLET_CHARS: usize = 200;
+/// A bullet's source is read up to this many characters.
+const MAX_SOURCE_CHARS: usize = 20_000;
 /// The most lines a recap takes.
 const MAX_LINES: usize = 40;
 
@@ -49,7 +52,12 @@ pub(super) fn classify(releases: &[RepoRelease]) -> Notes {
             return Notes::None;
         }
         if bullets.len() <= MAX_BULLETS {
-            return Notes::Bullets(bullets);
+            return Notes::Bullets(
+                bullets
+                    .iter()
+                    .map(|b| plain_cut(b, MAX_BULLET_CHARS))
+                    .collect(),
+            );
         }
     }
     let text: String = with_notes
@@ -92,10 +100,11 @@ pub(super) fn bullets_of(body: &str) -> Vec<String> {
 }
 
 /// One bullet's text without markdown links, emphasis and code ticks, and
-/// without the "by @user in <url>" tail GitHub adds to generated notes.
+/// without the "by @user in <url>" tail GitHub adds to generated notes. Not
+/// cut: the callers cut it to their limit (a security line is never cut).
 fn tidy(item: &str) -> String {
     // Cut first so that a huge bullet does not cost a pass over all of it.
-    let item: String = item.chars().take(MAX_BULLET_CHARS * 5).collect();
+    let item: String = item.chars().take(MAX_SOURCE_CHARS).collect();
     let mut s = strip_emoji(&strip_links(&item));
     for mark in ["**", "__", "`"] {
         s = s.replace(mark, "");
@@ -109,15 +118,19 @@ fn tidy(item: &str) -> String {
             s.truncate(i);
         }
     }
-    let s = s
-        .split_whitespace()
+    s.split_whitespace()
         .filter(|w| !is_rule(w))
         .collect::<Vec<_>>()
-        .join(" ");
-    if s.chars().count() <= MAX_BULLET_CHARS {
-        return s;
+        .join(" ")
+}
+
+/// `text` cut to `max` characters, the `...` included, as the single-release
+/// form has always cut its bullets.
+fn plain_cut(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
     }
-    let cut: String = s.chars().take(MAX_BULLET_CHARS - 3).collect();
+    let cut: String = text.chars().take(max - 3).collect();
     format!("{}...", cut.trim_end())
 }
 

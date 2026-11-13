@@ -1,8 +1,10 @@
 //! The recap of an update that jumps several upstream releases: the notes of
-//! each release on their own, newest first, each under a bullet of its own.
+//! each release on their own, newest first, each under a bullet of its own,
+//! within the limits of [`super::caps`].
 
 use std::cmp::Ordering;
 
+use super::caps::{self, BULLET_CHARS, PER_RELEASE, SHRUNK, cut, is_security, rank};
 use super::changelog;
 use super::markdown::strip_comments;
 use super::render;
@@ -11,13 +13,33 @@ use crate::osc::ReleaseNotes;
 use crate::sources::RepoRelease;
 use crate::version;
 
-/// One release of the jump: its version, where its notes are read (a release
-/// page, or a changelog file in the sources) and its body.
+/// One release of the window as its source gives it: its version, where its
+/// notes are read (a release page, or a changelog file in the sources) and
+/// the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Found {
     pub(super) version: String,
     pub(super) link: String,
     pub(super) body: String,
+}
+
+/// One release of the jump, as the recap lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Release {
+    pub(super) version: String,
+    /// Where its notes are read: a release page, or a changelog file.
+    pub(super) link: String,
+    /// Its bullets, routine ones left out, in the order the notes give them.
+    pub(super) bullets: Vec<String>,
+    /// Its notes when they are prose rather than bullets: they have to be
+    /// condensed before they can be listed.
+    pub(super) prose: Option<String>,
+}
+
+impl Release {
+    fn has_notes(&self) -> bool {
+        !self.bullets.is_empty() || self.prose.is_some()
+    }
 }
 
 /// The releases of a changelog `text` (of the file `file`) between `old` and
@@ -50,27 +72,139 @@ pub(super) fn from_releases(repo_url: &str, releases: &[RepoRelease]) -> Vec<Fou
     found
 }
 
-/// Whether a release has any notes at all (a comment-only body has none).
-fn has_notes(f: &Found) -> bool {
-    !strip_comments(&f.body).trim().is_empty()
-}
-
-/// The lines of one release: its bullets (routine ones left out), or a link
-/// to the release when its notes are prose. Empty when it has nothing to list.
-fn lines_of(f: &Found) -> Vec<String> {
-    let listed = render::bullets_of(&f.body);
-    if !listed.is_empty() {
-        let kept: Vec<String> = listed.into_iter().filter(|b| !is_routine(b)).collect();
-        return render::bullet_lines(&kept);
-    }
-    if has_notes(f) {
-        vec![format!("* see {}", f.link)]
-    } else {
-        Vec::new()
+/// The release of a found body: its bullets with routine ones left out, or
+/// its prose when it has notes and no bullet at all.
+pub(super) fn release_of(f: &Found) -> Release {
+    let raw = render::bullets_of(&f.body);
+    let has_notes = !strip_comments(&f.body).trim().is_empty();
+    let prose = (raw.is_empty() && has_notes).then(|| strip_comments(&f.body));
+    Release {
+        version: f.version.clone(),
+        link: f.link.clone(),
+        bullets: raw.into_iter().filter(|b| !is_routine(b)).collect(),
+        prose,
     }
 }
 
-/// The recap of the jump `old` to `new` over several releases, or `None` when
+/// The security lines of a release: its bullets that name a fix, or for prose
+/// the lines that do.
+fn security_of(r: &Release) -> Vec<String> {
+    match &r.prose {
+        Some(text) => text
+            .lines()
+            .map(|l| l.trim().trim_start_matches(['-', '*', '+', ' ']).trim())
+            .filter(|l| is_security(l))
+            .map(str::to_string)
+            .collect(),
+        None => r
+            .bullets
+            .iter()
+            .filter(|b| is_security(b))
+            .cloned()
+            .collect(),
+    }
+}
+
+/// Everything a release lists: its bullets in their order (breaking changes
+/// first, then security fixes, then the rest), each cut to [`BULLET_CHARS`]
+/// unless it is a security line. Prose lists its security lines and the link.
+fn full(r: &Release) -> Vec<String> {
+    let mut items: Vec<String> = match r.prose {
+        None => r
+            .bullets
+            .iter()
+            .map(|b| {
+                if is_security(b) {
+                    b.clone()
+                } else {
+                    cut(b, BULLET_CHARS)
+                }
+            })
+            .collect(),
+        Some(_) => security_of(r),
+    };
+    items.sort_by_key(|b| rank(b));
+    if r.prose.is_some() {
+        items.push(format!("see {}", r.link));
+    }
+    items
+}
+
+/// A release shrunk to its link: its security lines, then `see <link>`.
+fn only_link(r: &Release) -> Vec<String> {
+    let mut items = security_of(r);
+    items.sort_by_key(|b| rank(b));
+    items.push(format!("see {}", r.link));
+    items
+}
+
+/// The first `n` of `items` in their order, every security line kept whatever
+/// `n` is.
+fn keep(items: &[String], n: usize) -> Vec<String> {
+    let security = items.iter().filter(|i| is_security(i)).count();
+    let mut room = n.saturating_sub(security);
+    items
+        .iter()
+        .filter(|i| {
+            if is_security(i) {
+                true
+            } else if room > 0 {
+                room -= 1;
+                true
+            } else {
+                false
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether the lists fit the limits: no release over [`PER_RELEASE`] lines and
+/// all of them together within [`caps::TOTAL`].
+fn fits(lists: &[Vec<String>]) -> bool {
+    lists.iter().all(|l| l.len() <= caps::PER_RELEASE)
+        && lists.iter().map(Vec::len).sum::<usize>() <= caps::TOTAL
+}
+
+/// The lists of `releases` (the update's own release first) as they are, when
+/// every release has bullets and the lists fit the limits. `None` otherwise:
+/// prose needs condensing, and too many lines need shrinking.
+pub(super) fn fitting(releases: &[Release]) -> Option<Vec<Vec<String>>> {
+    if releases.iter().any(|r| r.prose.is_some()) {
+        return None;
+    }
+    let lists: Vec<Vec<String>> = releases.iter().map(full).collect();
+    fits(&lists).then_some(lists)
+}
+
+/// The lists of `releases` shrunk to the limits, without a model. The newest
+/// release keeps [`PER_RELEASE`] lines; then the older ones, oldest first, go
+/// to [`SHRUNK`] bullets each until the lists fit, then to their link line each
+/// (every one of them named, none dropped). Security lines are never dropped.
+pub(super) fn shrunk(releases: &[Release]) -> Vec<Vec<String>> {
+    let mut lists: Vec<Vec<String>> = releases.iter().map(full).collect();
+    let n = lists.len();
+    if let Some(newest) = lists.first_mut() {
+        *newest = keep(newest, PER_RELEASE);
+    }
+    for i in (1..n).rev() {
+        if fits(&lists) {
+            break;
+        }
+        lists[i] = keep(&lists[i], SHRUNK);
+    }
+    for i in (1..n).rev() {
+        if fits(&lists) {
+            break;
+        }
+        if releases[i].has_notes() {
+            lists[i] = only_link(&releases[i]);
+        }
+    }
+    lists
+}
+
+/// The recap over several releases of the jump `old` to `new`, or `None` when
 /// the window holds one release (the single-release form applies). `changelog`
 /// and `forge` are the releases each source finds in the window; the changelog
 /// is read when it has notes for any of them, else the forge releases. The
@@ -94,21 +228,42 @@ pub(super) fn several(
     if versions.len() < 2 {
         return None;
     }
-    let mut found = if changelog.iter().any(has_notes) {
+    let mut found = if changelog.iter().any(|f| release_of(f).has_notes()) {
         changelog
     } else {
         forge
     };
     found.sort_by(|a, b| version::sort_cmp(&b.version, &a.version));
-    let mut out: Vec<ReleaseNotes> = vec![(new.to_string(), Vec::new())];
-    for f in &found {
-        let lines = lines_of(f);
-        if version::sort_cmp(&f.version, new) == Ordering::Equal {
-            out[0].1 = lines;
-        } else if !lines.is_empty() {
-            out.push((f.version.clone(), lines));
-        }
+    let mut releases: Vec<Release> = found
+        .iter()
+        .map(release_of)
+        .filter(Release::has_notes)
+        .collect();
+    let own_first = releases
+        .first()
+        .is_some_and(|r| version::sort_cmp(&r.version, new) == Ordering::Equal);
+    if !own_first {
+        releases.insert(
+            0,
+            Release {
+                version: new.to_string(),
+                link: String::new(),
+                bullets: Vec::new(),
+                prose: None,
+            },
+        );
     }
+    let lists = fitting(&releases).unwrap_or_else(|| shrunk(&releases));
+    let out: Vec<ReleaseNotes> = releases
+        .iter()
+        .zip(lists)
+        .enumerate()
+        .filter(|(i, (_, list))| *i == 0 || !list.is_empty())
+        .map(|(i, (r, list))| {
+            let version = if i == 0 { new } else { r.version.as_str() };
+            (version.to_string(), render::bullet_lines(&list))
+        })
+        .collect();
     if out.iter().all(|(_, lines)| lines.is_empty()) {
         return Some(Vec::new());
     }

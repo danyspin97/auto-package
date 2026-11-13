@@ -5,6 +5,7 @@
 //! condensed by one model call, and when they still are too many the entry
 //! links the release pages. A package with no notes says so.
 
+mod caps;
 mod changelog;
 #[cfg(test)]
 mod clean_tests;
