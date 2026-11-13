@@ -25,3 +25,22 @@ fn the_index_routes_unterminated_brace_to_convention_19() {
     let line = index_line(19);
     assert!(line.contains("\"Unterminated {\""), "{line:?}");
 }
+
+#[test]
+fn convention_19_keeps_an_origin_opener_that_has_an_environment_assignment() {
+    let text = crate::conventions_table::CONVENTIONS[18].1;
+    let at = text
+        .find("119. **An origin's braced opener")
+        .expect("convention 19 has the origin-opener rule");
+    let rule = &text[at..];
+    assert!(rule.contains("`%{python_expand PYTHONPATH=%{buildroot}%{$python_sitelib}`"));
+    assert!(rule.contains("keep that opener line exactly"));
+    assert!(rule.contains("Do not convert it to the `#` form"));
+    assert!(rule.contains("`$python -m pytest tests`"));
+}
+
+#[test]
+fn the_index_routes_an_origin_opener_edit_to_convention_19() {
+    let line = index_line(19);
+    assert!(line.contains("(119) "), "{line:?}");
+}
