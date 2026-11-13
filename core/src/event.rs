@@ -179,6 +179,12 @@ pub enum SpecRejection {
     ReshapedPythonExpandBlock {
         first_lines: Vec<String>,
     },
+    /// The edit adds a fixup of the sources or the build (`sed -i`, `chmod`, `rm`,
+    /// `export`, ...) without a comment above it that says why (convention 40), as
+    /// `line N (text) problem`.
+    UnexplainedFixup {
+        lines: Vec<String>,
+    },
     /// The edit left an rpmlintrc with lines convention 39 does not allow, as
     /// `file: line N (...) ...`.
     BadRpmlintrc {

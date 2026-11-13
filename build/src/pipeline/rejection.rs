@@ -15,6 +15,9 @@ use crate::pipeline::source_guard::*;
 mod python_expand;
 use python_expand::*;
 
+mod fixup_comment;
+use fixup_comment::*;
+
 /// How many times the same validation error rejected an edit of one spec, in
 /// this process. A fourth identical turn would be re-prompting for the same
 /// failure (python-torch: eleven rejections of one inherited patch, $2.64).
@@ -349,6 +352,21 @@ fn accept_checked(
     judge_removals: bool,
 ) -> Result<(), String> {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
+    // A fixup the edit adds needs a comment saying why (convention 40). Checked on the
+    // text as the agent wrote it, before the comment macros are escaped below.
+    if let Some(problem) = reject_unexplained_fixup(
+        spec_path,
+        before,
+        &after,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
+        package,
+    ) {
+        return Err(problem);
+    }
     // A macro in a comment is escaped before the check: rpm would expand it, and
     // a later build would need a turn to fix what this pass fixes now.
     let (escaped, changed) = crate::spec_tidy::comment_macros::escape_comment_macros(&after);

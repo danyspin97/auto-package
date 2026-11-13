@@ -163,6 +163,11 @@ pub use python_expand_shape::*;
 #[cfg(test)]
 mod python_expand_shape_tests;
 
+mod fixup_comment;
+pub use fixup_comment::*;
+#[cfg(test)]
+mod fixup_comment_tests;
+
 #[cfg(test)]
 mod check_probe_tests;
 mod deps;
