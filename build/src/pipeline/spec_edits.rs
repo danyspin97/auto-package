@@ -89,6 +89,13 @@ pub(super) fn discard_failed_turn(
     );
 }
 
+/// The file a `Source`/`Patch` value stores in the checkout: the `#/<file>`
+/// rename of a web address, else its last path segment.
+fn file_of(value: &str) -> String {
+    let name = crate::spec::web_address_file(value);
+    name.rsplit('/').next().unwrap_or(&name).to_string()
+}
+
 /// Basenames of every `Source`/`Patch` file the spec references but that do
 /// not exist in `checkout_dir`.
 ///
@@ -117,9 +124,9 @@ pub(super) fn missing_source_files(expanded_spec: &str, checkout_dir: &Path) -> 
         if value.is_empty() || value.contains('%') {
             continue;
         }
-        let name = value.rsplit('/').next().unwrap_or(value);
-        if !checkout_dir.join(name).exists() {
-            missing.push(name.to_string());
+        let name = file_of(value);
+        if !checkout_dir.join(&name).exists() {
+            missing.push(name);
         }
     }
     missing
@@ -147,8 +154,8 @@ pub(super) fn missing_source_urls(expanded_spec: &str, missing: &[String]) -> Ve
             let is_url = ["https://", "http://"]
                 .iter()
                 .any(|p| value.len() > p.len() && value.starts_with(p));
-            let name = value.rsplit('/').next().unwrap_or(value);
-            (is_url && !value.contains(['%', ' ', '\t']) && missing.iter().any(|m| m == name))
+            let name = file_of(value);
+            (is_url && !value.contains(['%', ' ', '\t']) && missing.iter().any(|m| *m == name))
                 .then(|| value.to_string())
         })
         .collect()
@@ -201,7 +208,7 @@ pub(super) fn sync_quilt_series(expanded_spec: &str, checkout_dir: &Path) {
         if value.is_empty() || value.contains('%') {
             continue;
         }
-        patches.push(value.rsplit('/').next().unwrap_or(value).to_string());
+        patches.push(file_of(value));
     }
 
     let series_path = checkout_dir.join("series");

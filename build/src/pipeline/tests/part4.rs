@@ -546,3 +546,29 @@ fn sync_quilt_series_drops_a_patch_the_spec_no_longer_declares() {
         "stale series file must be removed when the spec declares no patches"
     );
 }
+
+#[test]
+fn a_patch_url_renamed_by_its_fragment_is_checked_and_listed_under_that_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = "Patch:  https://github.com/cokelaer/easydev/commit/8cf50c9177936e771e158ea9b249b4aa5e2cc1ee.patch#/fix-version.patch\n";
+    assert_eq!(
+        missing_source_files(spec, dir.path()),
+        vec!["fix-version.patch"]
+    );
+    std::fs::write(dir.path().join("fix-version.patch"), b"").unwrap();
+    assert!(missing_source_files(spec, dir.path()).is_empty());
+    sync_quilt_series(spec, dir.path());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("series")).unwrap(),
+        "fix-version.patch\n"
+    );
+}
+
+#[test]
+fn missing_source_urls_matches_a_source_by_its_fragment_name() {
+    let spec = "Source0: https://h/x-1.0.tar.gz#/y.tar.gz\nSource1: https://h/x-1.0.tar.gz\n";
+    assert_eq!(
+        missing_source_urls(spec, &["y.tar.gz".to_string()]),
+        vec!["https://h/x-1.0.tar.gz#/y.tar.gz"]
+    );
+}
