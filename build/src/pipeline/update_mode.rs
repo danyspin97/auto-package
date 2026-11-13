@@ -11,6 +11,9 @@ use std::path::Path;
 pub(super) mod spec_changes;
 use spec_changes::SpecPasses;
 
+#[cfg(test)]
+mod minimum_tests;
+
 /// What the package's origin says about an update of it.
 pub(super) struct OriginBase {
     /// The `Version:` of the origin's spec.
@@ -132,7 +135,9 @@ pub(super) struct UpdateMode {
 ///   `#` rpm reads as a comment), `use_version_macro` (a literal version an
 ///   update leaves stale), `escape_comment_macros` (a macro in a comment, which
 ///   rpm expands and rpmlint reports), `own_new_dirs` (a `%dir` for a directory
-///   `%files` lists files in and nothing owns, which fails the OBS build).
+///   `%files` lists files in and nothing owns, which fails the OBS build),
+///   `add_upstream_minimums` (a dependency the update adds or changes, with no
+///   bound, gets the minimum the source declares; convention 75).
 /// - skipped on an update: `collapse_dist_info_license_lines` (the form of the
 ///   `%files` licence lines), `normalize_nvidia_license` (licence spelling, which
 ///   rpmlint reports), `move_check_before_files` (section order),
@@ -194,6 +199,17 @@ pub(super) fn normalize_spec_text(
             crate::spec::normalize_runtime_python_module,
         )
         .apply("hoist_dependency_tags", crate::spec::hoist_dependency_tags);
+    // A minimum upstream declares on a dependency the update adds or changes
+    // (convention 75). The origin's unchanged lines are its own, so they stay.
+    let passes = match (update, origin, source) {
+        (true, Some(origin), Some(source)) => {
+            let upstream = crate::spec::UpstreamMinimums::read(source);
+            passes.apply("add_upstream_minimums", |s| {
+                crate::spec::add_upstream_minimums(s, origin, &upstream)
+            })
+        }
+        _ => passes,
+    };
     let passes = if update {
         passes
     } else {

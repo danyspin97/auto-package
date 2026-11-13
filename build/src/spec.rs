@@ -46,6 +46,10 @@ mod rpmlintrc;
 pub use rpmlintrc::*;
 mod requires_exclude;
 pub use requires_exclude::*;
+mod minimums;
+pub use minimums::*;
+#[cfg(test)]
+mod minimums_tests;
 mod wheel;
 use wheel::*;
 
