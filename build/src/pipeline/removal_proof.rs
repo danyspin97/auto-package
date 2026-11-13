@@ -154,7 +154,7 @@ pub(super) fn proof_of(
             ),
             _ => Err(
                 "quilt checked it, it cannot be reverse-applied on the new sources, \
-                 and its hunks are not all in the new tarball"
+                 and not every hunk is already in the new tarball or on a file gone from it"
                     .to_string(),
             ),
         },

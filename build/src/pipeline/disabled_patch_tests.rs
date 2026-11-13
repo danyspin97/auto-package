@@ -124,7 +124,7 @@ fn a_disabled_foreign_patch_is_refused() {
     assert!(
         judged.refused[0]
             .reason
-            .contains("its hunks are not all in the new tarball"),
+            .contains("not every hunk is already in the new tarball or on a file gone from it"),
         "{judged:?}"
     );
 }

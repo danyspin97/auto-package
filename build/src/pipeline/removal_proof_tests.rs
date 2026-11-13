@@ -406,7 +406,10 @@ fn a_patch_with_an_applied_hunk_and_a_gone_file_is_proven() {
     // keeps the patch refused even with the other file gone.
     let unapplied = applied_and_gone("int answer = 43;");
     let refused = proof_of(&fails, Some(&tar), Some(&unapplied), 1, "p.patch").unwrap_err();
-    assert!(refused.contains("not all in the new tarball"), "{refused}");
+    assert!(
+        refused.contains("not every hunk is already in the new tarball or on a file gone from it"),
+        "{refused}"
+    );
 }
 
 #[test]
