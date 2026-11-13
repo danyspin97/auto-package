@@ -50,6 +50,10 @@ fn no_model(_: &str) -> Option<String> {
     None
 }
 
+fn no_pypi(_: &str) -> Option<String> {
+    None
+}
+
 fn lines(l: &[&str]) -> Vec<String> {
     l.iter().map(|s| s.to_string()).collect()
 }
@@ -94,6 +98,7 @@ fn fill(
         &origin_changes(),
         &origin_spec(),
         no_agent,
+        &no_pypi,
         recap,
     )
 }
@@ -222,6 +227,7 @@ fn a_published_entry_is_never_touched() {
         &published,
         &origin_spec(),
         true,
+        &no_pypi,
         &never,
     );
     assert_eq!(got, Ok(Fill::Nothing));
@@ -247,4 +253,119 @@ fn a_spec_at_the_origins_version_is_not_filled() {
         panic!("no update, no recap")
     };
     assert_eq!(fill(&dir, &never, true), Ok(Fill::Nothing));
+}
+
+/// The head of the real `python-ExifRead.spec` (3.5.1): its `URL:` is a PyPI
+/// page and its `Source:` a PyPI file, so no forge is named by the spec.
+const EXIF_SPEC: &str = "Name:           python-ExifRead
+Version:        3.5.1
+Release:        0
+Summary:        Read Exif metadata from tiff and jpeg files
+URL:            https://pypi.python.org/pypi/ExifRead/%{version}
+Source:         https://files.pythonhosted.org/packages/source/e/exifread/exifread-%{version}.tar.gz
+";
+
+/// The real `python-LTTL.spec` (2.1.0) names its repository in `URL:`, but its
+/// `Source:` is a hashed PyPI path, which names no project.
+const LTTL_SPEC: &str = "Name:           python-LTTL
+Version:        2.1.0
+Release:        0
+Summary:        Tools for text analysis
+URL:            https://github.com/axanthos/LTTL
+Source:         https://files.pythonhosted.org/packages/8c/f1/1c6f3b1329ea4bd3df01769bd1f05ffb53bd5e3a3c6f161c69d64d4f1b17/lttl-%{version}.tar.gz
+";
+
+#[test]
+fn the_pypi_project_of_a_spec_is_named_by_its_source_or_its_flavour() {
+    use super::fill::pypi_name_of;
+    assert_eq!(
+        pypi_name_of(EXIF_SPEC, "python-ExifRead").as_deref(),
+        Some("exifread")
+    );
+    assert_eq!(
+        pypi_name_of(LTTL_SPEC, "python-LTTL").as_deref(),
+        Some("LTTL")
+    );
+    assert_eq!(pypi_name_of(EXIF_SPEC, "eric"), Some("exifread".into()));
+    assert_eq!(
+        pypi_name_of(
+            "Name: eric\nVersion: 1\nSource: https://x.org/eric.tgz\n",
+            "eric"
+        ),
+        None
+    );
+}
+
+#[test]
+fn the_repository_of_a_pypi_spec_is_the_one_pypi_records() {
+    // ExifRead 3.5.1 in its real shape: the spec names no forge, PyPI records
+    // the exif-py repository, and the notes are read from it.
+    let dir = checkout("1.9.0", &changes("- Update to 1.9.0"));
+    std::fs::write(
+        dir.path().join("python-ConfigArgParse.spec"),
+        EXIF_SPEC
+            .replace("ExifRead", "ConfigArgParse")
+            .replace("3.5.1", "1.9.0"),
+    )
+    .unwrap();
+    let asked = std::cell::RefCell::new(Vec::new());
+    // The project URLs PyPI serves for exifread (its `Repository` key).
+    let pypi_json = r#"{"info": {"name": "ExifRead", "home_page": null, "project_urls": {
+        "Changelog": "https://github.com/ianare/exif-py/blob/master/ChangeLog.rst",
+        "Repository": "https://github.com/ianare/exif-py"}}}"#;
+    let pypi = |name: &str| {
+        asked.borrow_mut().push(name.to_string());
+        ap_ecosystem::pypi::source_url_from_json(pypi_json)
+    };
+    let seen = std::cell::RefCell::new(None);
+    let recap = |repo: Option<&str>, _: Option<&Path>, _: &str, _: &str, _: bool| {
+        *seen.borrow_mut() = repo.map(str::to_string);
+        Recap::default()
+    };
+    let got = fill_with(
+        dir.path(),
+        "python-ConfigArgParse",
+        &origin_changes(),
+        &origin_spec(),
+        true,
+        &pypi,
+        &recap,
+    );
+    assert!(matches!(got, Ok(Fill::NotFound { .. })), "{got:?}");
+    assert_eq!(asked.borrow().as_slice(), ["exifread"]);
+    assert_eq!(
+        seen.borrow().as_deref(),
+        Some("https://github.com/ianare/exif-py")
+    );
+}
+
+#[test]
+fn a_forge_named_by_the_spec_is_used_without_asking_pypi() {
+    let dir = checkout("1.9.0", &changes("- Update to 1.9.0"));
+    std::fs::write(
+        dir.path().join("python-ConfigArgParse.spec"),
+        LTTL_SPEC
+            .replace("python-LTTL", "python-ConfigArgParse")
+            .replace("2.1.0", "1.9.0"),
+    )
+    .unwrap();
+    let never = |_: &str| -> Option<String> { panic!("the spec names the repository") };
+    let seen = std::cell::RefCell::new(None);
+    let recap = |repo: Option<&str>, _: Option<&Path>, _: &str, _: &str, _: bool| {
+        *seen.borrow_mut() = repo.map(str::to_string);
+        Recap::default()
+    };
+    let _ = fill_with(
+        dir.path(),
+        "python-ConfigArgParse",
+        &origin_changes(),
+        &origin_spec(),
+        true,
+        &never,
+        &recap,
+    );
+    assert_eq!(
+        seen.borrow().as_deref(),
+        Some("https://github.com/axanthos/LTTL")
+    );
 }

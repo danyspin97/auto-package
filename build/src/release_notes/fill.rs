@@ -48,19 +48,22 @@ pub fn fill_missing_recap(
         origin_changes,
         origin_spec,
         no_agent,
+        &crate::sources::recorded_repo,
         &|repo, archive, old, new, no_agent| gather(repo, archive, Some(old), new, no_agent),
     )
 }
 
 /// [`fill_missing_recap`] with the recap given by `recap` (`repo_url`, the
-/// archive, the old and the new version, `no_agent`), so the choice of the
-/// entry and the writing are tested without a network.
+/// archive, the old and the new version, `no_agent`) and the repository PyPI
+/// records for a project given by `pypi`, so the choice of the entry and the
+/// writing are tested without a network.
 pub(super) fn fill_with(
     checkout: &Path,
     pkg: &str,
     origin_changes: &str,
     origin_spec: &str,
     no_agent: bool,
+    pypi: &dyn Fn(&str) -> Option<String>,
     recap: &dyn Fn(Option<&str>, Option<&Path>, &str, &str, bool) -> Recap,
 ) -> Result<Fill, String> {
     let Some(old) = crate::spec::parse_header(origin_spec).map(|h| h.version) else {
@@ -80,7 +83,7 @@ pub(super) fn fill_with(
     if old == new || !needs_recap(&text, origin_changes, &new) {
         return Ok(Fill::Nothing);
     }
-    let repo = crate::bugfix::upstream_repo_of_spec(&spec);
+    let repo = repo_of_spec(&spec, pkg, pypi);
     let archive = archive_in(checkout, &new);
     let found = recap(repo.as_deref(), archive.as_deref(), &old, &new, no_agent);
     let nothing = found.releases.iter().all(|(_, lines)| lines.is_empty());
@@ -94,6 +97,28 @@ pub(super) fn fill_with(
     }
     set_release_notes(checkout, &found.releases).map_err(|e| e.to_string())?;
     Ok(Fill::Written { old, new })
+}
+
+/// The upstream repository of `spec`: the forge its `Url:` or `Source:` names
+/// (see [`crate::bugfix::upstream_repo_of_spec`]), else the one PyPI records
+/// for the project (`pypi`), which is the project the spec's files come from.
+fn repo_of_spec(spec: &str, pkg: &str, pypi: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    crate::bugfix::upstream_repo_of_spec(spec).or_else(|| pypi(&pypi_name_of(spec, pkg)?))
+}
+
+/// The PyPI project of a spec: the name in its `files.pythonhosted.org`
+/// Source, else `pkg` without its `python-` flavour.
+pub(super) fn pypi_name_of(spec: &str, pkg: &str) -> Option<String> {
+    let header = crate::spec::parse_header(spec)?;
+    [header.expanded_source, header.source]
+        .into_iter()
+        .flatten()
+        .find_map(|s| ap_ecosystem::pypi::pypi_name_from_source_url(&s))
+        .or_else(|| {
+            pkg.strip_prefix("python-")
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// Whether the newest entry of `text` is unpublished (the origin's `.changes`
