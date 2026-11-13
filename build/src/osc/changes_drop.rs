@@ -36,10 +36,9 @@ fn release_blocks<'a>(changes: &'a str, version: &str) -> Option<Blocks<'a>> {
             last.2 = format!("{} {}", last.2, line.trim());
         }
     }
-    let update = format!("Update to {version}");
     blocks
         .iter()
-        .any(|b| b.2 == update)
+        .any(|b| is_release_bullet(&b.2, version))
         .then_some((lines, blocks))
 }
 
@@ -58,12 +57,11 @@ pub(super) fn without_release_bullets(
     drops: &[String],
 ) -> Option<String> {
     let (lines, blocks) = release_blocks(changes, version)?;
-    let update = format!("Update to {version}");
     let wanted: Vec<String> = drops.iter().map(|d| squash(d)).collect();
     let mut gone = vec![false; lines.len()];
     let mut any = false;
     for (from, to, text) in &blocks {
-        if *text != update && wanted.iter().any(|w| w == &squash(text)) {
+        if !is_release_bullet(text, version) && wanted.iter().any(|w| w == &squash(text)) {
             gone[*from..*to].iter_mut().for_each(|g| *g = true);
             any = true;
         }

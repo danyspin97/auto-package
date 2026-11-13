@@ -24,7 +24,7 @@ fn release_entry(lines: &[&str], version: &str) -> Option<(usize, usize)> {
         .map_or(lines.len(), |i| first + 1 + i);
     let is_this_release = lines[first + 1..end]
         .iter()
-        .any(|l| l.trim().trim_start_matches(['-', '*', ' ']) == format!("Update to {version}"));
+        .any(|l| is_release_bullet(l.trim().trim_start_matches(['-', '*', ' ']), version));
     is_this_release.then_some((first, end))
 }
 

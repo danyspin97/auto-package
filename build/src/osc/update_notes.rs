@@ -3,6 +3,14 @@
 
 use super::*;
 
+/// Whether a bullet's text (its `- ` and any `*` left out) is the `Update to
+/// <version>` bullet of `version`, with or without the colon the bullets of
+/// several releases carry.
+pub fn is_release_bullet(text: &str, version: &str) -> bool {
+    let text = text.trim();
+    text == format!("Update to {version}") || text == format!("Update to {version}:")
+}
+
 /// Sets the recap lines of this release's `.changes` entry: each `lines` item
 /// becomes an indented continuation line under the `Update to <version>`
 /// bullet of the newest entry, so the bullet stays one bullet. A recap an
@@ -147,6 +155,14 @@ mod tests {
 
     fn lines(l: &[&str]) -> Vec<String> {
         l.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_release_bullet_is_with_or_without_its_colon_only() {
+        assert!(is_release_bullet("Update to 2.0", "2.0"));
+        assert!(is_release_bullet("Update to 2.0:", "2.0"));
+        assert!(!is_release_bullet("Update to 2.01", "2.0"));
+        assert!(!is_release_bullet("Update to 2.0 (bsc#1)", "2.0"));
     }
 
     #[test]

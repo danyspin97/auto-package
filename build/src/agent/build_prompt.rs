@@ -571,7 +571,7 @@ fn entry_section(req: &TurnRequest<'_>) -> String {
         .unwrap_or_default();
     let others: Vec<&String> = bullets
         .iter()
-        .filter(|b| **b != format!("Update to {}", req.version))
+        .filter(|b| !crate::osc::is_release_bullet(b, req.version))
         .collect();
     if others.is_empty() {
         return String::new();

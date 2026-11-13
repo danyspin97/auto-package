@@ -194,11 +194,10 @@ pub(super) fn with_flag_lines_in_release_entry(
         .position(|l| is_separator(l.trim()))
         .map_or(all.len(), |i| first + 1 + i);
     let bullet_text = |l: &str| l.trim().trim_start_matches(['-', '*', ' ']).to_string();
-    let update = format!("Update to {version}");
     if !all[first + 1..end]
         .iter()
         .map(|l| bullet_text(l))
-        .any(|t| t == update)
+        .any(|t| is_release_bullet(&t, version))
     {
         return None;
     }
@@ -214,7 +213,7 @@ pub(super) fn with_flag_lines_in_release_entry(
     let is_bullet = |l: &str| !l.starts_with(' ') && (l.starts_with("- ") || l.starts_with("* "));
     let at = kept
         .iter()
-        .position(|l| bullet_text(l) == update)
+        .position(|l| is_release_bullet(&bullet_text(l), version))
         .unwrap_or(0);
     let block_end = kept[at + 1..]
         .iter()
@@ -251,8 +250,11 @@ pub(super) fn with_bullet_in_release_entry(
         .map_or(lines.len(), |i| first + 1 + i);
     let entry = &lines[first + 1..end];
     let bullet_text = |l: &&str| l.trim().trim_start_matches(['-', '*', ' ']).to_string();
-    let update = format!("Update to {version}");
-    if !entry.iter().map(bullet_text).any(|t| t == update) {
+    if !entry
+        .iter()
+        .map(bullet_text)
+        .any(|t| is_release_bullet(&t, version))
+    {
         return None;
     }
     // The block is in the entry already: nothing to add.
