@@ -27,16 +27,20 @@ fn the_index_routes_unterminated_brace_to_convention_19() {
 }
 
 #[test]
-fn convention_19_keeps_an_origin_opener_that_has_an_environment_assignment() {
+fn convention_19_keeps_any_origin_braced_python_expand_block_as_it_is() {
     let text = crate::conventions_table::CONVENTIONS[18].1;
     let at = text
-        .find("119. **An origin's braced opener")
-        .expect("convention 19 has the origin-opener rule");
+        .find("119. **An origin's valid braced `%{python_expand ...}` block")
+        .expect("convention 19 has the origin-block rule");
     let rule = &text[at..];
+    assert!(rule.contains("keep the block as it is and"));
+    assert!(rule.contains("Never turn a block into per-line"));
+    assert!(rule.contains("never merge two blocks or split one"));
+    assert!(rule.contains("never write\n   `%python_expand %fdupes ...`"));
     assert!(rule.contains("`%{python_expand PYTHONPATH=%{buildroot}%{$python_sitelib}`"));
-    assert!(rule.contains("keep that opener line exactly"));
-    assert!(rule.contains("Do not convert it to the `#` form"));
+    assert!(rule.contains("do not convert it to the `#` form"));
     assert!(rule.contains("`$python -m pytest tests`"));
+    assert!(rule.contains("only its `sed` line changes"));
 }
 
 #[test]
