@@ -295,6 +295,24 @@ are condensed by one model call, and when they stay too many the entry links
 the release pages or names the changelog file. `--no-agent` makes no model call
 and uses those links or that file line.
 
+An update that jumps several upstream releases may carry one recap per release
+in its entry, newest first: the first `Update to <version>` bullet is the
+spec's own release, and each older release between the old and the new version
+gets a bullet of its own after it, with its notes under it:
+
+```
+- Update to 1.14.1:
+  * <changes for 1.14.1>
+- Update to 1.14.0:
+  * <changes for 1.14.0>
+```
+
+A single release keeps the plain `- Update to <version>` form. Tools read the
+bullets of such an entry this way: the newest one is the version check and the
+one that needs notes, an older one is kept as it is, and a bullet for a newer
+release than the spec's goes. The recap generation does not write this form
+yet; a later change will.
+
 A package packaged for the first time gets the recap of its own version only
 when it is a Rust package built from a `tar_scm` service, today. Other new
 packages keep the plain `Update to <version>` entry. A rerun of a first
