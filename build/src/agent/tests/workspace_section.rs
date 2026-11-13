@@ -23,3 +23,23 @@ fn the_workspace_section_makes_paths_relative_to_the_workspace() {
         assert!(section.contains(want), "the workspace section lacks {want}");
     }
 }
+
+/// The `package` link lists the checkout's files to the turn: its line is in the
+/// workspace map only when the link exists.
+#[test]
+fn the_workspace_map_lists_the_package_link_when_it_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path();
+    let line = "\n  package/";
+    let prompt = build_turn_prompt(&request(ws, &[]));
+    assert!(
+        !prompt.contains(line),
+        "no link, yet the map lists package/"
+    );
+    let checkout = ws.join("checkout");
+    std::fs::create_dir(&checkout).unwrap();
+    std::os::unix::fs::symlink(&checkout, ws.join("package")).unwrap();
+    let prompt = build_turn_prompt(&request(ws, &[]));
+    assert!(prompt.contains(line), "the map lacks the package/ line");
+    assert!(prompt.contains("Edit only the spec at its absolute path"));
+}

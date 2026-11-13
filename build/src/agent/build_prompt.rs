@@ -201,6 +201,12 @@ pub(super) fn build_turn_prompt(req: &TurnRequest<'_>) -> String {
             "rpmspec --parse stderr from the last failure",
             false,
         ),
+        (
+            "package/",
+            "the package directory on OBS: `.spec`, patches, `_service`, `.changes`; \
+             list and Read it here, but Edit only the spec at its absolute path below",
+            false,
+        ),
         ("source/", source_desc, false),
         (
             "sdist/",
