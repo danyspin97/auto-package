@@ -170,3 +170,7 @@ pub fn reconcile_with_obs(
     }
     out
 }
+
+#[cfg(test)]
+#[path = "reconcile_scope_tests.rs"]
+mod scope_tests;
