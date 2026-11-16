@@ -145,10 +145,24 @@ pub fn add_update_bullet(new: &str, base: Option<&str>, version: &str) -> Result
     if lines.get(at).is_some_and(|l| l.trim().is_empty()) {
         at += 1;
     }
-    let bullet = format!("- Update to {version}");
+    let bullet = if uses_colon_form(new) {
+        format!("- Update to {version}:")
+    } else {
+        format!("- Update to {version}")
+    };
     lines.insert(at, &bullet);
     let own = format!("{}\n", lines.join("\n"));
     Ok(with_own(new, prefix, own))
+}
+
+/// Whether the entries of `text` write an `Update to` bullet in the colon form
+/// (`- Update to <version>:`), as the recap of several releases does.
+fn uses_colon_form(text: &str) -> bool {
+    text.lines().filter_map(|l| l.strip_prefix("- ")).any(|b| {
+        b.strip_prefix("Update to ")
+            .and_then(|v| v.strip_suffix(':'))
+            .is_some_and(|v| !v.is_empty() && !v.contains(char::is_whitespace))
+    })
 }
 
 /// A bullet for a patch the request adds and no bullet names: `Add <file>:

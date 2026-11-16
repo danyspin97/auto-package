@@ -113,6 +113,20 @@ fn the_update_bullet_is_added_when_none_exists_and_not_when_another_does() {
 }
 
 #[test]
+fn the_update_bullet_takes_the_colon_when_an_older_entry_has_it() {
+    let middle = entry(
+        "Mon Oct  2 00:00:00 UTC 2026",
+        "- Update to 2.10.3:\n  * old recap",
+    );
+    let new = format!("{}{middle}{OLD}", entry(DATE, "- Fix a thing"));
+    let fixed = add_update_bullet(&new, Some(OLD), "2.10.4").unwrap();
+    assert!(
+        fixed.contains(&format!("{MAIL}\n\n- Update to 2.10.4:\n- Fix a thing\n")),
+        "{fixed}"
+    );
+}
+
+#[test]
 fn an_older_release_bullet_stays_under_the_new_one() {
     let older = format!(
         "{}{OLD}",
@@ -121,7 +135,7 @@ fn an_older_release_bullet_stays_under_the_new_one() {
     let fixed = add_update_bullet(&older, Some(OLD), "2.10.4").unwrap();
     assert!(
         fixed.contains(&format!(
-            "{MAIL}\n\n- Update to 2.10.4\n- Update to 2.10.3:\n  * old recap\n- Fix a thing\n"
+            "{MAIL}\n\n- Update to 2.10.4:\n- Update to 2.10.3:\n  * old recap\n- Fix a thing\n"
         )),
         "{fixed}"
     );
