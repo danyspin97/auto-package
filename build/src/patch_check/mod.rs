@@ -21,6 +21,9 @@ use std::time::Duration;
 mod applied;
 #[cfg(test)]
 mod applied_tests;
+mod headers;
+#[cfg(test)]
+mod headers_tests;
 mod post_image;
 #[cfg(test)]
 mod post_image_tests;
@@ -35,6 +38,7 @@ mod series;
 mod tests;
 
 pub use applied::*;
+pub use headers::*;
 pub use present::*;
 use quilt::*;
 pub use rounds::*;
