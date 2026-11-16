@@ -69,6 +69,7 @@ mod provenance;
 mod ready;
 #[cfg(test)]
 mod ready_inherited_tests;
+mod ready_scope;
 mod request;
 mod requested;
 mod rpmlint_audit;

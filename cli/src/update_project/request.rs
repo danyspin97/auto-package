@@ -203,9 +203,21 @@ pub(crate) fn prepare_request(
     }
     // The ready gate: a package that is not ready is not requested, and the
     // others go ahead (the caller decides for each package).
-    if let (ready::ReadyCheck::Gate(judging), Some(rev)) = (ready_check, source_rev.as_deref()) {
-        match ready::submit_gate(state_root, branch, item, rev, judging, reporter) {
-            ready::GateOutcome::Ready => {}
+    if let (ready::ReadyCheck::Gate { judging, carry }, Some(rev)) =
+        (ready_check, source_rev.as_deref())
+    {
+        match ready::submit_gate(
+            state_root,
+            branch,
+            item,
+            rev,
+            judging,
+            carry.as_ref(),
+            reporter,
+        ) {
+            // A package with no unpublished work has nothing to review: it goes
+            // ahead as it does for `update`.
+            ready::GateOutcome::Ready | ready::GateOutcome::NotCarried => {}
             ready::GateOutcome::NotReady(why) => {
                 say(format!("no request for {}: {why}", item.pkg));
                 return Err(SrOutcome::NotEligible(why));

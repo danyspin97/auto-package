@@ -85,7 +85,7 @@ impl SubmitBackend {
             arch_wait,
             self.reporter.as_ref(),
             None,
-            self.ready,
+            self.ready.clone(),
         ) {
             Ok(sr) => Ok((item, sr)),
             Err(outcome) => Err(submit_failure(outcome)),

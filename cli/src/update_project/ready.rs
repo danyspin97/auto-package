@@ -7,6 +7,7 @@
 
 use super::existing_lint;
 use super::leftovers::{self, Carry};
+use super::ready_scope::CarryScope;
 use super::*;
 use ap_build::bugfix::{FindingRoute, ReviewFinding, not_submittable, route};
 use ap_build::request_review::fetch::{LiveRequestObs, RequestObs};
@@ -109,17 +110,24 @@ pub(super) fn settled(
 }
 
 /// When a ready check runs for a submit (see `prepare_request`): never for
-/// `update`, `build` and `fix`; for `lint`, with its settings.
-#[derive(Clone, Copy)]
+/// `update` and `build`; for `lint`, with its settings, and only for a package
+/// that carries unpublished work (`carry`).
+#[derive(Clone)]
 pub(crate) enum ReadyCheck {
     Skip,
-    Gate(Judging),
+    Gate {
+        judging: Judging,
+        carry: Option<CarryScope>,
+    },
 }
 
 /// The check a submit of this run gets.
 pub(super) fn check_for(a: &UpdateProjectArgs) -> ReadyCheck {
     if a.improve {
-        ReadyCheck::Gate(Judging::of(a))
+        ReadyCheck::Gate {
+            judging: Judging::of(a),
+            carry: Some(CarryScope::of(a)),
+        }
     } else {
         ReadyCheck::Skip
     }
@@ -129,6 +137,8 @@ pub(super) fn check_for(a: &UpdateProjectArgs) -> ReadyCheck {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum GateOutcome {
     Ready,
+    /// The package carries no unpublished work: nothing is reviewed.
+    NotCarried,
     /// The refusal the request is recorded with.
     NotReady(String),
     /// The gate could not judge: nothing is requested.
@@ -321,8 +331,14 @@ pub(super) fn submit_gate(
     item: &Item,
     srcmd5: &str,
     judging: Judging,
+    carry: Option<&CarryScope>,
     reporter: &(dyn Reporter + Send + Sync),
 ) -> GateOutcome {
+    if let Some(scope) = carry
+        && !scope.carries(branch, item, Emit::run(reporter))
+    {
+        return GateOutcome::NotCarried;
+    }
     // The submit's own origin: the request targets it with the same package name.
     let carry = Carry {
         work: branch.to_string(),
