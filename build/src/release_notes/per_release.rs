@@ -202,7 +202,39 @@ pub(super) fn shrunk(releases: &[Release]) -> Vec<Vec<String>> {
             lists[i] = only_link(&releases[i]);
         }
     }
+    collapse(releases, &mut lists);
     lists
+}
+
+/// Makes `lists` fit the total limit when even the links do not: the newest
+/// releases stay as they are, as many as fit, and the rest become one
+/// `see <link> for the older releases` line under the last one kept, with the
+/// security lines of the rest. Nothing changes when no such split fits.
+fn collapse(releases: &[Release], lists: &mut Vec<Vec<String>>) {
+    if fits(lists) {
+        return;
+    }
+    let n = lists.len();
+    for kept in (1..n).rev() {
+        let Some(rest) = releases[kept..].iter().find(|r| r.has_notes()) else {
+            continue;
+        };
+        let mut out: Vec<Vec<String>> = lists[..kept].to_vec();
+        let last = &mut out[kept - 1];
+        last.extend(
+            lists[kept..]
+                .iter()
+                .flatten()
+                .filter(|i| is_security(i))
+                .cloned(),
+        );
+        last.push(format!("see {} for the older releases", rest.link));
+        out.extend(std::iter::repeat_n(Vec::new(), n - kept));
+        if fits(&out) {
+            *lists = out;
+            return;
+        }
+    }
 }
 
 /// The lists of `releases` when the notes do not fit the limits: the model's

@@ -276,6 +276,37 @@ fn then_each_older_release_becomes_its_link_oldest_first() {
 }
 
 #[test]
+fn exactly_the_total_of_releases_is_listed_as_they_are() {
+    let releases: Vec<_> = (1..=40).rev().map(|v| release(v, items(1, "x"))).collect();
+    let lists = super::per_release::shrunk(&releases);
+    assert_eq!(lens(&lists), vec![1; 40]);
+}
+
+#[test]
+fn past_the_total_the_newest_releases_stay_and_the_rest_is_one_see_line() {
+    for count in [41, 100] {
+        let releases: Vec<_> = (1..=count)
+            .rev()
+            .map(|v| release(v, items(1, "x")))
+            .collect();
+        let lists = super::per_release::shrunk(&releases);
+        assert!(lists.iter().map(Vec::len).sum::<usize>() <= 40, "{count}");
+        // The newest 39 are listed; the rest is named by the one next down.
+        assert_eq!(lens(&lists[..38]), vec![1; 38], "{count}");
+        let next = count - 39;
+        assert_eq!(
+            lists[38],
+            [
+                format!("see https://example.org/r/{}", count - 38),
+                format!("see https://example.org/r/{next} for the older releases"),
+            ],
+            "{count}"
+        );
+        assert!(lists[39..].iter().all(Vec::is_empty), "{count}");
+    }
+}
+
+#[test]
 fn the_newest_release_keeps_its_full_allowance() {
     let releases: Vec<_> = (1..=6).rev().map(|v| release(v, items(20, "x"))).collect();
     let lists = super::per_release::shrunk(&releases);
