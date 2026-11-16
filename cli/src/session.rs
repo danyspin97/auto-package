@@ -30,9 +30,10 @@ impl std::fmt::Display for NotSubmitted {
 
 impl std::error::Error for NotSubmitted {}
 
-/// Whether an update run is open: started and not yet ended. Its builds stop
-/// on an interrupt, and the run writes its summary once they have, so the
-/// interrupt handler waits for it (see [`OpenRun`]).
+/// Whether an update or build run is open: started and not yet ended. Its
+/// builds stop on an interrupt, and the run writes its summary once they have,
+/// so the interrupt handler waits for it (see [`OpenRun`]). A build holds it
+/// from the start of its scope, so it ends after its `RunFinished`.
 static OPEN_RUN: (std::sync::Mutex<bool>, std::sync::Condvar) =
     (std::sync::Mutex::new(false), std::sync::Condvar::new());
 

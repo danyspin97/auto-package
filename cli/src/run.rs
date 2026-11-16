@@ -335,6 +335,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                 let (source_urls, python_flavors) = (&source_urls, &python_flavors);
                 let (reporter, base_reporter, tui_ctrl) = (&reporter, &base_reporter, &tui_ctrl);
                 std::thread::scope(|scope| {
+                    let _open = OpenRun::open();
                     if let Some(add_rx) = add_rx {
                         scope.spawn(move || {
                             for req in add_rx {
@@ -532,7 +533,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
                         withdraw_settled(&mut failures, memory, tui_ctrl);
                         !failures.is_empty()
                     };
-                    // Sum usage from all AgentReply events recorded during the run.
+                    report_interrupt_summary(ap_build::proc::interrupted(), &**reporter, memory);
                     reporter.report(&Event::RunFinished {
                         outcome: if ap_build::proc::interrupted() {
                             RunOutcome::Interrupted
