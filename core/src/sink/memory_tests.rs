@@ -64,3 +64,19 @@ fn the_memory_sink_keeps_the_build_steps_of_each_package_and_nothing_else() {
     // its end is kept.
     assert_eq!(sink.finished().len(), 1);
 }
+
+#[test]
+fn the_memory_sink_keeps_the_packages_selected_in_order() {
+    let sink = MemorySink::new();
+    for pkg in ["foo", "bar"] {
+        sink.report(&Event::TargetSelected {
+            pkg: pkg.into(),
+            version: "1.0".into(),
+            reason: crate::event::SelectionReason::RequestedRoot,
+            blocked_by: Vec::new(),
+            from_version: None,
+        });
+    }
+    assert_eq!(sink.selected(), ["foo", "bar"]);
+    assert!(sink.finished().is_empty());
+}

@@ -16,6 +16,7 @@ pub struct MemorySink {
 pub(super) struct MemoryState {
     usage: Usage,
     finished: Vec<Event>,
+    selected: Vec<String>,
     unchecked: Vec<Event>,
     /// The build and failure-extract steps started so far, by package and
     /// step id, so the events of those steps alone are kept.
@@ -42,6 +43,11 @@ impl MemorySink {
     /// The `PackageFinished` events so far, in order.
     pub fn finished(&self) -> Vec<Event> {
         self.lock().finished.clone()
+    }
+
+    /// The packages of the `TargetSelected` events so far, in order.
+    pub fn selected(&self) -> Vec<String> {
+        self.lock().selected.clone()
     }
 
     /// The `VersionUnchecked` events so far, in order.
@@ -79,6 +85,7 @@ impl Reporter for MemorySink {
                 st.finished.push(event.clone());
                 st.tries.push((pkg.clone(), event.clone()));
             }
+            Event::TargetSelected { pkg, .. } => self.lock().selected.push(pkg.clone()),
             Event::VersionUnchecked { .. } => self.lock().unchecked.push(event.clone()),
             _ => self.keep_try_event(event),
         }
