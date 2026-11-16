@@ -95,9 +95,11 @@ impl MemorySink {
         let mut st = self.lock();
         let key = |step: &StepId| (pkg.clone(), step.0);
         match event {
-            Event::StepStarted { step, kind, .. }
-                if matches!(kind, StepKind::Build | StepKind::ExtractFailure) =>
-            {
+            Event::StepStarted {
+                step,
+                kind: StepKind::Build | StepKind::ExtractFailure,
+                ..
+            } => {
                 st.tracked.insert(key(step));
                 st.tries.push((pkg.clone(), event.clone()));
             }
