@@ -141,9 +141,40 @@ pub fn set_log_level(level: LogLevel) {
     with(|d| d.debug = level >= LogLevel::Debug);
 }
 
+/// The event a held line is reported as. A line that reports a problem stays
+/// a warning; a routine line is reported as a progress line.
+pub(crate) fn held_event(line: &str) -> Event {
+    let message = canonical(line).to_string();
+    if reports_problem(line) {
+        Event::Warning {
+            step: None,
+            message,
+        }
+    } else {
+        Event::Progress {
+            step: None,
+            message,
+        }
+    }
+}
+
+/// Whether a held line reports a problem: a `warning:` line (first, or after
+/// the indent of a `diag!` line), a `✗` line, or a line that says something
+/// failed or could not be done.
+fn reports_problem(line: &str) -> bool {
+    let text = line.trim_start();
+    if text.starts_with("warning:") || text.starts_with('✗') {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    ["failed", "cannot ", "could not ", "can't "]
+        .iter()
+        .any(|word| lower.contains(word))
+}
+
 /// Prints an ordinary diagnostic line, or holds it while the TUI is up (and
-/// then reports it as a warning through the run's reporter, once). The line is
-/// printed at most once per process.
+/// then reports it through the run's reporter, once, as a warning or a
+/// progress line). The line is printed at most once per process.
 pub fn emit(line: &str) {
     let line = printable(line).into_owned();
     let quiet = is_quiet();
@@ -152,10 +183,7 @@ pub fn emit(line: &str) {
         Offer::Held => {
             let reporter = REPORTER.lock().unwrap_or_else(|p| p.into_inner()).clone();
             if let Some(reporter) = reporter {
-                reporter.report(&Event::Warning {
-                    step: None,
-                    message: canonical(&line).to_string(),
-                });
+                reporter.report(&held_event(&line));
             }
         }
         Offer::Recorded | Offer::Repeat => {}

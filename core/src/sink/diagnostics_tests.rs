@@ -113,3 +113,35 @@ fn a_warning_and_its_held_line_are_one_line() {
     assert_eq!(d.offer(canonical("warning: x"), true), Offer::Repeat);
     assert_eq!(d.held.len(), 1);
 }
+
+#[test]
+fn a_held_line_keeps_the_severity_it_was_written_with() {
+    let warning = |line: &str| matches!(held_event(line), Event::Warning { .. });
+    assert!(warning("warning: x"));
+    assert!(warning("  warning: the claude stream had no result"));
+    assert!(!warning("  checking openSUSE:Factory for foo"));
+    assert!(!warning("note: x"));
+    match held_event("  searching GitLab for: foo") {
+        Event::Progress { message, .. } => assert_eq!(message, "  searching GitLab for: foo"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_held_line_that_reports_a_failure_stays_a_warning() {
+    let warning = |line: &str| matches!(held_event(line), Event::Warning { .. });
+    assert!(warning("✗ agent lookup failed to run"));
+    assert!(warning("  cannot move the spec aside"));
+    assert!(warning("  could not record the archive digest"));
+    assert!(warning("  quilt pop -a failed"));
+    assert!(warning("  Quilt push FAILED on the second patch"));
+    assert!(warning("  can't open the changes file"));
+}
+
+#[test]
+fn a_routine_held_line_is_a_progress_line() {
+    let progress = |line: &str| matches!(held_event(line), Event::Progress { .. });
+    assert!(progress("  looking up the agent for foo"));
+    assert!(progress("  found 3 candidates for foo"));
+    assert!(progress("  quilt push -a"));
+}
