@@ -431,7 +431,7 @@ fn inspect_from_entries(
                         ok.then_some(dir)
                     })
                     .collect();
-                choose_fallback_dir(dirs, normalized.as_deref())
+                choose_fallback_dir(dirs, normalized)
             }
         },
     };

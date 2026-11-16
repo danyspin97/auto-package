@@ -401,7 +401,7 @@ fn a_forge_archive_gives_its_top_directory_after_a_pax_header() {
         }
         let info = inspect(&tarball).unwrap();
         assert_eq!(info.top_level_dir.as_deref(), Some(top), "{top}");
-        assert!(info.files.iter().any(|f| *f == meson), "{top}");
+        assert!(info.files.contains(&meson), "{top}");
     }
 }
 

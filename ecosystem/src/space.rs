@@ -274,7 +274,7 @@ mod tests {
         }
         let (now, peak) = *running.lock().unwrap();
         assert_eq!(now, 0);
-        assert!(peak <= 2 && peak >= 1);
+        assert!((1..=2).contains(&peak));
     }
 
     #[test]
