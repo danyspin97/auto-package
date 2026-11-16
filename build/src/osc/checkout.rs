@@ -278,7 +278,7 @@ pub(super) fn discard_unfinished_checkout(checkout_dir: &Path, emit: Emit<'_>) {
             Ok(()) => {
                 let osc_dir = aside.join(".osc");
                 if let Err(e) = fs::remove_dir_all(&osc_dir) {
-                    ap_core::diag!("  could not remove {}: {e}", osc_dir.display());
+                    crate::diag_failure!("  could not remove {}: {e}", osc_dir.display());
                 }
                 prune_unfinished_asides(checkout_dir, Some(&aside), None);
                 emit.reporter.report(&Event::Progress {
@@ -290,7 +290,9 @@ pub(super) fn discard_unfinished_checkout(checkout_dir: &Path, emit: Emit<'_>) {
                     ),
                 });
             }
-            Err(e) => ap_core::diag!("  could not move {} aside: {e}", checkout_dir.display()),
+            Err(e) => {
+                crate::diag_failure!("  could not move {} aside: {e}", checkout_dir.display())
+            }
         }
         return;
     }
@@ -302,7 +304,7 @@ pub(super) fn discard_unfinished_checkout(checkout_dir: &Path, emit: Emit<'_>) {
                 checkout_dir.display()
             ),
         }),
-        Err(e) => ap_core::diag!("  could not remove {}: {e}", checkout_dir.display()),
+        Err(e) => crate::diag_failure!("  could not remove {}: {e}", checkout_dir.display()),
     }
 }
 
@@ -353,7 +355,7 @@ pub(super) fn prune_unfinished_asides(
             }
         }
         if let Err(e) = fs::remove_dir_all(&path) {
-            ap_core::diag!("  could not remove {}: {e}", path.display());
+            crate::diag_failure!("  could not remove {}: {e}", path.display());
         }
     }
 }

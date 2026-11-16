@@ -270,7 +270,7 @@ pub(super) fn get_build_status_xml(
             });
         }
         Err(ApiFailure::Other(msg)) => {
-            ap_core::diag!("  {msg}");
+            crate::diag_failure!("  {msg}");
             return Ok(None);
         }
     };

@@ -220,3 +220,36 @@ pub fn abort_reason() -> Option<String> {
 pub(crate) fn kill_process_group(pid: u32) {
     ap_core::pgroup::kill_group(pid);
 }
+
+/// A `diag!` line about an osc or io failure, printed unless the user's stop
+/// caused it: the stop kills the children, so their failures follow from it
+/// and are not warned about (the run's summary says it was interrupted). The
+/// rule is the one the agent, ledger, scheduler and arch paths use.
+#[macro_export]
+macro_rules! diag_failure {
+    ($($arg:tt)*) => {
+        if !$crate::proc::interrupted() {
+            ap_core::diag!($($arg)*);
+        }
+    };
+}
+
+/// Reports a warning event about an osc or io failure, unless the user's stop
+/// caused it (see [`diag_failure`]).
+pub fn report_failure_warning<R: ap_core::sink::Reporter + ?Sized>(
+    reporter: &R,
+    event: &ap_core::event::Event,
+) {
+    report_unless_stopped(interrupted(), reporter, event);
+}
+
+/// [`report_failure_warning`] with the stop given: reports unless `stopped`.
+pub(crate) fn report_unless_stopped<R: ap_core::sink::Reporter + ?Sized>(
+    stopped: bool,
+    reporter: &R,
+    event: &ap_core::event::Event,
+) {
+    if !stopped {
+        reporter.report(event);
+    }
+}

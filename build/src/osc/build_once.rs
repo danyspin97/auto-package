@@ -385,10 +385,13 @@ pub(super) fn obs_build_once(
         log: Some(log_path.to_path_buf()),
     });
     if let Err(e) = fetch_buildlog(project, &log_pkg, repo, arch, log_path, Emit::quiet()) {
-        reporter.report(&Event::Warning {
-            step,
-            message: format!("could not fetch the OBS build log for {log_pkg}: {e}"),
-        });
+        crate::proc::report_failure_warning(
+            reporter,
+            &Event::Warning {
+                step,
+                message: format!("could not fetch the OBS build log for {log_pkg}: {e}"),
+            },
+        );
     }
     let log_bytes = log_path.metadata().map(|m| m.len()).unwrap_or(0);
     let elapsed = start.elapsed();

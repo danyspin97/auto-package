@@ -99,7 +99,7 @@ pub(super) fn build_details(
     }
     let entries = obs_package_entries(project, repo, arch, pkg_name, None)
         .map_err(|e| match e {
-            ApiFailure::Http(_, m) | ApiFailure::Other(m) => ap_core::diag!("  {m}"),
+            ApiFailure::Http(_, m) | ApiFailure::Other(m) => crate::diag_failure!("  {m}"),
         })
         .ok()??;
     obs_status::entry_in(&entries, repo, arch, pkg_name)?

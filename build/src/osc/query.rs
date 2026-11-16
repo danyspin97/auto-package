@@ -76,7 +76,7 @@ pub(super) fn api_is_retried(method: Option<&str>, data: Option<&str>) -> bool {
 /// failed query as "no answer" rather than as an error.
 pub(super) fn osc_query(args: &[&str], emit: Emit<'_>, what: &str) -> Option<Captured> {
     capture_query(args, &anywhere(), emit, OSC_QUERY_TIMEOUT)
-        .map_err(|e| ap_core::diag!("  osc {what}: {e}"))
+        .map_err(|e| crate::diag_failure!("  osc {what}: {e}"))
         .ok()
 }
 
@@ -145,7 +145,7 @@ pub(super) fn osc_api_checked_at(apiurl: Option<&str>, path: &str) -> Result<Str
 pub(super) fn osc_api(path: &str) -> Option<String> {
     osc_api_checked(path)
         .map_err(|e| match e {
-            ApiFailure::Http(_, m) | ApiFailure::Other(m) => ap_core::diag!("  {m}"),
+            ApiFailure::Http(_, m) | ApiFailure::Other(m) => crate::diag_failure!("  {m}"),
         })
         .ok()
 }

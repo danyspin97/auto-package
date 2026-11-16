@@ -196,7 +196,7 @@ pub fn distro_provides(capability: &str) -> bool {
             // zypper's "capability not found" exit: a real answer, cacheable.
             Ok(out) if out.code == ZYPPER_CAPABILITY_NOT_FOUND => Some(false),
             Ok(out) => {
-                ap_core::diag!(
+                crate::diag_failure!(
                     "  zypper search for {capability}: exit {}: {}",
                     out.code,
                     first_line(&out.stderr)
@@ -204,7 +204,7 @@ pub fn distro_provides(capability: &str) -> bool {
                 None
             }
             Err(e) => {
-                ap_core::diag!("  zypper search for {capability}: {e}");
+                crate::diag_failure!("  zypper search for {capability}: {e}");
                 None
             }
         }

@@ -12,6 +12,8 @@ use ap_core::sink::{NULL_REPORTER, Reporter};
 mod capture;
 #[cfg(test)]
 mod capture_timeout_tests;
+#[cfg(test)]
+mod failure_tests;
 mod logged;
 #[cfg(test)]
 mod logged_tests;

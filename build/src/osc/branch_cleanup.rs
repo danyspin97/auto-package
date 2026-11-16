@@ -50,10 +50,13 @@ pub fn clean_branch_leftovers(
     let origin_changes = read("changes");
     let origin_spec = read("spec");
     let warn = |message: String| {
-        emit.reporter.report(&Event::Warning {
-            step: emit.step,
-            message,
-        })
+        crate::proc::report_failure_warning(
+            emit.reporter,
+            &Event::Warning {
+                step: emit.step,
+                message,
+            },
+        )
     };
     clean_with_origin(
         checkout,

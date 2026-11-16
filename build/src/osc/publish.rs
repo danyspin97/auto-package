@@ -414,8 +414,8 @@ pub fn restore_named_sources(checkout_dir: &Path, emit: Emit<'_>) -> Vec<String>
         }
         match proc::capture("osc", &["revert", name.as_str()], checkout_dir, emit) {
             Ok(out) if out.success() => restored.push(name),
-            Ok(out) => ap_core::diag!("  osc revert {name}: {}", first_line(&out.stderr)),
-            Err(e) => ap_core::diag!("  osc revert {name}: {e}"),
+            Ok(out) => crate::diag_failure!("  osc revert {name}: {}", first_line(&out.stderr)),
+            Err(e) => crate::diag_failure!("  osc revert {name}: {e}"),
         }
     }
     restored
@@ -439,8 +439,8 @@ pub fn remove_tracked_strays(
         }
         match proc::capture("osc", &["rm", "--force", name.as_str()], checkout_dir, emit) {
             Ok(out) if out.success() => removed.push(name.clone()),
-            Ok(out) => ap_core::diag!("  osc rm {name}: {}", first_line(&out.stderr)),
-            Err(e) => ap_core::diag!("  osc rm {name}: {e}"),
+            Ok(out) => crate::diag_failure!("  osc rm {name}: {}", first_line(&out.stderr)),
+            Err(e) => crate::diag_failure!("  osc rm {name}: {e}"),
         }
     }
     // A tracked file that is gone from the checkout was deleted on purpose (the
@@ -532,13 +532,13 @@ pub fn commit(
     let mut add = vec!["addremove".to_string()];
     add.extend(files.iter().cloned());
     match proc::capture("osc", &add, checkout_dir, emit) {
-        Ok(out) if !out.success() => ap_core::diag!(
+        Ok(out) if !out.success() => crate::diag_failure!(
             "  osc addremove in {}: exit {}: {}",
             checkout_dir.display(),
             out.code,
             first_line(&out.stderr)
         ),
-        Err(e) => ap_core::diag!("  osc addremove in {}: {e}", checkout_dir.display()),
+        Err(e) => crate::diag_failure!("  osc addremove in {}: {e}", checkout_dir.display()),
         Ok(_) => {}
     }
 

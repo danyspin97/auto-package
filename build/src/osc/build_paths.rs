@@ -109,10 +109,13 @@ fn skip_absent<T>(
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(project.to_string());
             if fresh {
-                emit.reporter.report(&Event::Warning {
-                    step: emit.step,
-                    message: format!("{e}; treating {project} as not carrying the packages"),
-                });
+                crate::proc::report_failure_warning(
+                    emit.reporter,
+                    &Event::Warning {
+                        step: emit.step,
+                        message: format!("{e}; treating {project} as not carrying the packages"),
+                    },
+                );
             }
             Ok(None)
         }

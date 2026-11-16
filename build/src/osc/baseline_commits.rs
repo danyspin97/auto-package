@@ -98,7 +98,7 @@ pub fn record_service_commit(
             }
             let _ = fs::remove_file(dir.join(PENDING_COMMIT));
         }
-        Err(why) => ap_core::diag!(
+        Err(why) => crate::diag_failure!(
             "  the commit to {} landed but its revision is not recorded: {why}",
             checkout.display()
         ),
@@ -161,14 +161,14 @@ fn has_service(checkout: &Path) -> bool {
 /// was appended.
 fn append_landed(dir: &Path, checkout: &Path, log: &str, before: &str) -> bool {
     if has_service(checkout) {
-        ap_core::diag!(
+        crate::diag_failure!(
             "  {} has a _service file: its commit's revision is not recorded (a server run may rewrite it)",
             checkout.display()
         );
         return false;
     }
     let Some(after) = checkout_revision(checkout) else {
-        ap_core::diag!(
+        crate::diag_failure!(
             "  the commit to {} landed, but its revision is not in .osc/_files",
             checkout.display()
         );
@@ -186,7 +186,7 @@ fn append_landed(dir: &Path, checkout: &Path, log: &str, before: &str) -> bool {
     match recorded {
         Ok(()) => true,
         Err(e) => {
-            ap_core::diag!("  cannot record the revision of the commit: {e}");
+            crate::diag_failure!("  cannot record the revision of the commit: {e}");
             false
         }
     }
@@ -233,7 +233,7 @@ pub fn record_restore(
             if !restore_landed_despite_error(dir, checkout, &before, &obs) {
                 return Err(e);
             }
-            ap_core::diag!(
+            crate::diag_failure!(
                 "  the restore's commit to {} reported an error, but OBS holds the restored state: recorded as landed",
                 checkout.display()
             );

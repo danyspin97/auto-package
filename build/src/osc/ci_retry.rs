@@ -35,7 +35,7 @@ pub(super) fn with_ci_retries(
         match attempt() {
             Err(e) if ci_error_is_transient(&e) => match waits.next() {
                 Some(delay) => {
-                    ap_core::diag!(
+                    crate::diag_failure!(
                         "  osc ci hit a transient error, trying again in {}s: {e}",
                         delay.as_secs()
                     );

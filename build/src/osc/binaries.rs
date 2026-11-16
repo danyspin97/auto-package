@@ -158,7 +158,7 @@ pub(super) fn remove_superseded_rpms(rpms_dir: &Path, current: &[String]) {
         if rpm_base_name(&file).is_some_and(|n| names.contains(n))
             && let Err(e) = fs::remove_file(entry.path())
         {
-            ap_core::diag!("  cannot remove the stale {file}: {e}");
+            crate::diag_failure!("  cannot remove the stale {file}: {e}");
         }
     }
 }

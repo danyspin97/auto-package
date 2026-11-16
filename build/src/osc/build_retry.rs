@@ -81,10 +81,13 @@ pub(super) fn build_with_retriggers(
                     ),
                 });
                 if let Err(e) = rebuild() {
-                    emit.reporter.report(&Event::Warning {
-                        step: emit.step,
-                        message: format!("could not re-trigger the OBS build: {e}"),
-                    });
+                    crate::proc::report_failure_warning(
+                        emit.reporter,
+                        &Event::Warning {
+                            step: emit.step,
+                            message: format!("could not re-trigger the OBS build: {e}"),
+                        },
+                    );
                 }
                 if !pause.is_zero() {
                     sleep_interruptible(pause);
