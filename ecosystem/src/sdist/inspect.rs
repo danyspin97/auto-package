@@ -77,7 +77,7 @@ fn collect_tar_entries(path: &Path, kind: ArchiveKind) -> Result<Vec<InspectEntr
         let file_name = entry_path.file_name().and_then(|n| n.to_str());
         let contents = if matches!(
             file_name,
-            Some("pyproject.toml" | "Cargo.toml" | "setup.cfg")
+            Some("pyproject.toml" | "Cargo.toml" | "setup.cfg" | "setup.py")
         ) {
             read_manifest(&mut entry)
         } else {
@@ -91,6 +91,9 @@ fn collect_tar_entries(path: &Path, kind: ArchiveKind) -> Result<Vec<InspectEntr
     }
     Ok(out)
 }
+
+/// The file names whose `setup_requires` is read.
+const SETUP_FILES: &[&str] = &["setup.cfg", "setup.py"];
 
 /// The directory of an archive entry relative to the top-level directory:
 /// the components between the top and the file, joined with `/`.
@@ -142,7 +145,7 @@ fn collect_zip_entries(path: &Path) -> Result<Vec<InspectEntry>, Error> {
         let contents = if !is_dir
             && matches!(
                 file_name.as_deref(),
-                Some("pyproject.toml" | "Cargo.toml" | "setup.cfg")
+                Some("pyproject.toml" | "Cargo.toml" | "setup.cfg" | "setup.py")
             ) {
             read_manifest(&mut entry)
         } else {
@@ -181,9 +184,10 @@ fn inspect_from_entries(
     // directory it sits in. The winner is picked afterwards so the losers are
     // still available: in a monorepo they are the sibling subprojects.
     let mut py_manifests: Vec<(usize, String, String)> = Vec::new();
-    // Every setup.cfg with its directory: read for `setup_requires` only from
-    // the directory of the chosen pyproject.toml (see `build_system` below).
-    let mut setup_cfgs: Vec<(String, String)> = Vec::new();
+    // Every setup.cfg and setup.py with its directory and file name: read for
+    // `setup_requires` only from the directory of the chosen pyproject.toml
+    // (see `build_system` below).
+    let mut setup_files: Vec<(String, String, String)> = Vec::new();
     let mut cargo: Option<((usize, u8), String)> = None;
     let mut setup_py_depth: Option<usize> = None;
     let mut cmake_manifest = false;
@@ -245,12 +249,14 @@ fn inspect_from_entries(
             continue;
         }
 
-        if file_name == Some("setup.cfg".as_ref())
+        if let Some(name) = file_name
+            .and_then(|n| n.to_str())
+            .filter(|n| SETUP_FILES.contains(n))
             && let Some(src) = &entry.contents
         {
             let dir = manifest_dir(&components);
             if is_safe_manifest_dir(&dir) {
-                setup_cfgs.push((dir, src.clone()));
+                setup_files.push((dir, name.to_string(), src.clone()));
             }
         }
 
@@ -363,13 +369,17 @@ fn inspect_from_entries(
             }
         }
     };
-    // The setup.cfg beside the chosen pyproject.toml (or the root one, when
-    // there is none) adds its `setup_requires` to the build requirements.
+    // The setup.cfg and setup.py beside the chosen pyproject.toml (or the root
+    // ones, when there is none) add their `setup_requires` to the build
+    // requirements.
     let setup_dir = pyproject.as_ref().map_or("", |(_, dir, _)| dir.as_str());
-    let setup_requires: Vec<String> = setup_cfgs
+    let setup_requires: Vec<String> = setup_files
         .iter()
-        .filter(|(dir, _)| dir == setup_dir)
-        .flat_map(|(_, src)| setup_cfg_setup_requires(src))
+        .filter(|(dir, _, _)| dir == setup_dir)
+        .flat_map(|(_, name, src)| match name.as_str() {
+            "setup.cfg" => setup_cfg_setup_requires(src),
+            _ => setup_py_setup_requires(src),
+        })
         .collect();
     let build_system = build_system.with_setup_requires(declared_by_pyproject, &setup_requires);
 

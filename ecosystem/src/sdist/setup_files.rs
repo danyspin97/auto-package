@@ -72,3 +72,67 @@ fn flush(pending: Option<(&str, Vec<&str>)>, out: &mut Vec<String>) {
         );
     }
 }
+
+/// The `setup_requires` of a setup.py, read as text. Only a literal list of
+/// plain quoted strings counts: `setup_requires=["wheel", "cython>=3"]`. A
+/// name, a call, a concatenation, an f-string, a comment inside the list, or
+/// a second `setup_requires =` in the file gives nothing, since the value
+/// would have to be run to be known.
+pub(super) fn setup_py_setup_requires(text: &str) -> Vec<String> {
+    let mut assignments = keyword_assignments(text);
+    let (Some(start), None) = (assignments.next(), assignments.next()) else {
+        return Vec::new();
+    };
+    literal_string_list(&text[start..]).unwrap_or_default()
+}
+
+/// Byte offsets just after each `setup_requires =` (not `==`) in `text`,
+/// where the name is a whole identifier. A match after a `#` on its line (a
+/// comment) or after a `.` (an attribute such as `self.setup_requires`) is
+/// not the keyword argument, so it is left out.
+fn keyword_assignments(text: &str) -> impl Iterator<Item = usize> + '_ {
+    const KEYWORD: &str = "setup_requires";
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    text.match_indices(KEYWORD).filter_map(move |(at, _)| {
+        let before = &text[..at];
+        let before_ok = before.chars().next_back().is_none_or(|c| !is_ident(c));
+        let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+        let in_comment = before[line_start..].contains('#');
+        let attribute = before.trim_end().ends_with('.');
+        let after = &text[at + KEYWORD.len()..];
+        let after_ok = after.chars().next().is_none_or(|c| !is_ident(c));
+        let rest = after.trim_start();
+        let eq = rest.strip_prefix('=')?;
+        let counts = before_ok && after_ok && !in_comment && !attribute;
+        (counts && !eq.starts_with('=')).then(|| text.len() - eq.len())
+    })
+}
+
+/// The strings of a list literal that starts (after blanks) with `[`, or
+/// `None` when anything else appears before its `]`.
+fn literal_string_list(text: &str) -> Option<Vec<String>> {
+    let mut rest = text.trim_start().strip_prefix('[')?.trim_start();
+    let mut out = Vec::new();
+    loop {
+        if let Some(after) = rest.strip_prefix(']') {
+            // The list is the whole argument: nothing may follow it but the
+            // end of the call (`['a'] + extra` is not a literal).
+            let after = after.trim_start();
+            return (after.is_empty() || after.starts_with([',', ')'])).then_some(out);
+        }
+        let quote = rest.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+        let body = &rest[1..];
+        let end = body.find(quote)?;
+        let value = &body[..end];
+        if value.contains(['\\', '\n', '\r']) {
+            return None;
+        }
+        out.push(value.to_string());
+        rest = body[end + 1..].trim_start();
+        match rest.chars().next()? {
+            ',' => rest = rest[1..].trim_start(),
+            ']' => {}
+            _ => return None,
+        }
+    }
+}
