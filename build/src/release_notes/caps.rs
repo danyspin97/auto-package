@@ -20,7 +20,6 @@ const SECURITY: &[&str] = &["cve-", "bsc#", "boo#", "gh#"];
 const BREAKING: &[&str] = &[
     "break",
     "remov",
-    "drop",
     "deprecat",
     "no longer",
     "rename",
@@ -28,6 +27,9 @@ const BREAKING: &[&str] = &[
     "incompatible",
     "minimum",
 ];
+/// The words of [`BREAKING`] that must be the whole word: `drop` is also a
+/// part of `backdrop` and `raindrops`.
+const BREAKING_WORDS: &[&str] = &["drop", "drops", "dropped", "dropping"];
 
 /// Whether `line` names a security fix (see [`SECURITY`]).
 pub(super) fn is_security(line: &str) -> bool {
@@ -39,7 +41,25 @@ pub(super) fn is_security(line: &str) -> bool {
 /// (see [`BREAKING`]).
 pub(super) fn is_breaking(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    lower.starts_with("breaking:") || BREAKING.iter().any(|w| lower.contains(w))
+    lower.starts_with("breaking:")
+        || BREAKING.iter().any(|w| has_word(&lower, w, false))
+        || BREAKING_WORDS.iter().any(|w| has_word(&lower, w, true))
+}
+
+/// Whether `text` holds `word` where a word starts: at the start of the text or
+/// after a character that is not a letter, a digit, `-` or `_`. With `whole`
+/// the word must also end there (before such a character or at the end).
+fn has_word(text: &str, word: &str, whole: bool) -> bool {
+    let joins = |c: char| c.is_alphanumeric() || c == '-' || c == '_';
+    text.match_indices(word).any(|(at, _)| {
+        let starts = text[..at].chars().next_back().is_none_or(|c| !joins(c));
+        let ends = !whole
+            || text[at + word.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !joins(c));
+        starts && ends
+    })
 }
 
 /// The order of a release's bullets: breaking changes, then security fixes,
@@ -191,6 +211,16 @@ mod tests {
         assert!(is_breaking("Breaking: the old alias is gone"));
         assert!(is_breaking("Remove the legacy session class"));
         assert!(!is_breaking("Add a cache"));
+        assert!(!is_breaking("Fix the dropdown menu crash"));
+        assert!(is_breaking("Drop support for Python 3.8"));
+        assert!(is_breaking("Dropped the legacy session class"));
+        assert!(is_breaking("Python 3.8 dropped."));
+        assert!(is_breaking("Drop, then rebuild"));
+        assert!(is_breaking("Stop after the drop"));
+        assert!(!is_breaking("Fix the backdrop flicker"));
+        assert!(!is_breaking("Keep the raindrops working"));
+        assert!(!is_breaking("Fix the dropdown menu crash"));
+        assert!(!is_breaking("Add a drop-in shim"));
         assert!(rank("Remove x") < rank("Fix CVE-1-2") && rank("Fix CVE-1-2") < rank("Add y"));
     }
 }
