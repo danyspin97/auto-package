@@ -48,6 +48,7 @@ fn explain_as(d: &Path, package: &str) -> Result<Explanation, String> {
         package,
         run: None,
         package_notes: String::new(),
+        notes_file: None,
     })
 }
 

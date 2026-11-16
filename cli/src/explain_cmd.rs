@@ -135,16 +135,19 @@ fn explain_command(
     ap_build::package_notes::set_notes_dir(notes_dir.clone());
     // The notes file is named by the package's spelling, which may differ in
     // case or separators from the name given (`python-genshi.md`).
-    let package_notes = ap_build::explain::package_notes_name(&notes_dir, name)
+    let notes_file = ap_build::explain::package_notes_name(&notes_dir, name)
         .map_err(err)?
-        .filter(|n| ap_build::package_notes::path_for(n).is_some())
-        .map(|n| ap_build::package_notes::read(&n))
+        .filter(|n| ap_build::package_notes::path_for(n).is_some());
+    let package_notes = notes_file
+        .as_deref()
+        .map(ap_build::package_notes::read)
         .unwrap_or_default();
     let ex = ap_build::explain::explain(&ap_build::explain::Query {
         project_dir: &dir,
         package: name,
         run,
         package_notes,
+        notes_file,
     })
     .map_err(err)?;
     if json {

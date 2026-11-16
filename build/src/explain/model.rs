@@ -174,6 +174,12 @@ pub struct Notes {
     pub run_note_headings: Vec<String>,
     /// <notes dir>/<pkg>.md: what the tool keeps across runs.
     pub package_notes: String,
+    /// The name of `state/<name>/` on disk, which may differ in case or
+    /// separators from the name given.
+    pub state_dir: String,
+    /// The stem of `<notes dir>/<stem>.md` on disk (the package's name when
+    /// there is no such file).
+    pub notes_file: String,
 }
 
 /// What to explain.
@@ -185,4 +191,7 @@ pub struct Query<'a> {
     pub run: Option<&'a str>,
     /// The text of `<notes dir>/<pkg>.md` (empty when there is none).
     pub package_notes: String,
+    /// The stem of that file on disk, when there is one (see
+    /// `explain::package_notes_name`).
+    pub notes_file: Option<String>,
 }

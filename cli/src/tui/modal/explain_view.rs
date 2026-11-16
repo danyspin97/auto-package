@@ -19,14 +19,23 @@ pub fn explain_loader() -> Option<ExplainLoader> {
         .unwrap_or_else(|p| p.into_inner())
         .clone()?;
     Some(Arc::new(move |row: &str| {
-        let notes = ap_build::package_notes::path_for(row)
-            .map(|_| ap_build::package_notes::read(row))
+        // The notes file is named by the package's spelling on disk (see
+        // `explain_cmd`), which may differ from the row's.
+        let notes_file = ap_build::package_notes::path_for(row).and_then(|p| {
+            ap_build::explain::package_notes_name(p.parent()?, row)
+                .ok()
+                .flatten()
+        });
+        let notes = notes_file
+            .as_deref()
+            .map(ap_build::package_notes::read)
             .unwrap_or_default();
         explain::explain(&explain::Query {
             project_dir: &dir,
             package: row,
             run: None,
             package_notes: notes,
+            notes_file,
         })
     }))
 }

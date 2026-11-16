@@ -55,6 +55,7 @@ fn query<'a>(d: &'a Path) -> Query<'a> {
         package: "foo",
         run: None,
         package_notes: String::new(),
+        notes_file: None,
     }
 }
 
@@ -541,4 +542,19 @@ fn json_stays_free_of_escapes_even_when_colour_is_on() {
     assert!(ansi(&render(&ex, 80), true).contains('\u{1b}'));
     let json = serde_json::to_string_pretty(&ex).unwrap();
     assert!(!json.contains('\u{1b}'));
+}
+
+#[test]
+fn the_notes_kept_section_names_the_notes_file_as_it_is_on_disk() {
+    let t = fixture(&[]);
+    let long: String = (0..=NOTES_LINES).map(|i| format!("- line {i}\n")).collect();
+    let ex = explain(&Query {
+        package_notes: long,
+        notes_file: Some("Foo-Notes".into()),
+        ..query(t.path())
+    })
+    .unwrap();
+    let text = plain(&render(&ex, 100));
+    assert!(text.contains("in Foo-Notes.md"), "{text}");
+    assert!(!text.contains("in foo.md"), "{text}");
 }

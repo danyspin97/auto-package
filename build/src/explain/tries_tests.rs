@@ -299,6 +299,7 @@ fn explain_prints_the_tries_and_the_reason_of_each_failed_try() {
         package: "foo",
         run: None,
         package_notes: String::new(),
+        notes_file: None,
     })
     .unwrap();
     let text = plain(&render(&ex, 100));

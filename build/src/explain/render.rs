@@ -507,7 +507,7 @@ pub fn render(ex: &Explanation, width: usize) -> Vec<Line> {
             Kind::Dim,
             &format!(
                 "state/{}/notes.md has {} entr(ies), across runs; the last: {}",
-                ex.package,
+                ex.notes.state_dir,
                 ex.notes.run_note_headings.len(),
                 ex.notes.run_note_headings[ex.notes.run_note_headings.len().saturating_sub(3)..]
                     .join("; ")
@@ -538,7 +538,7 @@ pub fn render(ex: &Explanation, width: usize) -> Vec<Line> {
                 &format!(
                     "... {} more line(s) in {}.md in the notes directory",
                     total - NOTES_LINES,
-                    ex.package
+                    ex.notes.notes_file
                 ),
             );
         }

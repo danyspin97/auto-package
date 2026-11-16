@@ -29,6 +29,7 @@ fn report_of(run_line: &serde_json::Value, state: &str) -> String {
         package: "foo",
         run: None,
         package_notes: String::new(),
+        notes_file: None,
     })
     .unwrap();
     plain(&render(&ex, 100))

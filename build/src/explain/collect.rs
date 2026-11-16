@@ -227,6 +227,8 @@ pub fn explain(q: &Query) -> Result<Explanation, String> {
             .map(|l| l.trim_start_matches('#').trim().to_string())
             .collect(),
         package_notes: q.package_notes.clone(),
+        state_dir: state_dir_name.clone(),
+        notes_file: q.notes_file.clone().unwrap_or_else(|| pkg.to_string()),
     };
     ex.obs_name = obs_name.clone();
     ex.tries = per_package(&records)
