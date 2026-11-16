@@ -52,14 +52,16 @@ fn added_text<'a>(base: Option<&str>, new: &'a str) -> (&'a str, bool) {
         return (prefix, true);
     }
     // The old entries were edited: the new ones are what stands above the base's
-    // newest entry when it is still there, else the first entry alone.
+    // newest entry when it is still there, else the first entry alone. The old
+    // entries sit at the end of the file (restore_old_entries appends them), so
+    // the last copy of the newest entry is theirs; a new entry may quote it earlier.
     let newest = base
         .split("\n-------------------------------------------------------------------\n")
         .next()
         .unwrap_or(base);
     let newest = newest.trim();
     if !newest.is_empty()
-        && let Some(at) = new.find(newest)
+        && let Some(at) = new.rfind(newest)
     {
         return (&new[..at], false);
     }

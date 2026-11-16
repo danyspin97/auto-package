@@ -362,3 +362,24 @@ fn housekeeping_bullets_are_recognised_and_others_are_not() {
         "Drop the workaround for the old build"
     ));
 }
+
+/// The old entries are the last copy of their newest entry in the file, so a new
+/// entry that quotes that text is not where they start.
+#[test]
+fn a_new_entry_quoting_the_old_newest_entry_is_not_cut_at_the_quote() {
+    let base = OLD.replacen("2.10.3", "2.10.2", 1);
+    let newest = base.split(&format!("\n{SEP}\n")).next().unwrap().trim();
+    let new = format!(
+        "{SEP}\nMon Nov  2 16:03:24 UTC 2026 - Jane Doe <jane.doe@example.com>\n\n\
+         - Quote the old entry:\n{newest}\n- Update to 2.10.4\n  * Fixed things\n\n{base}\n"
+    );
+    let found = changes_findings(&ctx(Some(&base), Some(&new)));
+    assert!(
+        !ids_of(&found).contains(&ids::CHANGES_VERSION_MISMATCH),
+        "the Update bullet below the quote is in the new entry: {found:?}"
+    );
+    assert!(
+        ids_of(&found).contains(&ids::CHANGES_OLD_ENTRIES_EDITED),
+        "{found:?}"
+    );
+}
