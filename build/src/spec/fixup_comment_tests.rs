@@ -226,3 +226,16 @@ fn an_empty_origin_gives_no_problem() {
     let after = with_prep_line("sed -i 's/a/b/' exifread/cli.py");
     assert!(unexplained_fixups("", &after, "python-ExifRead").is_empty());
 }
+
+/// A path that climbs out of the source tree is not a file the edit changes there,
+/// so an `rm` or `cp` of it is no fixup of this gate.
+#[test]
+fn a_path_that_climbs_out_of_the_source_tree_is_not_a_fixup() {
+    for line in ["rm -f ../shared/cache.tar", "cp ../README.rst ."] {
+        let after = with_prep_line(line);
+        assert!(
+            unexplained_fixups(ORIGIN, &after, "python-ExifRead").is_empty(),
+            "{line}"
+        );
+    }
+}

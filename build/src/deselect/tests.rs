@@ -376,3 +376,22 @@ fn source_and_installed_modules_are_dropped_each_their_own_way_in_one_round() {
     assert_eq!(got.tests.len(), 1);
     assert_eq!(got.omitted, 1);
 }
+
+/// The `# evidence:` lines sit in the comment run directly above the
+/// `PYTEST_ADDOPTS` export, which is a fixup the fixup gate checks: the deselect
+/// edit must carry a comment the gate accepts.
+#[test]
+fn the_deselect_evidence_comment_explains_its_export_to_the_fixup_gate() {
+    let log = pytest_log(&["tests/test_a.py::TestX::test_one"], 40);
+    let got = drop_failing_tests(SPEC, &log, &none).unwrap();
+    assert!(
+        got.spec.contains(
+            "# evidence: FAILED tests/test_a.py::TestX::test_one - AssertionError: boom\n# auto-package:"
+        ),
+        "{}",
+        got.spec
+    );
+    assert!(got.spec.contains("export PYTEST_ADDOPTS="), "{}", got.spec);
+    let problems = crate::spec::unexplained_fixups(SPEC, &got.spec, "python-x");
+    assert!(problems.is_empty(), "{problems:?}\n{}", got.spec);
+}

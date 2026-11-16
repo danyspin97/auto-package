@@ -143,9 +143,10 @@ fn is_build_file(path: &str) -> bool {
     lower.contains("buildroot") || lower.contains("build_root") || is_source_path(path)
 }
 
-/// A path relative to the source tree: not absolute and not a macro or variable.
+/// A path in the source tree: relative to the build directory, not absolute, not a
+/// macro or variable, and not climbing out of the tree with a `..` component.
 fn is_source_path(path: &str) -> bool {
-    !path.starts_with(['/', '%', '$'])
+    !path.starts_with(['/', '%', '$']) && !path.split('/').any(|c| c == "..")
 }
 
 /// What is missing from the comment above the fixup at `anchor`, `None` when it says
