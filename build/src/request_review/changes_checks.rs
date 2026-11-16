@@ -449,6 +449,19 @@ pub fn changes_findings(c: &ChangesCtx<'_>) -> Vec<Finding> {
                 Some(b.line),
             ));
         }
+        // A housekeeping bullet is flagged in every new entry, with or without an
+        // `Update to` bullet; the normaliser only drops it from one that has one.
+        if is_housekeeping_bullet(&b.text) {
+            out.push(mk(
+                ids::CHANGES_HOUSEKEEPING_BULLET,
+                Severity::Warning,
+                &format!(
+                    "a housekeeping bullet gets no bullet (convention 40): `{}`",
+                    b.text
+                ),
+                Some(b.line),
+            ));
+        }
         if has_forbidden_text(&b.text, c.package) {
             out.push(mk(
                 ids::CHANGES_FORBIDDEN_TEXT,

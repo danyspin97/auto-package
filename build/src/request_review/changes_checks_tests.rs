@@ -211,6 +211,55 @@ fn a_dependency_bullet_is_a_warning_quoting_it() {
     assert!(changes_findings(&ctx(Some(OLD), Some(&fine))).is_empty());
 }
 
+fn housekeeping_findings(found: &[Finding]) -> Vec<&Finding> {
+    found
+        .iter()
+        .filter(|f| f.id == ids::CHANGES_HOUSEKEEPING_BULLET)
+        .collect()
+}
+
+#[test]
+fn a_housekeeping_bullet_is_a_warning_quoting_it_with_or_without_an_update() {
+    let bare = with_entry(
+        "- Fix the source archive name to the lowercase name PyPI uses for this release",
+    );
+    let found = changes_findings(&ctx(Some(OLD), Some(&bare)));
+    let h = housekeeping_findings(&found);
+    assert_eq!(h.len(), 1, "{found:?}");
+    assert_eq!(h[0].severity, Severity::Warning);
+    assert!(
+        h[0].message
+            .contains("Fix the source archive name to the lowercase")
+    );
+    let with_update =
+        with_entry("- Update to 2.10.4\n  * notes\n- Drop the mock import workaround in %check");
+    let found = changes_findings(&ctx(Some(OLD), Some(&with_update)));
+    let h = housekeeping_findings(&found);
+    assert_eq!(h.len(), 1, "{found:?}");
+    assert!(
+        h[0].message
+            .contains("Drop the mock import workaround in %check")
+    );
+}
+
+#[test]
+fn a_housekeeping_bullet_of_a_published_entry_is_not_flagged() {
+    let published = format!(
+        "{SEP}\nMon Nov  2 16:03:24 UTC 2026 - Jane Doe <jane.doe@example.com>\n\n- Update to 2.10.4\n  * notes\n- Remove the sed workaround in %prep\n\n{OLD}"
+    );
+    let found = changes_findings(&ctx(Some(&published), Some(&published)));
+    assert!(housekeeping_findings(&found).is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_non_housekeeping_bullet_is_not_flagged_as_housekeeping() {
+    let e = with_entry(
+        "- Update to 2.10.4\n  * notes\n- Fix the source archive host to files.pythonhosted.org",
+    );
+    let found = changes_findings(&ctx(Some(OLD), Some(&e)));
+    assert!(housekeeping_findings(&found).is_empty(), "{found:?}");
+}
+
 #[test]
 fn two_refresh_bullets_give_the_grouped_form() {
     let e = with_entry("- Update to 2.10.4\n  * notes\n- Refresh a.patch\n- Refresh b.patch");

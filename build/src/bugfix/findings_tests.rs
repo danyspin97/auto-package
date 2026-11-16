@@ -53,6 +53,7 @@ fn every_id_of_the_review_is_routed_as_listed() {
         ("changes.update-without-version-change", "agent"),
         ("changes.no-upstream-notes", "tool"),
         ("changes.dependency-bullet", "tool"),
+        ("changes.housekeeping-bullet", "tool"),
         ("changes.refresh-not-grouped", "tool"),
         ("changes.patch-not-named", "tool"),
         ("changes.forbidden-text", "agent"),

@@ -49,7 +49,8 @@ pub enum MechanicalFix {
     UpdateBullet,
     /// The entry header is written in the standard form.
     HeaderFormat,
-    /// A bullet that only says a dependency changed is dropped.
+    /// A bullet convention 40 gives no bullet to (a dependency change or a
+    /// housekeeping edit) is dropped.
     DropDependencyBullet,
     /// The `Update to` entry has no upstream notes under it: `lint` fills them in
     /// from the releases between the origin's version and the new one.
@@ -113,7 +114,9 @@ pub fn route(f: &ReviewFinding) -> FindingRoute {
         ids::CHANGES_OLD_ENTRIES_EDITED => Tool(M::RestoreOldEntries),
         ids::CHANGES_VERSION_MISMATCH => Tool(M::UpdateBullet),
         ids::CHANGES_HEADER_FORMAT => Tool(M::HeaderFormat),
-        ids::CHANGES_DEPENDENCY_BULLET => Tool(M::DropDependencyBullet),
+        ids::CHANGES_DEPENDENCY_BULLET | ids::CHANGES_HOUSEKEEPING_BULLET => {
+            Tool(M::DropDependencyBullet)
+        }
         ids::CHANGES_NO_UPSTREAM_NOTES => Tool(M::UpstreamNotes),
         ids::CHANGES_DATE_ORDER => {
             Maintainer("an entry's date is the author's record: the tool does not rewrite it")
