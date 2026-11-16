@@ -73,10 +73,7 @@ fn a_failure_the_target_has_no_result_for_is_a_note_that_says_so() {
         }),
     }];
     let found = build_findings("p", &rows, &[], None);
-    assert_eq!(
-        one(&found),
-        (ids::BUILD_FAILS_IN_TARGET_TOO, Severity::Note)
-    );
+    assert_eq!(one(&found), (ids::BUILD_NO_TARGET_RESULT, Severity::Note));
     assert!(
         found[0]
             .message

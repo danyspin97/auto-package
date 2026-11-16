@@ -173,6 +173,9 @@ pub fn route(f: &ReviewFinding) -> FindingRoute {
         ids::BUILD_FAILS_IN_TARGET_TOO => {
             Maintainer("the target fails too: not this change's doing")
         }
+        ids::BUILD_NO_TARGET_RESULT => {
+            Maintainer("the target has no result to compare the failure with")
+        }
         ids::BUILD_DISABLED_ARCH | ids::BUILD_NOT_TESTABLE => {
             Maintainer("the build cannot be tested here")
         }

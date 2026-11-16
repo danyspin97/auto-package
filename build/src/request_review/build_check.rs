@@ -92,19 +92,24 @@ pub fn build_findings(
                 Severity::Blocker,
                 &format!("{name} {}{detail}", s.label()),
             )),
-            s if s.is_failure() => out.push(mk(
-                ids::BUILD_FAILS_IN_TARGET_TOO,
-                Severity::Note,
-                &format!(
-                    "{name} {} and {}{detail}",
-                    s.label(),
-                    if baseline == BaselineState::NoResult {
-                        "has no result in the target project"
-                    } else {
-                        "fails in the target project too"
-                    }
-                ),
-            )),
+            s if s.is_failure() => {
+                let (id, says) = if baseline == BaselineState::NoResult {
+                    (
+                        ids::BUILD_NO_TARGET_RESULT,
+                        "has no result in the target project",
+                    )
+                } else {
+                    (
+                        ids::BUILD_FAILS_IN_TARGET_TOO,
+                        "fails in the target project too",
+                    )
+                };
+                out.push(mk(
+                    id,
+                    Severity::Note,
+                    &format!("{name} {} and {says}{detail}", s.label()),
+                ));
+            }
             ArchState::Pending(what) => out.push(mk(
                 ids::BUILD_PENDING,
                 Severity::Warning,

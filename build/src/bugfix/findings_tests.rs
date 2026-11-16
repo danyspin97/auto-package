@@ -91,6 +91,7 @@ fn every_id_of_the_review_is_routed_as_listed() {
         ("source.keyring-changed", "maintainer"),
         ("build.failed", "pipeline"),
         ("build.fails-in-target-too", "maintainer"),
+        ("build.no-target-result", "maintainer"),
         ("build.pending", "wait"),
         ("build.no-results", "pipeline"),
         ("build.stale", "pipeline"),
