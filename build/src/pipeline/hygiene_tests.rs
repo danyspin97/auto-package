@@ -394,7 +394,7 @@ fn dependents_of_a_given_up_package_get_their_own_outcome_and_are_freed_with_it(
         ("python-mid".to_string(), "python-torch".to_string()),
         ("python-top".to_string(), "python-torch".to_string()),
     ];
-    sync_blocked_waiters(root.path(), &edges);
+    sync_blocked_waiters(root.path(), &edges, &|_| true);
     assert_eq!(
         outcome(root.path(), "python-mid").as_deref(),
         Some(WAITING_ON_FAILED)
@@ -405,7 +405,8 @@ fn dependents_of_a_given_up_package_get_their_own_outcome_and_are_freed_with_it(
         Some("waiting on failed package: python-torch")
     );
     // The same edges again: nothing changes.
-    assert!(sync_blocked_waiters(root.path(), &edges).0.is_empty());
+    let (again, _) = sync_blocked_waiters(root.path(), &edges, &|_| true);
+    assert!(again.is_empty());
     // The graph is not known at startup: the dependents are ready again.
     let changed = reconcile_state(root.path(), |_| true);
     assert_eq!(changed.len(), 2, "{changed:?}");
@@ -444,7 +445,7 @@ fn missing_deps_dependents_wait_on_a_given_up_package_transitively_and_are_freed
     );
     write_state(root.path(), "python-ok", "success", None);
     let edges = vec![("python-other".to_string(), "python-torch".to_string())];
-    let (changed, _) = sync_blocked_waiters(root.path(), &edges);
+    let (changed, _) = sync_blocked_waiters(root.path(), &edges, &|_| true);
     assert_eq!(changed.len(), 3, "{changed:?}");
     assert_eq!(
         outcome(root.path(), "python-mid").as_deref(),
@@ -464,7 +465,8 @@ fn missing_deps_dependents_wait_on_a_given_up_package_transitively_and_are_freed
         Some("waiting on failed package: python-torch")
     );
     // Idempotent.
-    assert!(sync_blocked_waiters(root.path(), &edges).0.is_empty());
+    let (again, _) = sync_blocked_waiters(root.path(), &edges, &|_| true);
+    assert!(again.is_empty());
     write_state(root.path(), "python-torch", "success", None);
     let changed = reconcile_state(root.path(), |_| true);
     assert_eq!(changed.len(), 3, "{changed:?}");

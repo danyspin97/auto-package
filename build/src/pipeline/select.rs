@@ -410,7 +410,7 @@ pub fn select_target(
             .into_iter()
             .map(|(d, b)| (osc::rpm_name(&nodes[d].name), osc::rpm_name(&nodes[b].name)))
             .collect();
-        let (_, errors) = sync_blocked_waiters(&config.state_root, &edges);
+        let (_, errors) = sync_blocked_waiters(&config.state_root, &edges, &|_| true);
         for message in errors {
             reporter.report(&Event::Warning {
                 step: None,

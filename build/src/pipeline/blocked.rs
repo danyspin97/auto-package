@@ -65,11 +65,17 @@ pub(super) fn blocked_dependents(
 /// `waiting_on_failed` package waits on that blocker too, so it converts, and
 /// so does whatever waits on it in turn (to a fixpoint). A package with its own
 /// terminal outcome (`running`, `success`, `failed`, `wheel-only`) is never
-/// touched: it keeps its own reason rather than the blocker's. Returns the packages whose outcome
-/// changed, and the errors of state writes that failed.
+/// touched: it keeps its own reason rather than the blocker's.
+///
+/// Only the packages `covers` names are read and changed. Every package with a
+/// state is still named, so a blocker outside `covers` is known to exist; its
+/// outcome is not read, and a waiter on it is taken as still blocked. Returns
+/// the packages whose outcome changed, and the errors of state writes that
+/// failed.
 pub(crate) fn sync_blocked_waiters(
     state_root: &Path,
     edges: &[(String, String)],
+    covers: &dyn Fn(&str) -> bool,
 ) -> (Vec<(String, &'static str)>, Vec<String>) {
     use std::collections::{HashMap, HashSet};
     // (outcome, reason)
@@ -78,20 +84,23 @@ pub(crate) fn sync_blocked_waiters(
     let Ok(rd) = std::fs::read_dir(state_root) else {
         return (Vec::new(), errors);
     };
-    let mut names: Vec<String> = rd
+    let mut every: Vec<String> = rd
         .flatten()
         .filter(|e| e.path().join("state.json").is_file())
         .filter_map(|e| e.file_name().into_string().ok())
         .collect();
-    names.sort();
-    let mut orig: HashMap<String, Cur> = HashMap::new();
+    every.sort();
     let mut key_of: HashMap<String, String> = HashMap::new();
+    for n in &every {
+        key_of.insert(osc::fuzzy_key(n), n.clone());
+    }
+    let names: Vec<String> = every.iter().filter(|n| covers(n)).cloned().collect();
+    let mut orig: HashMap<String, Cur> = HashMap::new();
     for n in &names {
         let Some(ws) = Workspace::find_existing(state_root, &[n.as_str()]) else {
             continue;
         };
         let st = PkgState::load(&ws);
-        key_of.insert(osc::fuzzy_key(n), n.clone());
         orig.insert(n.clone(), (st.last_outcome, st.last_failure_reason));
     }
     let mut cur = orig.clone();
@@ -116,11 +125,10 @@ pub(crate) fn sync_blocked_waiters(
     };
     let is_blocked = |cur: &HashMap<String, Cur>, b: &str| {
         held.contains(&osc::fuzzy_key(b))
-            || find(b).is_some_and(|n| {
-                matches!(
-                    cur.get(&n).and_then(|c| c.0.as_deref()),
-                    Some(WAITING_ON_FAILED)
-                )
+            || find(b).is_some_and(|n| match cur.get(&n) {
+                // Out of scope: not read, so taken as still blocked.
+                None => true,
+                Some(c) => c.0.as_deref() == Some(WAITING_ON_FAILED),
             })
     };
     // Free: a waiter whose blocker is no longer blocked. Repeat, since a
@@ -152,7 +160,9 @@ pub(crate) fn sync_blocked_waiters(
     }
     // Hold: graph dependents of a given-up package.
     for (dependent, blocker) in edges {
-        let Some(n) = find(dependent) else { continue };
+        let Some(n) = find(dependent).filter(|n| cur.contains_key(n)) else {
+            continue;
+        };
         // Only a package with no outcome of its own (or a non-terminal one) is
         // held; one that failed or was built as a wheel keeps its own reason.
         if !matches!(

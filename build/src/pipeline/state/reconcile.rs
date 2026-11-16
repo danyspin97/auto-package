@@ -27,10 +27,12 @@ pub fn reconcile_state(
         .filter(|n| covers(n))
         .collect();
     names.sort();
+    // A dependency outside `covers` is not read: it is not taken as built.
     let built = |dep: &str| {
         [dep.to_string(), osc::rpm_name(dep)].iter().any(|n| {
-            Workspace::find_existing(state_root, &[n.as_str()])
-                .is_some_and(|w| PkgState::load(&w).last_outcome.as_deref() == Some("success"))
+            covers(n)
+                && Workspace::find_existing(state_root, &[n.as_str()])
+                    .is_some_and(|w| PkgState::load(&w).last_outcome.as_deref() == Some("success"))
         })
     };
     for name in names {
@@ -77,7 +79,7 @@ pub fn reconcile_state(
     }
     // Dependents that wait on a blocked package, and those whose blocker is
     // no longer blocked.
-    let (more, _errors) = sync_blocked_waiters(state_root, &[]);
+    let (more, _errors) = sync_blocked_waiters(state_root, &[], &covers);
     for (name, outcome) in more {
         changed.retain(|(n, _)| *n != name);
         changed.push((name, outcome));
