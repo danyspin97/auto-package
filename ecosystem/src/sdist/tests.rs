@@ -6,6 +6,7 @@ mod links;
 mod project;
 mod requirements;
 mod safety;
+mod setup_requires;
 mod wheels;
 
 use formats::*;

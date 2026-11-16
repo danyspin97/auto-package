@@ -86,6 +86,70 @@ impl BuildSystem {
     pub fn is_maturin(&self) -> bool {
         self.backend.as_deref() == Some("maturin")
     }
+
+    /// Adds the `setup_requires` of a setup.cfg or setup.py to the build
+    /// requirements. When the pyproject's `[build-system]` declares them, its
+    /// entry for a project wins over the setup file's. Without one, the
+    /// default `setuptools` is replaced by the setup file's entry for it.
+    pub(super) fn with_setup_requires(self, declared_by_pyproject: bool, extra: &[String]) -> Self {
+        let extra: Vec<String> = extra
+            .iter()
+            .filter_map(|r| match build_requirement_part(r) {
+                Some(BuildRequirement::Keep(part)) => Some(part.into_owned()),
+                Some(BuildRequirement::NotForTarget) => None,
+                None => {
+                    tracing::warn!(
+                        "ignoring setup_requires entry {r:?}: not a plain PEP 508 requirement"
+                    );
+                    None
+                }
+            })
+            .collect();
+        if extra.is_empty() {
+            return self;
+        }
+        let extra_keys: std::collections::HashSet<String> =
+            extra.iter().map(|r| requirement_key(r)).collect();
+        let mut requires: Vec<String> = if declared_by_pyproject {
+            self.requires
+        } else {
+            self.requires
+                .into_iter()
+                .filter(|r| !extra_keys.contains(&requirement_key(r)))
+                .collect()
+        };
+        let mut keys: std::collections::HashSet<String> =
+            requires.iter().map(|r| requirement_key(r)).collect();
+        for r in extra {
+            if keys.insert(requirement_key(&r)) {
+                requires.push(r);
+            }
+        }
+        Self {
+            requires,
+            backend: self.backend,
+        }
+    }
+}
+
+/// The normalized project name of a PEP 508 requirement (lowercase, runs of
+/// `-`, `_` and `.` as one `-`), so `Setuptools>=40` and `setuptools` match.
+fn requirement_key(req: &str) -> String {
+    let name_end = req
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+        .unwrap_or(req.len());
+    let mut key = String::new();
+    for c in req[..name_end].chars() {
+        let c = if matches!(c, '.' | '_' | '-') {
+            '-'
+        } else {
+            c.to_ascii_lowercase()
+        };
+        if !(c == '-' && key.ends_with('-')) {
+            key.push(c);
+        }
+    }
+    key
 }
 
 impl From<RawBuildSystem> for BuildSystem {

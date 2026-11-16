@@ -155,6 +155,7 @@ mod manifest;
 mod native;
 mod requirements;
 mod safety;
+mod setup_files;
 mod wheel;
 
 #[cfg(test)]
@@ -170,4 +171,5 @@ pub use manifest::*;
 pub use native::{NativeBuild, NativeKind};
 pub use requirements::*;
 pub use safety::*;
+use setup_files::*;
 pub use wheel::*;

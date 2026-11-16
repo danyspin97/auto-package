@@ -75,7 +75,10 @@ fn collect_tar_entries(path: &Path, kind: ArchiveKind) -> Result<Vec<InspectEntr
         // so the entry type is the reliable signal; the slash is a fallback.
         let is_dir = entry.header().entry_type().is_dir() || path_str.ends_with('/');
         let file_name = entry_path.file_name().and_then(|n| n.to_str());
-        let contents = if matches!(file_name, Some("pyproject.toml" | "Cargo.toml")) {
+        let contents = if matches!(
+            file_name,
+            Some("pyproject.toml" | "Cargo.toml" | "setup.cfg")
+        ) {
             read_manifest(&mut entry)
         } else {
             None
@@ -87,6 +90,18 @@ fn collect_tar_entries(path: &Path, kind: ArchiveKind) -> Result<Vec<InspectEntr
         });
     }
     Ok(out)
+}
+
+/// The directory of an archive entry relative to the top-level directory:
+/// the components between the top and the file, joined with `/`.
+fn manifest_dir(components: &[std::path::Component<'_>]) -> String {
+    components
+        .get(1..components.len().saturating_sub(1))
+        .unwrap_or_default()
+        .iter()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Walk a zip-shaped archive (`.zip` or `.whl`) producing the same
@@ -124,12 +139,15 @@ fn collect_zip_entries(path: &Path) -> Result<Vec<InspectEntry>, Error> {
             .file_name()
             .and_then(|n| n.to_str())
             .map(str::to_string);
-        let contents =
-            if !is_dir && matches!(file_name.as_deref(), Some("pyproject.toml" | "Cargo.toml")) {
-                read_manifest(&mut entry)
-            } else {
-                None
-            };
+        let contents = if !is_dir
+            && matches!(
+                file_name.as_deref(),
+                Some("pyproject.toml" | "Cargo.toml" | "setup.cfg")
+            ) {
+            read_manifest(&mut entry)
+        } else {
+            None
+        };
         out.push(InspectEntry {
             path_str: name,
             is_dir,
@@ -163,6 +181,9 @@ fn inspect_from_entries(
     // directory it sits in. The winner is picked afterwards so the losers are
     // still available: in a monorepo they are the sibling subprojects.
     let mut py_manifests: Vec<(usize, String, String)> = Vec::new();
+    // Every setup.cfg with its directory: read for `setup_requires` only from
+    // the directory of the chosen pyproject.toml (see `build_system` below).
+    let mut setup_cfgs: Vec<(String, String)> = Vec::new();
     let mut cargo: Option<((usize, u8), String)> = None;
     let mut setup_py_depth: Option<usize> = None;
     let mut cmake_manifest = false;
@@ -215,19 +236,22 @@ fn inspect_from_entries(
             // A manifest at the archive root (a single component) has no
             // directory above it: it gets the empty directory, as a
             // two-component entry does, instead of an out-of-range slice.
-            let dir = components
-                .get(1..components.len().saturating_sub(1))
-                .unwrap_or_default()
-                .iter()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
+            let dir = manifest_dir(&components);
             // The directory ends up in `cd` and in a monorepo's spec comments:
             // a manifest under an unsafe component is not recorded at all.
             if is_safe_manifest_dir(&dir) {
                 py_manifests.push((depth, dir, src.clone()));
             }
             continue;
+        }
+
+        if file_name == Some("setup.cfg".as_ref())
+            && let Some(src) = &entry.contents
+        {
+            let dir = manifest_dir(&components);
+            if is_safe_manifest_dir(&dir) {
+                setup_cfgs.push((dir, src.clone()));
+            }
         }
 
         if file_name == Some("Cargo.toml".as_ref())
@@ -314,6 +338,7 @@ fn inspect_from_entries(
 
     let mut project_name = None;
     let mut console_scripts = Vec::new();
+    let mut declared_by_pyproject = false;
     let build_system = match &pyproject {
         None => BuildSystem::setuptools_default(),
         Some((_, _, src)) => {
@@ -321,6 +346,7 @@ fn inspect_from_entries(
             // setup.py alongside it still describes a buildable project.
             match toml::from_str::<PyprojectToml>(src) {
                 Ok(mut doc) => {
+                    declared_by_pyproject = doc.build_system.is_some();
                     let build_system = doc
                         .build_system
                         .take()
@@ -337,6 +363,15 @@ fn inspect_from_entries(
             }
         }
     };
+    // The setup.cfg beside the chosen pyproject.toml (or the root one, when
+    // there is none) adds its `setup_requires` to the build requirements.
+    let setup_dir = pyproject.as_ref().map_or("", |(_, dir, _)| dir.as_str());
+    let setup_requires: Vec<String> = setup_cfgs
+        .iter()
+        .filter(|(dir, _)| dir == setup_dir)
+        .flat_map(|(_, src)| setup_cfg_setup_requires(src))
+        .collect();
+    let build_system = build_system.with_setup_requires(declared_by_pyproject, &setup_requires);
 
     // Siblings of the chosen project: same depth, and only when that depth is
     // below the root — a single project at the top is not a monorepo.
