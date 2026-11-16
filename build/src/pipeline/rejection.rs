@@ -12,56 +12,13 @@ use crate::pipeline::rpmlintrc_guard::*;
 use crate::pipeline::service_edit::*;
 use crate::pipeline::source_guard::*;
 
+mod spec_journal;
+pub(super) use spec_journal::*;
 mod python_expand;
 use python_expand::*;
 
 mod fixup_comment;
 use fixup_comment::*;
-
-/// How many times the same validation error rejected an edit of one spec, in
-/// this process. A fourth identical turn would be re-prompting for the same
-/// failure (python-torch: eleven rejections of one inherited patch, $2.64).
-type SpecRejections = std::collections::HashMap<(PathBuf, u64), (u32, String)>;
-
-static SPEC_REJECTIONS: std::sync::LazyLock<std::sync::Mutex<SpecRejections>> =
-    std::sync::LazyLock::new(Default::default);
-
-/// Identical rejections of one spec after which the step fails instead of asking again.
-const MAX_IDENTICAL_REJECTIONS: u32 = 3;
-
-pub(super) fn note_spec_rejection(spec_path: &Path, problem: &str) {
-    let mut map = SPEC_REJECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = map
-        .entry((spec_path.to_path_buf(), hash_spec(problem)))
-        .or_insert((0, problem.to_string()));
-    entry.0 += 1;
-}
-
-pub(super) fn clear_spec_rejections(spec_path: &Path) {
-    let mut map = SPEC_REJECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    map.retain(|(p, _), _| p != spec_path);
-}
-
-/// The failure for a spec rejected with the same error [`MAX_IDENTICAL_REJECTIONS`]
-/// times, or `None` while another try is still reasonable.
-pub(super) fn repeated_spec_rejection(spec_path: &Path) -> Option<String> {
-    let map = SPEC_REJECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    map.iter()
-        .find(|((p, _), (n, _))| p == spec_path && *n >= MAX_IDENTICAL_REJECTIONS)
-        .map(|(_, (n, problem))| {
-            let first: String = problem
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(300)
-                .collect();
-            format!(
-                "the spec was rejected {n} times with the same error and the agent does not \
-                 get past it: {first}"
-            )
-        })
-}
 
 /// The patch-escape check on its own, for a turn whose result the rest of the
 /// acceptance gate does not judge (an unchanged spec, the npm-vendor and the
