@@ -1,5 +1,6 @@
 use super::branch_cleanup::{clean_with_origin, without_explained_flags};
 use super::*;
+use crate::version::Scheme;
 
 const ORIGIN: &str = "\
 -------------------------------------------------------------------
@@ -36,7 +37,16 @@ fn a_dependency_bullet_of_an_unpublished_update_entry_is_dropped() {
          \x20 * Add a template option.\n\
          - Require binaryornot 0.4.4 and requests 2.23.0 as the new release declares\n",
     );
-    let messages = clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[], false, &|_| {});
+    let messages = clean_with_origin(
+        dir.path(),
+        Some(ORIGIN),
+        None,
+        "pkg",
+        Scheme::Generic,
+        &[],
+        false,
+        &|_| {},
+    );
     assert_eq!(messages.len(), 1, "{messages:?}");
     let text = changes_of(&dir);
     assert!(!text.contains("Require binaryornot"), "{text}");
@@ -53,7 +63,16 @@ fn a_placeholder_bullet_of_an_unpublished_update_entry_is_dropped() {
          - Update to 2.7.1\n\
          \x20 * No upstream changelog found or provided\n",
     );
-    clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[], false, &|_| {});
+    clean_with_origin(
+        dir.path(),
+        Some(ORIGIN),
+        None,
+        "pkg",
+        Scheme::Generic,
+        &[],
+        false,
+        &|_| {},
+    );
     let text = changes_of(&dir);
     assert!(!text.contains("No upstream changelog"), "{text}");
     assert!(text.contains("- Update to 2.7.1"), "{text}");
@@ -71,6 +90,7 @@ fn an_origin_entry_is_never_edited() {
         Some(&published),
         None,
         "pkg",
+        Scheme::Generic,
         &[],
         false,
         &|_| {},
@@ -89,7 +109,19 @@ fn no_origin_leaves_the_changes_alone() {
          - Update to 2.7.1\n\
          - Require pytest\n",
     );
-    assert!(clean_with_origin(dir.path(), None, None, "pkg", &[], false, &|_| {}).is_empty());
+    assert!(
+        clean_with_origin(
+            dir.path(),
+            None,
+            None,
+            "pkg",
+            Scheme::Generic,
+            &[],
+            false,
+            &|_| {}
+        )
+        .is_empty()
+    );
     assert!(changes_of(&dir).contains("- Require pytest"));
 }
 
@@ -102,7 +134,16 @@ fn a_service_source_dir_the_spec_does_not_name_is_removed() {
     )
     .unwrap();
     fs::create_dir_all(dir.path().join("pleamar/src")).unwrap();
-    let messages = clean_with_origin(dir.path(), Some(ORIGIN), None, "pkg", &[], false, &|_| {});
+    let messages = clean_with_origin(
+        dir.path(),
+        Some(ORIGIN),
+        None,
+        "pkg",
+        Scheme::Generic,
+        &[],
+        false,
+        &|_| {},
+    );
     assert_eq!(
         messages,
         vec!["deleted 'pleamar/' from the checkout: a service left it there".to_string()]
@@ -126,6 +167,7 @@ fn a_service_source_dir_the_expanded_spec_names_is_kept() {
             Some(ORIGIN),
             None,
             "pkg",
+            Scheme::Generic,
             &named,
             false,
             &|_| {}
@@ -232,6 +274,7 @@ fn the_flag_is_dropped_from_the_checkout_file() {
         Some(COOKIE_ORIGIN_CHANGES),
         Some(COOKIE_ORIGIN_SPEC),
         "pkg",
+        Scheme::Generic,
         &[],
         false,
         &|_| {},
@@ -264,6 +307,7 @@ fn a_missing_recap_nobody_can_read_is_reported_and_the_entry_stays() {
         Some(&origin),
         Some(origin_spec),
         "pkg",
+        Scheme::Generic,
         &[],
         true,
         &|m| warnings.borrow_mut().push(m),
@@ -295,7 +339,16 @@ fn the_published_entries_are_restored_byte_for_byte() {
              \n{ORIGIN}"
         ),
     );
-    let messages = clean_with_origin(dir.path(), Some(&origin), None, "pkg", &[], false, &|_| {});
+    let messages = clean_with_origin(
+        dir.path(),
+        Some(&origin),
+        None,
+        "pkg",
+        Scheme::Generic,
+        &[],
+        false,
+        &|_| {},
+    );
     assert!(
         messages
             .iter()
@@ -312,7 +365,16 @@ fn the_published_entries_are_restored_byte_for_byte() {
 fn an_unchanged_published_part_is_left_alone() {
     let origin = format!("{ORIGIN}\n\n");
     let dir = checkout("2.6.0", &origin);
-    let messages = clean_with_origin(dir.path(), Some(&origin), None, "pkg", &[], false, &|_| {});
+    let messages = clean_with_origin(
+        dir.path(),
+        Some(&origin),
+        None,
+        "pkg",
+        Scheme::Generic,
+        &[],
+        false,
+        &|_| {},
+    );
     assert!(messages.is_empty(), "{messages:?}");
     assert_eq!(changes_of(&dir), origin);
 }

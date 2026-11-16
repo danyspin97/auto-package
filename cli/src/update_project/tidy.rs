@@ -113,7 +113,15 @@ pub(super) fn tidy_item(
         }
         // The leftovers the build commit cleans too, so both leave the same ones.
         let named = osc::spec_source_names(&after);
-        cleaned = osc::clean_branch_leftovers(&dir, branch, &item.pkg, &named, no_agent, emit);
+        cleaned = osc::clean_branch_leftovers(
+            &dir,
+            branch,
+            &item.pkg,
+            Some(super::existing::scheme_of_ecosystem(&item.ecosystem)),
+            &named,
+            no_agent,
+            emit,
+        );
         // Before the bullet is added the `.changes` is the cleanup's alone.
         recap = cleaned
             .iter()

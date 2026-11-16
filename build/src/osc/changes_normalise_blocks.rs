@@ -5,6 +5,7 @@
 
 use super::changes_normalise::is_older;
 use crate::request_review::changes_checks::update_target;
+use crate::version::Scheme;
 
 /// One bullet of an entry body: the lines as written, the first without its
 /// `- `.
@@ -79,13 +80,14 @@ pub(super) fn body_start(entry: &[&str]) -> usize {
 pub(super) fn split_blocks(
     entry: &[&str],
     version: &str,
+    scheme: Scheme,
 ) -> (Vec<String>, Vec<String>, Vec<String>) {
     let (mut current, mut older, mut other) = (Vec::new(), Vec::new(), Vec::new());
     let mut section = 2;
     for line in &entry[body_start(entry)..] {
         if let Some(rest) = line.strip_prefix("- ") {
             section = match update_target(rest.trim()) {
-                Some(t) if is_older(&t, version) => 1,
+                Some(t) if is_older(&t, version, scheme) => 1,
                 Some(_) => 0,
                 None => 2,
             };

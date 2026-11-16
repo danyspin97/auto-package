@@ -27,6 +27,7 @@ use crate::request_review::changes_checks::{
     has_forbidden_text, is_dependency_bullet, is_housekeeping_bullet, looks_like_version, mismatch,
     update_target,
 };
+use crate::version::Scheme;
 use std::collections::BTreeSet;
 
 /// The entries of a `.changes` text: the text before the first separator
@@ -92,26 +93,32 @@ fn update_rest(head: &str) -> Option<String> {
 /// Whether an `Update to` bullet names a newer release than `version`, or one
 /// that cannot be ordered against it: such a bullet is no part of the entry.
 /// An older release is the recap of the jump, kept (see [`is_older`]).
-fn is_foreign_update(bullet: &Bullet, version: &str) -> bool {
+fn is_foreign_update(bullet: &Bullet, version: &str, scheme: Scheme) -> bool {
     update_target(bullet.head()).is_some_and(|t| {
-        looks_like_version(&t) && mismatch(&t, version) == Some(true) && !is_older(&t, version)
+        looks_like_version(&t)
+            && mismatch(&t, version) == Some(true)
+            && !is_older(&t, version, scheme)
     })
 }
 
 /// Whether an `Update to` bullet names an older release than `version` that
 /// the origin already publishes: a repeat of published history.
-fn is_published_older(bullet: &Bullet, version: &str, published: &[String]) -> bool {
+fn is_published_older(
+    bullet: &Bullet,
+    version: &str,
+    published: &[String],
+    scheme: Scheme,
+) -> bool {
     update_target(bullet.head()).is_some_and(|t| {
-        is_older(&t, version) && published.iter().any(|p| mismatch(&t, p).is_none())
+        is_older(&t, version, scheme) && published.iter().any(|p| mismatch(&t, p).is_none())
     })
 }
 
-/// Whether `release` is an older release than `version`, in the generic order
-/// (`Scheme::Generic`: the spec's scheme is not known here). `false` when the
-/// two cannot be ordered, so such an entry is dropped as before.
-pub(super) fn is_older(release: &str, version: &str) -> bool {
-    crate::version::cmp(release, version, crate::version::Scheme::Generic)
-        == Some(std::cmp::Ordering::Less)
+/// Whether `release` is an older release than `version`, in the order of
+/// `scheme` (the package's own). `false` when the two cannot be ordered, so
+/// such an entry is dropped as before.
+pub(super) fn is_older(release: &str, version: &str, scheme: Scheme) -> bool {
+    crate::version::cmp(release, version, scheme) == Some(std::cmp::Ordering::Less)
 }
 
 /// What a normalisation did beyond the text, for the run's warnings.
@@ -135,7 +142,7 @@ pub fn normalise_unpublished_entries(
     version: &str,
     package: &str,
 ) -> Option<String> {
-    normalise_with_notes(origin, branch, version, package).0
+    normalise_with_notes(origin, branch, version, package, Scheme::Generic).0
 }
 
 /// [`normalise_unpublished_entries`] with what it did beyond the text.
@@ -144,6 +151,7 @@ pub(super) fn normalise_with_notes(
     branch: &str,
     version: &str,
     package: &str,
+    scheme: Scheme,
 ) -> (Option<String>, Notes) {
     let mut notes = Notes::default();
     let origin_entries = split_entries(origin).1;
@@ -204,7 +212,7 @@ pub(super) fn normalise_with_notes(
                 fates.push(Fate::Keep);
                 continue;
             }
-            if !is_older(p, version) {
+            if !is_older(p, version, scheme) {
                 fates.push(Fate::Drop);
                 continue;
             }
@@ -240,6 +248,7 @@ pub(super) fn normalise_with_notes(
                 own.as_deref().unwrap_or(version),
                 package,
                 &published_versions,
+                scheme,
             )
         })
         .collect();
@@ -309,6 +318,7 @@ fn merged_entry(
     version: &str,
     package: &str,
     published: &[String],
+    scheme: Scheme,
 ) -> Option<Vec<String>> {
     let newest = &entries[members[0]];
     let body = body_start(newest);
@@ -321,7 +331,7 @@ fn merged_entry(
         // bullets, oldest member first.
         let parts: Vec<_> = members
             .iter()
-            .map(|&m| split_blocks(&entries[m], version))
+            .map(|&m| split_blocks(&entries[m], version, scheme))
             .collect();
         lines.extend(parts[0].0.iter().cloned());
         for p in &parts {
@@ -332,7 +342,7 @@ fn merged_entry(
         }
     }
     let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    normalised_entry(&refs, version, package, published)
+    normalised_entry(&refs, version, package, published, scheme)
 }
 
 /// The lines of an unpublished update entry, normalised; `None` when nothing
@@ -343,6 +353,7 @@ fn normalised_entry(
     version: &str,
     package: &str,
     published: &[String],
+    scheme: Scheme,
 ) -> Option<Vec<String>> {
     let body_from = body_start(entry);
     let mut bullets: Vec<Bullet> = Vec::new();
@@ -367,8 +378,9 @@ fn normalised_entry(
     }
     // An `Update to` bullet for another release than the entry's own is no
     // part of this entry (a bullet with its lines goes with it).
-    bullets
-        .retain(|b| !is_foreign_update(b, version) && !is_published_older(b, version, published));
+    bullets.retain(|b| {
+        !is_foreign_update(b, version, scheme) && !is_published_older(b, version, published, scheme)
+    });
     let mut kept: Vec<Bullet> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     // The `Update to` bullets kept, with the version each names: a repeat of
@@ -405,7 +417,7 @@ fn normalised_entry(
             let target = update_target(b.head()).unwrap_or_default();
             // An older release's bullet is kept as it is: it is never merged
             // into another one, nor into the release's own bullet.
-            let older = is_older(&target, version);
+            let older = is_older(&target, version, scheme);
             let same = if older {
                 None
             } else {
@@ -479,6 +491,7 @@ pub fn normalise_unpublished_changes(
     checkout_dir: &Path,
     project: &str,
     pkg: &str,
+    scheme: Scheme,
     emit: Emit<'_>,
 ) -> Vec<String> {
     let Ok(Some(origin)) = link_origin(project, pkg, emit) else {
@@ -492,13 +505,18 @@ pub fn normalise_unpublished_changes(
     ) else {
         return Vec::new();
     };
-    normalise_checkout(checkout_dir, &origin_text, pkg)
+    normalise_checkout(checkout_dir, &origin_text, pkg, scheme)
 }
 
 /// [`normalise_unpublished_changes`] with the origin's `.changes` text given:
 /// the newest `.changes` of `checkout_dir`, normalised against it and the
 /// checkout's spec Version.
-pub(super) fn normalise_checkout(checkout_dir: &Path, origin_text: &str, pkg: &str) -> Vec<String> {
+pub(super) fn normalise_checkout(
+    checkout_dir: &Path,
+    origin_text: &str,
+    pkg: &str,
+    scheme: Scheme,
+) -> Vec<String> {
     let Some(file) = newest_changes_file(checkout_dir) else {
         return Vec::new();
     };
@@ -511,7 +529,7 @@ pub(super) fn normalise_checkout(checkout_dir: &Path, origin_text: &str, pkg: &s
         .find_map(|p| fs::read_to_string(p).ok())
         .and_then(|t| crate::spec::parse_header(&t))
         .map(|h| h.version);
-    normalise_file(&file, origin_text, version.as_deref(), pkg)
+    normalise_file(&file, origin_text, version.as_deref(), pkg, scheme)
 }
 
 /// [`normalise_unpublished_entries`] on the file `file`, written back when it
@@ -524,6 +542,7 @@ pub(super) fn normalise_file(
     origin_text: &str,
     version: Option<&str>,
     pkg: &str,
+    scheme: Scheme,
 ) -> Vec<String> {
     let Some(version) = version.filter(|v| !v.contains('%')) else {
         return Vec::new();
@@ -531,7 +550,7 @@ pub(super) fn normalise_file(
     let Ok(working) = fs::read_to_string(file) else {
         return Vec::new();
     };
-    let (text, notes) = normalise_with_notes(origin_text, &working, version, pkg);
+    let (text, notes) = normalise_with_notes(origin_text, &working, version, pkg, scheme);
     if let Some(text) = &text
         && fs::write(file, text).is_err()
     {

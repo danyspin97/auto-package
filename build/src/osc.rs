@@ -108,6 +108,8 @@ mod changes_merge_tests;
 #[cfg(test)]
 mod changes_normalise_older_tests;
 #[cfg(test)]
+mod changes_normalise_scheme_tests;
+#[cfg(test)]
 mod changes_normalise_tests;
 mod update_notes;
 pub use update_notes::*;

@@ -1,6 +1,7 @@
 use super::changes_normalise::{
     normalise_file, normalise_unpublished_entries, normalise_with_notes,
 };
+use crate::version::Scheme;
 
 const SEP: &str = "-------------------------------------------------------------------\n";
 
@@ -330,9 +331,18 @@ fn a_macro_version_changes_nothing_in_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("debugedit.changes");
     std::fs::write(&file, DEBUGEDIT_BRANCH).unwrap();
-    assert!(normalise_file(&file, ORIGIN, Some("%{upstream}"), "debugedit").is_empty());
+    assert!(
+        normalise_file(
+            &file,
+            ORIGIN,
+            Some("%{upstream}"),
+            "debugedit",
+            Scheme::Generic
+        )
+        .is_empty()
+    );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), DEBUGEDIT_BRANCH);
-    assert!(normalise_file(&file, ORIGIN, None, "debugedit").is_empty());
+    assert!(normalise_file(&file, ORIGIN, None, "debugedit", Scheme::Generic).is_empty());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), DEBUGEDIT_BRANCH);
 }
 
@@ -341,14 +351,15 @@ fn a_changed_file_is_written_back() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("debugedit.changes");
     std::fs::write(&file, DEBUGEDIT_BRANCH).unwrap();
-    assert!(!normalise_file(&file, ORIGIN, Some("5.3"), "debugedit").is_empty());
+    assert!(!normalise_file(&file, ORIGIN, Some("5.3"), "debugedit", Scheme::Generic).is_empty());
     assert_eq!(std::fs::read_to_string(&file).unwrap(), ORIGIN);
-    assert!(normalise_file(&file, ORIGIN, Some("5.3"), "debugedit").is_empty());
+    assert!(normalise_file(&file, ORIGIN, Some("5.3"), "debugedit", Scheme::Generic).is_empty());
 }
 
 #[test]
 fn the_run_reports_what_it_did() {
-    let (text, notes) = normalise_with_notes(ORIGIN, DEBUGEDIT_RERUN, "5.4", "debugedit");
+    let (text, notes) =
+        normalise_with_notes(ORIGIN, DEBUGEDIT_RERUN, "5.4", "debugedit", Scheme::Generic);
     assert!(text.is_some());
     assert!(notes.merged && notes.placeholder, "{notes:?}");
     assert_eq!(notes.stale_newest, None);
@@ -423,13 +434,19 @@ fn the_newest_entry_is_kept_with_a_warning_when_it_is_another_release() {
         "- Update to 5.4\n- Refresh n.patch",
     );
     let older = entry(HEADER, "- Update to 5.2\n- Refresh o.patch");
-    let (text, notes) = normalise_with_notes("", &newer, "5.3", "pkg");
+    let (text, notes) = normalise_with_notes("", &newer, "5.3", "pkg", Scheme::Generic);
     assert_eq!(text, None);
     assert_eq!(notes.stale_newest.as_deref(), Some("5.4"));
     // An older release than the spec's is kept below it, and the newest one
     // stays: 5.2 is older than 5.3, so its entry is not stale. Both already
     // have their final shape, so nothing changes.
-    let (text, notes) = normalise_with_notes("", &format!("{newer}{older}"), "5.3", "pkg");
+    let (text, notes) = normalise_with_notes(
+        "",
+        &format!("{newer}{older}"),
+        "5.3",
+        "pkg",
+        Scheme::Generic,
+    );
     assert_eq!(text, None);
     assert_eq!(notes.stale_newest.as_deref(), Some("5.4"));
 }
@@ -443,7 +460,13 @@ fn an_rc_spelling_of_the_spec_version_is_not_stale() {
     let older = entry(HEADER, "- Update to 3.0rc1\n- Fix the build");
     // Nothing changes: the older entry is the spec's release, spelt differently,
     // so it is kept as it is (and the newest one is kept with a warning).
-    let (text, notes) = normalise_with_notes("", &format!("{newer}{older}"), "3.0~rc1", "pkg");
+    let (text, notes) = normalise_with_notes(
+        "",
+        &format!("{newer}{older}"),
+        "3.0~rc1",
+        "pkg",
+        Scheme::Generic,
+    );
     assert_eq!(text, None);
     assert_eq!(notes.stale_newest.as_deref(), Some("3.1"));
 }

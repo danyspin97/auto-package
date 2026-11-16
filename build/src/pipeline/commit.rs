@@ -200,6 +200,8 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         &ctx.checkout_dir,
         &ctx.config.project,
         &ctx.obs_name,
+        // The pipeline does not carry the package's ecosystem: the generic order.
+        None,
         &named,
         ctx.config.no_agent,
         Emit::new(ctx.reporter, commit_step.id),

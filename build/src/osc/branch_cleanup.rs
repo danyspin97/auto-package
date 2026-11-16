@@ -14,6 +14,7 @@ use super::*;
 use crate::bugfix::restore_old_entries;
 use crate::fix_flags::{FixFlag, from_spec_diff};
 use crate::release_notes::{FILLED, Fill, fill_missing_recap};
+use crate::version::Scheme;
 use ap_core::event::Event;
 use std::collections::BTreeSet;
 
@@ -27,6 +28,7 @@ pub fn clean_branch_leftovers(
     checkout: &Path,
     project: &str,
     pkg: &str,
+    scheme: Option<Scheme>,
     named: &[String],
     no_agent: bool,
     emit: Emit<'_>,
@@ -58,6 +60,7 @@ pub fn clean_branch_leftovers(
         origin_changes.as_deref(),
         origin_spec.as_deref(),
         pkg,
+        scheme.unwrap_or(Scheme::Generic),
         named,
         no_agent,
         &warn,
@@ -94,12 +97,13 @@ pub(super) fn clean_with_origin(
     origin_changes: Option<&str>,
     origin_spec: Option<&str>,
     pkg: &str,
+    scheme: Scheme,
     named: &[String],
     no_agent: bool,
     warn: &dyn Fn(String),
 ) -> Vec<String> {
     let mut messages = origin_changes
-        .map(|text| normalise_checkout(checkout, text, pkg))
+        .map(|text| normalise_checkout(checkout, text, pkg, scheme))
         .unwrap_or_default();
     if let Some(changes) = origin_changes
         && restore_published_entries(checkout, changes)
