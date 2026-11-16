@@ -234,10 +234,26 @@ fn condensed(releases: &[Release], condense: impl Fn(&str) -> Option<String>) ->
     }
 }
 
+/// The releases of the window per version: a version's changelog entry when
+/// the changelog has notes for it, else the forge's entry for it.
+fn per_version(changelog: Vec<Found>, forge: Vec<Found>) -> Vec<Found> {
+    let mut found: Vec<Found> = changelog
+        .into_iter()
+        .filter(|f| release_of(f).has_notes())
+        .collect();
+    let covered: Vec<String> = found.iter().map(|f| f.version.clone()).collect();
+    found.extend(forge.into_iter().filter(|f| {
+        !covered
+            .iter()
+            .any(|v| version::sort_cmp(v, &f.version) == Ordering::Equal)
+    }));
+    found
+}
+
 /// The recap over several releases of the jump `old` to `new`, or `None` when
 /// the window holds one release (the single-release form applies). `changelog`
-/// and `forge` are the releases each source finds in the window; the changelog
-/// is read when it has notes for any of them, else the forge releases. The
+/// and `forge` are the releases each source finds in the window; each version
+/// takes its changelog entry when that has notes, else its forge entry. The
 /// first entry is always `new`, even without notes (the update's own bullet);
 /// an older release gets an entry only when it has lines. Empty when no
 /// release has lines at all.
@@ -259,11 +275,7 @@ pub(super) fn several(
     if versions.len() < 2 {
         return None;
     }
-    let mut found = if changelog.iter().any(|f| release_of(f).has_notes()) {
-        changelog
-    } else {
-        forge
-    };
+    let mut found = per_version(changelog, forge);
     found.sort_by(|a, b| version::sort_cmp(&b.version, &a.version));
     let mut releases: Vec<Release> = found
         .iter()

@@ -124,6 +124,51 @@ fn forge_releases_give_one_group_each_and_prose_links_its_release() {
     );
 }
 
+fn found_of(version: &str, link: &str, body: &str) -> Found {
+    Found {
+        version: version.into(),
+        link: link.into(),
+        body: body.into(),
+    }
+}
+
+#[test]
+fn each_version_takes_its_changelog_entry_and_the_forge_fills_the_rest() {
+    let changelog = vec![found_of("2.0", "NEWS in the sources", "- changelog two")];
+    let forge = vec![
+        found_of("2.0", "https://example.org/r/2.0", "- forge two"),
+        found_of("1.0", "https://example.org/r/1.0", "- forge one"),
+    ];
+    let got = several("2.0", "0.9", changelog, forge, no_model).unwrap();
+    assert_eq!(
+        got,
+        vec![
+            ("2.0".to_string(), lines(&["* changelog two"])),
+            ("1.0".to_string(), lines(&["* forge one"])),
+        ]
+    );
+}
+
+#[test]
+fn a_changelog_that_covers_the_window_is_read_whatever_the_forge_says() {
+    let changelog = vec![
+        found_of("2.0", "NEWS in the sources", "- changelog two"),
+        found_of("1.0", "NEWS in the sources", "- changelog one"),
+    ];
+    let forge = vec![
+        found_of("2.0", "https://example.org/r/2.0", "- forge two"),
+        found_of("1.0", "https://example.org/r/1.0", "- forge one"),
+    ];
+    let got = several("2.0", "0.9", changelog, forge, no_model).unwrap();
+    assert_eq!(
+        got,
+        vec![
+            ("2.0".to_string(), lines(&["* changelog two"])),
+            ("1.0".to_string(), lines(&["* changelog one"])),
+        ]
+    );
+}
+
 #[test]
 fn a_release_with_no_notes_gets_no_bullet_and_no_placeholder() {
     let repo = "https://github.com/o/r";
