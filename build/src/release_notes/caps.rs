@@ -84,6 +84,20 @@ pub(super) fn cut_bullet(text: &str, limit: usize) -> String {
     }
 }
 
+/// The first `max` characters of `text`, cut back to its last whitespace when
+/// there is one, so that a word is not cut in two. A text with no whitespace
+/// in its first `max` characters is cut at `max`.
+pub(super) fn head(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    match head.rfind(char::is_whitespace) {
+        Some(at) if at > 0 => head[..at].to_string(),
+        _ => head,
+    }
+}
+
 /// `text` as a bullet of at most `limit` characters, the `...` included. A
 /// text that fits is kept. A longer one is cut at its last sentence end that
 /// fits, else at the last word boundary that fits, with `...` after it. A cut
@@ -189,6 +203,23 @@ mod tests {
         assert!(got.chars().count() <= 100, "{got}");
         assert!(got.ends_with("..."), "{got}");
         assert!(!got.contains(",..."), "{got}");
+    }
+
+    #[test]
+    fn a_head_is_cut_at_its_last_whitespace_or_else_at_its_length() {
+        assert_eq!(head("aaa bbb ccc", 6), "aaa");
+        assert_eq!(head("abcdef ghi jkl", 10), "abcdef");
+        assert_eq!(head("abcdef", 3), "abc");
+        assert_eq!(head("short", 10), "short");
+        assert_eq!(head("exact", 5), "exact");
+        let none = "x".repeat(25_000);
+        assert_eq!(head(&none, 20_000).chars().count(), 20_000);
+        let words = "word ".repeat(5_000);
+        let got = head(&words, 20_000);
+        assert!(
+            got.chars().count() <= 20_000 && got.ends_with("word"),
+            "{got}"
+        );
     }
 
     #[test]

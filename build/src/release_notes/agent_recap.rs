@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use super::caps::{BULLET_CHARS, PER_RELEASE, TOTAL, is_security, rank};
+use super::caps::{BULLET_CHARS, PER_RELEASE, TOTAL, head, is_security, rank};
 use super::per_release::Release;
 
 /// The most characters of the notes the model is given.
@@ -16,7 +16,7 @@ const MAX_NOTES_CHARS: usize = 20_000;
 /// per release with notes, newest first, each with its bullets as `- ` lines
 /// or its prose.
 pub(super) fn notes_of(releases: &[Release]) -> String {
-    releases
+    let notes: String = releases
         .iter()
         .filter(|r| r.has_notes())
         .map(|r| {
@@ -26,10 +26,8 @@ pub(super) fn notes_of(releases: &[Release]) -> String {
             };
             format!("## {}\n{}\n", r.version, body)
         })
-        .collect::<String>()
-        .chars()
-        .take(MAX_NOTES_CHARS)
-        .collect()
+        .collect::<String>();
+    head(&notes, MAX_NOTES_CHARS)
 }
 
 /// The CVE, bsc#, boo# and gh# references in `text`, lowercased.

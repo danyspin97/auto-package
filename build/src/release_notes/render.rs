@@ -1,7 +1,7 @@
 //! Turning the notes of releases into the lines of a `.changes` recap: the
 //! bullets of the notes, cleaned, or the link-only form when they are too many.
 
-use super::caps::{cut_bullet, is_security};
+use super::caps::{cut_bullet, head, is_security};
 use super::markdown::{is_rule, strip_comments, strip_emoji, strip_links};
 use super::routine::is_routine;
 use crate::sources::RepoRelease;
@@ -65,7 +65,7 @@ pub(super) fn classify(releases: &[RepoRelease]) -> Notes {
         .iter()
         .map(|r| format!("## {}\n{}\n", r.tag, strip_comments(&r.body).trim()))
         .collect();
-    Notes::Long(text.chars().take(20_000).collect())
+    Notes::Long(head(&text, 20_000))
 }
 
 /// The bullets of release notes in markdown, one line each, without the
@@ -228,7 +228,7 @@ fn push_trailing(out: &mut [String], word: &str) {
 /// cut: the callers cut it to their limit (a security line is never cut).
 fn tidy(item: &str) -> String {
     // Cut first so that a huge bullet does not cost a pass over all of it.
-    let item: String = item.chars().take(MAX_SOURCE_CHARS).collect();
+    let item = head(item, MAX_SOURCE_CHARS);
     let mut s = strip_emoji(&strip_links(&item));
     for mark in ["**", "__", "`"] {
         s = s.replace(mark, "");
