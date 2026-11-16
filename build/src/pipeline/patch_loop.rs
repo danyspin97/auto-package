@@ -286,6 +286,7 @@ fn patch_stage_inner(
                     return Err(settle_stop(ctx, &settled, ctx.failed_as(kind, reason)));
                 }
             };
+            normalise_refreshed_headers(ctx, &before_files);
             let applied =
                 apply_patch_turn(ctx, &turn_step, &outcome, &before_spec, &snapshot, rounds);
             for a in &outcome.patch_answers {

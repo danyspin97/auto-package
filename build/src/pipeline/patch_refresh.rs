@@ -42,12 +42,16 @@ pub(super) fn keep_proven_edits(
     before_files: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
 ) -> Vec<String> {
     use crate::patch_check::{PatchStatus, Refresh};
+    // The turn's spec is still on disk here: its top directory names the headers.
+    let top = header_top(ctx);
     let edited: Vec<(String, Vec<u8>)> = patch_files(before_spec, &ctx.checkout_dir)
         .into_iter()
         .filter_map(|(name, now)| {
             let before = before_files.get(&name).cloned().flatten();
             match now {
-                Some(bytes) if before.as_deref() != Some(bytes.as_slice()) => Some((name, bytes)),
+                Some(bytes) if before.as_deref() != Some(bytes.as_slice()) => {
+                    Some((name, with_top_dir(bytes, top.as_deref())))
+                }
                 _ => None,
             }
         })
@@ -77,6 +81,43 @@ pub(super) fn keep_proven_edits(
         lines.push(format!("- {name}: kept; quilt proves its edit applies"));
     }
     kept.into_iter().map(|(name, _)| name).collect()
+}
+
+/// The archive's top directory, as the spec on disk names it (`%autosetup -n`).
+fn header_top(ctx: &RunCtx) -> Option<String> {
+    let spec = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
+    crate::spec::autosetup_expected_dir(&spec, &ctx.config.rpm_name, &ctx.config.version)
+}
+
+/// `bytes` with quilt's `source/` header prefixes made `top` (see
+/// `rewrite_header_prefixes`); unchanged when there is no top or nothing to do.
+fn with_top_dir(bytes: Vec<u8>, top: Option<&str>) -> Vec<u8> {
+    top.and_then(|top| crate::patch_check::rewrite_header_prefixes(&bytes, top))
+        .unwrap_or(bytes)
+}
+
+/// After a refresh turn: each patch the turn changed or added has the archive's
+/// top directory in its headers in place of quilt's `source/` and
+/// `source.orig/`, written back only when that changes it. The patches are the
+/// ones the spec on disk declares, so a patch the turn added is included.
+pub(super) fn normalise_refreshed_headers(
+    ctx: &RunCtx,
+    before_files: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
+) {
+    let Some(top) = header_top(ctx) else {
+        return;
+    };
+    let spec = std::fs::read_to_string(&ctx.spec_path).unwrap_or_default();
+    for (name, now) in patch_files(&spec, &ctx.checkout_dir) {
+        let before = before_files.get(&name).cloned().flatten();
+        if before == now {
+            continue;
+        }
+        if let Some(bytes) = now.and_then(|b| crate::patch_check::rewrite_header_prefixes(&b, &top))
+        {
+            write_or_warn(ctx.checkout_dir.join(&name), &bytes);
+        }
+    }
 }
 
 /// The checkout and the spec as they were before the turn.
