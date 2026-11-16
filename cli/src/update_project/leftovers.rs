@@ -210,7 +210,9 @@ pub(super) fn classify<'a>(findings: impl IntoIterator<Item = &'a Finding>) -> P
             FindingRoute::Agent => gate.agent.push(line),
             _ => {}
         }
-        if !matches!(routed, FindingRoute::Tool(_)) && ready::stops(f) && !is_build_state(f) {
+        // A build state is never a refusal here (`is_build_state`), whatever the flag.
+        if !matches!(routed, FindingRoute::Tool(_)) && ready::stops(f, false) && !is_build_state(f)
+        {
             gate.refusals.push(f.id.to_string());
         }
     }

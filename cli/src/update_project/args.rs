@@ -32,6 +32,11 @@ pub struct UpdateProjectArgs {
     #[arg(skip)]
     pub fix_inherited: bool,
 
+    /// Set by `lint --block-inherited-failures`: a build failure the origin
+    /// has too blocks the ready gate of a submit.
+    #[arg(skip)]
+    pub block_inherited: bool,
+
     /// Only update these packages (comma separated).
     #[arg(long, value_delimiter = ',')]
     pub only: Vec<String>,
@@ -340,6 +345,12 @@ pub struct LintArgs {
     /// work is always checked as a whole, with or without this flag.
     #[arg(long, default_value_t = false)]
     pub fix: bool,
+
+    /// Make the ready gate block on a build failure the origin has too, as it
+    /// did before. Without it only a failure the branch causes, or one the
+    /// target has no result for, keeps a package from being submitted.
+    #[arg(long, default_value_t = false)]
+    pub block_inherited_failures: bool,
 }
 
 /// What `update` changes about how one package is built.

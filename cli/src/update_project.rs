@@ -67,6 +67,8 @@ mod parked;
 mod parked_tests;
 mod provenance;
 mod ready;
+#[cfg(test)]
+mod ready_inherited_tests;
 mod request;
 mod requested;
 mod rpmlint_audit;

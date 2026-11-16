@@ -203,8 +203,8 @@ pub(crate) fn prepare_request(
     }
     // The ready gate: a package that is not ready is not requested, and the
     // others go ahead (the caller decides for each package).
-    if let (ready::ReadyCheck::Gate { agent }, Some(rev)) = (ready_check, source_rev.as_deref()) {
-        match ready::submit_gate(state_root, branch, item, rev, agent, reporter) {
+    if let (ready::ReadyCheck::Gate(judging), Some(rev)) = (ready_check, source_rev.as_deref()) {
+        match ready::submit_gate(state_root, branch, item, rev, judging, reporter) {
             ready::GateOutcome::Ready => {}
             ready::GateOutcome::NotReady(why) => {
                 say(format!("no request for {}: {why}", item.pkg));

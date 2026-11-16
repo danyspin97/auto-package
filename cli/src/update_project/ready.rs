@@ -22,23 +22,40 @@ use serde::{Deserialize, Serialize};
 /// The file of a package's state directory that keeps its verdict.
 const VERDICT_FILE: &str = "ready.json";
 
-/// The maintainer's stops: a request to the target is open, the target fails
-/// to build too, or a carried patch's upstream was closed. They stop a package
-/// whatever their severity.
-const MAINTAINER_STOPS: [&str; 3] = [
-    ids::REQUEST_COMPETING,
-    ids::PATCH_UPSTREAM_CLOSED,
-    ids::BUILD_FAILS_IN_TARGET_TOO,
-];
+/// The maintainer's stops: a request to the target is open, or a carried
+/// patch's upstream was closed. They stop a package whatever their severity.
+const MAINTAINER_STOPS: [&str; 2] = [ids::REQUEST_COMPETING, ids::PATCH_UPSTREAM_CLOSED];
 
 /// Whether a finding keeps its package from being ready: a warning or a
 /// blocker, any build result that is not a pass, a version other than the
-/// update's, or one of the maintainer's stops.
-pub(super) fn stops(f: &Finding) -> bool {
+/// update's, or one of the maintainer's stops. A build failure the origin has
+/// too (`build.fails-in-target-too`) is inherited: it stops only with
+/// `block_inherited` (`lint --block-inherited-failures`).
+pub(super) fn stops(f: &Finding, block_inherited: bool) -> bool {
+    if f.id == ids::BUILD_FAILS_IN_TARGET_TOO {
+        return block_inherited;
+    }
     f.severity >= Severity::Warning
         || f.id.starts_with("build.")
         || f.id == ids::CHANGES_VERSION_MISMATCH
         || MAINTAINER_STOPS.contains(&f.id)
+}
+
+/// How a verdict is judged: whether an agent runs, and whether an inherited
+/// build failure blocks (see [`stops`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Judging {
+    pub(crate) agent: bool,
+    pub(crate) block_inherited: bool,
+}
+
+impl Judging {
+    pub(super) fn of(a: &UpdateProjectArgs) -> Self {
+        Judging {
+            agent: !a.no_agent,
+            block_inherited: a.block_inherited,
+        }
+    }
 }
 
 /// The verdict of the ready gate on one package.
@@ -55,6 +72,10 @@ pub(super) struct Verdict {
     /// submit. Empty in a verdict written before this field existed.
     #[serde(default)]
     pub(super) details: Vec<String>,
+    /// The `block_inherited` the verdict was judged with. `None` in a verdict
+    /// written before this field existed: it is judged again.
+    #[serde(default)]
+    pub(super) block_inherited: Option<bool>,
 }
 
 impl Verdict {
@@ -62,10 +83,13 @@ impl Verdict {
         self.reasons.is_empty()
     }
 
-    /// Whether this verdict may be reused for `srcmd5`: it judged that revision,
-    /// and, when it is not ready, it kept the details of why.
-    pub(super) fn judged(&self, srcmd5: &str) -> bool {
-        self.srcmd5 == srcmd5 && (self.ready() || !self.details.is_empty())
+    /// Whether this verdict may be reused for `srcmd5` judged with `judging`:
+    /// it judged that revision the same way, and, when it is not ready, it
+    /// kept the details of why.
+    pub(super) fn judged(&self, srcmd5: &str, judging: Judging) -> bool {
+        self.srcmd5 == srcmd5
+            && self.block_inherited == Some(judging.block_inherited)
+            && (self.ready() || !self.details.is_empty())
     }
 }
 
@@ -75,26 +99,27 @@ impl Verdict {
 pub(super) fn settled(
     stored: Option<Verdict>,
     srcmd5: &str,
+    judging: Judging,
     fresh: impl FnOnce() -> Result<Verdict, String>,
 ) -> Result<(Verdict, bool), String> {
     match stored {
-        Some(kept) if kept.judged(srcmd5) => Ok((kept, true)),
+        Some(kept) if kept.judged(srcmd5, judging) => Ok((kept, true)),
         _ => fresh().map(|verdict| (verdict, false)),
     }
 }
 
 /// When a ready check runs for a submit (see `prepare_request`): never for
-/// `update`, `build` and `fix`; for `lint`, with its agent setting.
+/// `update`, `build` and `fix`; for `lint`, with its settings.
 #[derive(Clone, Copy)]
 pub(crate) enum ReadyCheck {
     Skip,
-    Gate { agent: bool },
+    Gate(Judging),
 }
 
 /// The check a submit of this run gets.
 pub(super) fn check_for(a: &UpdateProjectArgs) -> ReadyCheck {
     if a.improve {
-        ReadyCheck::Gate { agent: !a.no_agent }
+        ReadyCheck::Gate(Judging::of(a))
     } else {
         ReadyCheck::Skip
     }
@@ -116,12 +141,12 @@ pub(super) fn refusal(verdict: &Verdict) -> String {
 }
 
 /// The verdict on `srcmd5` from the findings of its review and the other open
-/// requests to the target (`competing`). `agent` is whether an agent runs: its
-/// findings stop a package only when none does.
+/// requests to the target (`competing`). With no agent running (`judging.agent`
+/// false) its findings stop a package only when no other finding does.
 pub(super) fn judge<'a>(
     srcmd5: &str,
     findings: impl IntoIterator<Item = &'a Finding>,
-    agent: bool,
+    judging: Judging,
 ) -> Verdict {
     let mut reasons: Vec<String> = Vec::new();
     let mut details: Vec<String> = Vec::new();
@@ -131,8 +156,8 @@ pub(super) fn judge<'a>(
         let rf = ReviewFinding::from(f);
         let agent_route = matches!(route(&rf), FindingRoute::Agent);
         owned.push(rf);
-        let agent_stop = agent_route && !agent && f.severity != Severity::Note;
-        if stops(f) || agent_stop {
+        let agent_stop = agent_route && !judging.agent && f.severity != Severity::Note;
+        if stops(f, judging.block_inherited) || agent_stop {
             if !reasons.iter().any(|r| r == f.id) {
                 reasons.push(f.id.to_string());
             }
@@ -157,6 +182,7 @@ pub(super) fn judge<'a>(
         reasons,
         needs_agent,
         details,
+        block_inherited: Some(judging.block_inherited),
     }
 }
 
@@ -233,7 +259,7 @@ fn verdict_of(
         carry,
         pkg,
         &srcmd5,
-        !a.no_agent,
+        Judging::of(a),
         ctx.reporter.as_ref(),
     )
 }
@@ -246,13 +272,13 @@ pub(super) fn settle(
     carry: &Carry,
     pkg: &str,
     srcmd5: &str,
-    agent: bool,
+    judging: Judging,
     reporter: &(dyn Reporter + Send + Sync),
 ) -> Result<(Verdict, bool), String> {
     let state = verdict_file(state_root, pkg);
     let stored = state.as_deref().ok().and_then(read_verdict);
-    let (verdict, kept) = settled(stored, srcmd5, || {
-        review(carry, pkg, srcmd5, agent, scratch_root, reporter)
+    let (verdict, kept) = settled(stored, srcmd5, judging, || {
+        review(carry, pkg, srcmd5, judging, scratch_root, reporter)
     })?;
     if !kept {
         let warn = |message: String| {
@@ -294,7 +320,7 @@ pub(super) fn submit_gate(
     branch: &str,
     item: &Item,
     srcmd5: &str,
-    agent: bool,
+    judging: Judging,
     reporter: &(dyn Reporter + Send + Sync),
 ) -> GateOutcome {
     // The submit's own origin: the request targets it with the same package name.
@@ -313,7 +339,7 @@ pub(super) fn submit_gate(
         &carry,
         &item.pkg,
         srcmd5,
-        agent,
+        judging,
         reporter,
     ) {
         Ok((verdict, _)) if verdict.ready() => GateOutcome::Ready,
@@ -328,7 +354,7 @@ fn review(
     carry: &Carry,
     pkg: &str,
     srcmd5: &str,
-    agent: bool,
+    judging: Judging,
     scratch_root: &Path,
     reporter: &(dyn Reporter + Send + Sync),
 ) -> Result<Verdict, String> {
@@ -384,7 +410,7 @@ fn review(
     Ok(judge(
         srcmd5,
         report.check_findings().chain(&competing),
-        agent,
+        judging,
     ))
 }
 
@@ -406,24 +432,39 @@ mod tests {
         Finding::check(id, severity, "pkg", "a message")
     }
 
+    const AGENT: Judging = Judging {
+        agent: true,
+        block_inherited: false,
+    };
+    const NO_AGENT: Judging = Judging {
+        agent: false,
+        block_inherited: false,
+    };
+
     #[test]
     fn a_warning_or_a_build_that_is_not_a_pass_stops_a_package() {
-        assert!(stops(&finding(ids::SPEC_STYLE, Severity::Warning)));
-        assert!(stops(&finding(ids::SPEC_STYLE, Severity::Blocker)));
-        assert!(!stops(&finding(ids::SPEC_STYLE, Severity::Note)));
-        assert!(stops(&finding(ids::BUILD_PENDING, Severity::Note)));
-        assert!(stops(&finding(
-            ids::CHANGES_VERSION_MISMATCH,
-            Severity::Note
-        )));
-        assert!(stops(&finding(ids::REQUEST_COMPETING, Severity::Note)));
-        assert!(stops(&finding(ids::PATCH_UPSTREAM_CLOSED, Severity::Note)));
+        assert!(stops(&finding(ids::SPEC_STYLE, Severity::Warning), false));
+        assert!(stops(&finding(ids::SPEC_STYLE, Severity::Blocker), false));
+        assert!(!stops(&finding(ids::SPEC_STYLE, Severity::Note), false));
+        assert!(stops(&finding(ids::BUILD_PENDING, Severity::Note), false));
+        assert!(stops(
+            &finding(ids::CHANGES_VERSION_MISMATCH, Severity::Note),
+            false
+        ));
+        assert!(stops(
+            &finding(ids::REQUEST_COMPETING, Severity::Note),
+            false
+        ));
+        assert!(stops(
+            &finding(ids::PATCH_UPSTREAM_CLOSED, Severity::Note),
+            false
+        ));
     }
 
     #[test]
     fn a_clean_review_with_no_competing_request_is_ready() {
         let found = [finding(ids::VERSION_NOT_CHECKED, Severity::Note)];
-        let verdict = judge("abc", found.iter(), true);
+        let verdict = judge("abc", found.iter(), AGENT);
         assert!(verdict.ready());
         assert_eq!(verdict.srcmd5, "abc");
         assert!(!verdict.needs_agent);
@@ -435,7 +476,7 @@ mod tests {
             finding(ids::REQUEST_COMPETING, Severity::Warning),
             finding(ids::BUILD_FAILED, Severity::Blocker),
         ];
-        let verdict = judge("abc", found.iter(), true);
+        let verdict = judge("abc", found.iter(), AGENT);
         assert!(!verdict.ready());
         assert_eq!(verdict.reasons, [ids::REQUEST_COMPETING, ids::BUILD_FAILED]);
     }
@@ -443,7 +484,7 @@ mod tests {
     #[test]
     fn with_no_agent_an_agent_finding_is_not_ready_and_needs_the_agent() {
         let found = [finding(ids::SPEC_STYLE, Severity::Warning)];
-        let verdict = judge("abc", found.iter(), false);
+        let verdict = judge("abc", found.iter(), NO_AGENT);
         assert!(!verdict.ready());
         assert!(verdict.needs_agent);
         assert_eq!(verdict.reasons, [ids::SPEC_STYLE]);
@@ -453,7 +494,7 @@ mod tests {
     fn a_verdict_is_kept_as_json_and_read_back() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(VERDICT_FILE);
-        let verdict = judge("abc", [].iter(), true);
+        let verdict = judge("abc", [].iter(), AGENT);
         write_verdict(&path, &verdict).unwrap();
         assert_eq!(read_verdict(&path), Some(verdict));
         assert_eq!(read_verdict(&dir.path().join("absent.json")), None);
@@ -464,7 +505,7 @@ mod tests {
         let mut spec = finding(ids::SPEC_STYLE, Severity::Warning);
         spec.file = Some("python-foo.spec".into());
         let found = [finding(ids::REQUEST_COMPETING, Severity::Warning), spec];
-        let verdict = judge("abc", found.iter(), true);
+        let verdict = judge("abc", found.iter(), AGENT);
         assert_eq!(
             refusal(&verdict),
             "not ready to submit: request.competing -: a message; \
@@ -475,16 +516,16 @@ mod tests {
     #[test]
     fn a_maintainer_stop_refuses_a_submit_whatever_its_severity() {
         let found = [finding(ids::PATCH_UPSTREAM_CLOSED, Severity::Note)];
-        let verdict = judge("abc", found.iter(), true);
+        let verdict = judge("abc", found.iter(), AGENT);
         assert!(!verdict.ready());
         assert!(refusal(&verdict).contains(ids::PATCH_UPSTREAM_CLOSED));
     }
 
     #[test]
     fn a_stored_verdict_of_the_same_revision_is_reused_without_a_review() {
-        let stored = judge("abc", [].iter(), true);
+        let stored = judge("abc", [].iter(), AGENT);
         let mut reviewed = false;
-        let (kept, was_kept) = settled(Some(stored.clone()), "abc", || {
+        let (kept, was_kept) = settled(Some(stored.clone()), "abc", AGENT, || {
             reviewed = true;
             Err("no review".to_string())
         })
@@ -495,19 +536,20 @@ mod tests {
 
     #[test]
     fn a_verdict_of_another_revision_or_without_details_is_judged_again() {
-        let fresh = || Ok(judge("new", [].iter(), true));
-        let (v, kept) = settled(Some(judge("abc", [].iter(), true)), "new", fresh).unwrap();
+        let fresh = || Ok(judge("new", [].iter(), AGENT));
+        let (v, kept) = settled(Some(judge("abc", [].iter(), AGENT)), "new", AGENT, fresh).unwrap();
         assert!(!kept && v.srcmd5 == "new");
         let old = Verdict {
             srcmd5: "abc".into(),
             reasons: vec![ids::SPEC_STYLE.into()],
             needs_agent: true,
             details: Vec::new(),
+            block_inherited: Some(false),
         };
-        assert!(!old.judged("abc"));
-        let (_, kept) = settled(Some(old), "abc", fresh).unwrap();
+        assert!(!old.judged("abc", AGENT));
+        let (_, kept) = settled(Some(old), "abc", AGENT, fresh).unwrap();
         assert!(!kept);
-        let (_, kept) = settled(None, "abc", fresh).unwrap();
+        let (_, kept) = settled(None, "abc", AGENT, fresh).unwrap();
         assert!(!kept);
     }
 
@@ -517,7 +559,7 @@ mod tests {
         let path = verdict_file(root.path(), "python-ExifRead").unwrap();
         assert_eq!(path, root.path().join("python-ExifRead").join(VERDICT_FILE));
         assert!(path.parent().unwrap().is_dir());
-        write_verdict(&path, &judge("abc", [].iter(), true)).unwrap();
+        write_verdict(&path, &judge("abc", [].iter(), AGENT)).unwrap();
         assert_eq!(verdict_file(root.path(), "python-ExifRead").unwrap(), path);
         assert_eq!(
             read_verdict(&path).map(|v| v.srcmd5),

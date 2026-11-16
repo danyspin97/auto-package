@@ -433,10 +433,13 @@ unchanged. `--in-place` gets the check too; nothing is submitted from it.
 
 A package is not ready when the review has a Warning or a Blocker, when a build
 result is not a pass (a pending one too), when its `.changes` entry's version is
-not the update's (`changes.version-mismatch`), or when one of three maintainer
+not the update's (`changes.version-mismatch`), or when one of two maintainer
 findings is present: another open request to the target (`request.competing`),
-a carried patch whose upstream was closed (`patch.upstream-closed`), or a target
-that fails to build too (`build.fails-in-target-too`).
+or a carried patch whose upstream was closed (`patch.upstream-closed`). A build
+failure the target fails too (`build.fails-in-target-too`) does not stop a
+package; `lint --block-inherited-failures` makes it stop one, as before. A
+failure the branch causes, and one the target has no result for
+(`build.no-target-result`), always stop it.
 
 `--submit` judges each package again before its request: a kept verdict of the
 package's current revision is reused, otherwise the review runs. A package that

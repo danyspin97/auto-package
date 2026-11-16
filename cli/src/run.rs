@@ -580,6 +580,7 @@ pub(super) fn run(cli: Cli, summary: &mut Option<String>) -> color_eyre::Result<
             args.allow_host.apply()?;
             args.improve = true;
             args.fix_inherited = lint.fix;
+            args.block_inherited = lint.block_inherited_failures;
             update_project::run(args, summary)?
         }
         Commands::Notes { name, notes_dir } => crate::notes_cmd::notes_command(&name, &notes_dir)?,
