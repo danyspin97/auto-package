@@ -10,7 +10,9 @@
 use regex::Regex;
 
 use crate::osc::is_changes_separator;
-use crate::request_review::changes_checks::{is_dependency_bullet, update_target};
+use crate::request_review::changes_checks::{
+    is_dependency_bullet, is_housekeeping_bullet, update_target,
+};
 
 const SEPARATOR: &str = "-------------------------------------------------------------------";
 
@@ -211,8 +213,9 @@ pub fn normalise_headers(new: &str, base: Option<&str>) -> Result<String, String
     Ok(with_own(new, prefix, own))
 }
 
-/// The bullets of the request's entries that only say a dependency changed are
-/// dropped. Refuses when that would leave an entry without a bullet.
+/// The bullets of the request's entries that convention 40 gives no bullet to (a
+/// dependency change or a housekeeping edit) are dropped. Refuses when that
+/// would leave an entry without a bullet.
 pub fn drop_dependency_bullets(new: &str, base: Option<&str>) -> Result<String, String> {
     let prefix = own_prefix(new, base)?;
     let lines: Vec<&str> = prefix.lines().collect();
@@ -244,7 +247,9 @@ pub fn drop_dependency_bullets(new: &str, base: Option<&str>) -> Result<String, 
                 full.push_str(lines[j].trim());
                 j += 1;
             }
-            if update_target(&full).is_none() && is_dependency_bullet(&full) {
+            if update_target(&full).is_none()
+                && (is_dependency_bullet(&full) || is_housekeeping_bullet(&full))
+            {
                 dropped += 1;
                 dropped_in_entry += 1;
                 i = j;
@@ -257,7 +262,7 @@ pub fn drop_dependency_bullets(new: &str, base: Option<&str>) -> Result<String, 
     }
     end_entry(kept_in_entry, dropped_in_entry)?;
     if dropped == 0 {
-        return Err("no bullet only says a dependency changed".into());
+        return Err("no bullet is a dependency change or a housekeeping edit".into());
     }
     let own = format!("{}\n", out.join("\n"));
     Ok(with_own(new, prefix, own))

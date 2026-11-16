@@ -128,6 +128,20 @@ fn an_older_release_bullet_stays_under_the_new_one() {
 }
 
 #[test]
+fn a_housekeeping_bullet_is_dropped_with_the_dependency_bullets() {
+    let new = format!(
+        "{}{OLD}",
+        entry(
+            DATE,
+            "- Update to 2.10.4\n  * https://x.test/notes\n- Remove the sed workaround in %prep\n- Fix a thing"
+        )
+    );
+    let fixed = drop_dependency_bullets(&new, Some(OLD)).unwrap();
+    assert!(!fixed.contains("sed workaround") && fixed.contains("- Fix a thing"));
+    assert!(fixed.contains("https://x.test/notes"));
+}
+
+#[test]
 fn a_loose_header_is_written_in_the_standard_form() {
     let new = format!(
         "---------------------------------------------\nTue Nov 3 11:14:44 2026 -  Jane Doe <jane.doe@example.com>\n\n- Update to 2.10.4\n\n{OLD}"

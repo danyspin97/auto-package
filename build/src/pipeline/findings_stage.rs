@@ -178,7 +178,7 @@ fn run_tool(
         }
         MechanicalFix::DropDependencyBullet => {
             edit_changes(checkout, |t| drop_dependency_bullets(t, base))?;
-            Ok("dropped the dependency bullet".into())
+            Ok("dropped the bullets convention 40 gives no bullet to".into())
         }
         // `lint` fills the notes in: it knows the origin's version, a fix does not.
         MechanicalFix::UpstreamNotes => Err("the notes are filled in by lint".into()),
