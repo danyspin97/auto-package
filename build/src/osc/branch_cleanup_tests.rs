@@ -276,6 +276,7 @@ fn a_missing_recap_nobody_can_read_is_reported_and_the_entry_stays() {
         "{:?}",
         warnings.borrow()
     );
+    assert!(warnings.borrow()[0].contains("gets no new notes"));
 }
 
 #[test]

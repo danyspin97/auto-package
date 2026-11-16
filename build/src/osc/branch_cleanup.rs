@@ -117,7 +117,7 @@ pub(super) fn clean_with_origin(
         match fill_missing_recap(checkout, pkg, changes, spec, no_agent) {
             Ok(Fill::Written { old, new }) => messages.push(format!("{FILLED} for {old}..{new}")),
             Ok(Fill::NotFound { old, new, problem }) => warn(format!(
-                "no upstream notes available for {old}..{new}, so the {new} entry keeps none{}",
+                "no upstream notes available for {old}..{new}, so the {new} entry gets no new notes{}",
                 problem.map(|p| format!(" ({p})")).unwrap_or_default()
             )),
             Ok(Fill::Nothing) => {}
