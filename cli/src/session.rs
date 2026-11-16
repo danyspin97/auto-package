@@ -250,6 +250,19 @@ mod tests {
     }
 }
 
+/// Runs [`handle_interrupt`] on a thread of its own, for a Ctrl-C or `q` pressed
+/// in the TUI. The handler waits for open runs and OBS writes, which can take
+/// minutes, so the render thread that called it must not wait there: it parks
+/// instead. The handler ends the process, so the park never returns.
+pub(crate) fn interrupt_from_tui(memory: Arc<MemorySink>) -> ! {
+    std::thread::spawn(move || {
+        handle_interrupt(true, &memory);
+    });
+    loop {
+        std::thread::park();
+    }
+}
+
 /// Route Ctrl-C (and, with ctrlc's `termination` feature, SIGTERM/SIGHUP) to
 /// [`handle_interrupt`]. A later call (`--maintenance` runs `update` once per
 /// code stream) points the installed handler at the new run instead of failing.

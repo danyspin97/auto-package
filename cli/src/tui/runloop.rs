@@ -127,7 +127,7 @@ fn event_loop(
     rx: Receiver<Msg>,
     add_tx: Option<&Sender<AddRequest>>,
     work: &AtomicUsize,
-    memory: &MemorySink,
+    memory: &std::sync::Arc<MemorySink>,
     scope: RunScope,
     settled: &AtomicBool,
     backend_slot: &BackendSlot,
@@ -345,7 +345,7 @@ fn event_loop(
                     if run_over(&state) {
                         break;
                     }
-                    crate::handle_interrupt(true, memory)
+                    crate::interrupt_from_tui(memory.clone())
                 }
                 KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
                     if run_over(&state) {
@@ -355,7 +355,7 @@ fn event_loop(
                     // never delivers a real SIGINT while the TUI is running —
                     // this keypress IS the only place Ctrl-C shows up. Same
                     // shutdown as `q`/Esc above.
-                    crate::handle_interrupt(true, memory);
+                    crate::interrupt_from_tui(memory.clone());
                 }
                 KeyCode::Tab => browse.focus = cycle_focus(browse.focus, false),
                 KeyCode::BackTab => browse.focus = cycle_focus(browse.focus, true),
