@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use super::caps::{BULLET_CHARS, PER_RELEASE, TOTAL};
+use super::caps::{BULLET_CHARS, PER_RELEASE, TOTAL, cut, is_security};
 use super::render::MAX_BULLETS;
 
 const MODEL: &str = "claude-sonnet-5-5";
@@ -10,6 +10,8 @@ const BUDGET_USD: &str = "0.10";
 const TIMEOUT: Duration = Duration::from_secs(120);
 /// A bullet of the summary is cut to this many characters.
 const MAX_BULLET_CHARS: usize = 200;
+/// The most characters of a security line of the summary.
+const MAX_SECURITY_CHARS: usize = 1000;
 /// The summary's own cap, below [`MAX_BULLETS`] so it reads as a recap.
 const MAX_SUMMARY_BULLETS: usize = 8;
 
@@ -137,11 +139,29 @@ pub(super) fn parse_answer(stdout: &str) -> Option<Vec<String>> {
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
-            let clean: String = clean.chars().take(MAX_BULLET_CHARS).collect();
+            let clean = if is_security(&clean) {
+                bounded(&clean)
+            } else {
+                cut(&clean, MAX_BULLET_CHARS)
+            };
             clean.chars().any(char::is_alphanumeric).then_some(clean)
         })
         .collect();
     (!bullets.is_empty() && bullets.len() <= MAX_BULLETS).then_some(bullets)
+}
+
+/// `text` cut to [`MAX_SECURITY_CHARS`] at its last word when it is longer: a
+/// security line of the summary is not cut at 200 characters, but the model's
+/// line is untrusted and gets this ceiling.
+fn bounded(text: &str) -> String {
+    if text.chars().count() <= MAX_SECURITY_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(MAX_SECURITY_CHARS).collect();
+    match head.rfind(' ') {
+        Some(at) if at > 0 => head[..at].to_string(),
+        _ => head,
+    }
 }
 
 #[cfg(test)]

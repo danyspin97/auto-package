@@ -54,6 +54,16 @@ pub(super) fn rank(line: &str) -> u8 {
     }
 }
 
+/// [`cut`] for a bullet of a recap, except that a security line is never cut:
+/// its reference is the fact the reader needs.
+pub(super) fn cut_bullet(text: &str, limit: usize) -> String {
+    if is_security(text) {
+        text.trim().to_string()
+    } else {
+        cut(text, limit)
+    }
+}
+
 /// `text` as a bullet of at most `limit` characters, the `...` included. A
 /// text that fits is kept. A longer one is cut at its last sentence end that
 /// fits, else at the last word boundary that fits, with `...` after it. A cut
@@ -159,6 +169,16 @@ mod tests {
         assert!(got.chars().count() <= 100, "{got}");
         assert!(got.ends_with("..."), "{got}");
         assert!(!got.contains(",..."), "{got}");
+    }
+
+    #[test]
+    fn a_security_line_is_never_cut() {
+        let line = format!(
+            "Fix CVE-2024-1234 in the parser {}",
+            "and more words ".repeat(20)
+        );
+        assert_eq!(cut_bullet(&line, 200), line.trim());
+        assert!(cut_bullet("Add a long thing and more words here", 12).ends_with("..."));
     }
 
     #[test]

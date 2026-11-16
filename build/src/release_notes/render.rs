@@ -1,7 +1,7 @@
 //! Turning the notes of releases into the lines of a `.changes` recap: the
 //! bullets of the notes, cleaned, or the link-only form when they are too many.
 
-use super::caps::{cut, is_security};
+use super::caps::{cut_bullet, is_security};
 use super::markdown::{is_rule, strip_comments, strip_emoji, strip_links};
 use super::routine::is_routine;
 use crate::sources::RepoRelease;
@@ -53,7 +53,12 @@ pub(super) fn classify(releases: &[RepoRelease]) -> Notes {
             return Notes::None;
         }
         if bullets.len() <= MAX_BULLETS {
-            return Notes::Bullets(bullets.iter().map(|b| cut(b, MAX_BULLET_CHARS)).collect());
+            return Notes::Bullets(
+                bullets
+                    .iter()
+                    .map(|b| cut_bullet(b, MAX_BULLET_CHARS))
+                    .collect(),
+            );
         }
     }
     let text: String = with_notes

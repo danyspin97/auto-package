@@ -53,6 +53,18 @@ fn a_bullet_is_wrapped_under_its_text() {
 }
 
 #[test]
+fn a_single_release_security_line_is_not_cut_and_another_is_cut_at_a_word() {
+    let words = "word ".repeat(60);
+    let body = format!("- Fix CVE-2024-1234 in the parser {words}end\n- Add {words}end\n");
+    let Notes::Bullets(got) = classify(&[rel("v2", &body)]) else {
+        panic!("two short bullets are listed");
+    };
+    assert!(got[0].ends_with("word end"), "{}", got[0]);
+    assert!(got[1].ends_with("..."), "{}", got[1]);
+    assert!(got[1].chars().count() <= 200, "{}", got[1]);
+}
+
+#[test]
 fn many_bullets_or_prose_go_to_the_summary_and_fall_back_to_links() {
     let many: String = (0..12).map(|i| format!("- change {i}\n")).collect();
     let r = [
@@ -104,6 +116,23 @@ fn a_summary_keeps_only_clean_bullets() {
         parse_answer(&serde_json::json!({"result": "* a", "is_error": true}).to_string()).is_none()
     );
     assert!(parse_answer("not json").is_none());
+    let security = format!(
+        "* Fix CVE-2024-1234 in the parser {}end",
+        "word ".repeat(60)
+    );
+    let got = parse_answer(&ok(&security)).unwrap();
+    assert!(got[0].ends_with("word end"), "{}", got[0]);
+    let long = format!("* Add {}end", "word ".repeat(60));
+    let got = parse_answer(&ok(&long)).unwrap();
+    assert!(got[0].ends_with("..."), "{}", got[0]);
+    let huge = format!(
+        "* Fix CVE-2024-1234 in the parser {}end",
+        "word ".repeat(1000)
+    );
+    let got = parse_answer(&ok(&huge)).unwrap();
+    assert!(got[0].chars().count() <= 1000, "{}", got[0].len());
+    assert!(got[0].contains("CVE-2024-1234"), "{}", got[0]);
+    assert!(got[0].ends_with("word"), "{}", got[0]);
 }
 
 mod changelog_file {
