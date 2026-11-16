@@ -353,6 +353,7 @@ fn stage_mechanically(
         ctx.ws.notes(),
         &[],
         &ctx.config.rpm_name,
+        &|| None,
     ) {
         // The gate put the checkout back, the staged files with it.
         if let Err(e) = stage_files(fix) {

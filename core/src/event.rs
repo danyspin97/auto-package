@@ -196,6 +196,8 @@ pub enum SpecRejection {
         from: String,
         to: String,
     },
+    /// The edit moved inherited dependencies to another kind (convention 86).
+    InheritedKindChange(Vec<String>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -205,8 +205,7 @@ fn apply_turn_outcome_with(
                 return Err(format!("{label}: could not finish the disabled patch: {e}").into());
             }
             let proven = judged.proven;
-            // A new patch must be named by the bullet; a build system switch
-            // needs evidence and gets its own bullet (`build_switch`).
+            // A new patch must be named by the bullet; a switch gets its own (`build_switch`).
             let switch = switch_of_edit(spec_path, before);
             let bullet_source = with_drop_bullets(
                 with_switch_bullet(turn_bullet_source(outcome), switch),
@@ -275,6 +274,7 @@ fn apply_turn_outcome_with(
                     notes_path.clone(),
                     &keep,
                     &config.rpm_name,
+                    &|| origin_for_edit(config, checkout_dir, reporter),
                 ) {
                     Ok(()) => true,
                     Err(why) => {

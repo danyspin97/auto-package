@@ -14,6 +14,10 @@ use crate::pipeline::source_guard::*;
 
 mod spec_journal;
 pub(super) use spec_journal::*;
+mod dep_kind;
+pub(super) use dep_kind::*;
+#[cfg(test)]
+mod dep_kind_tests;
 mod python_expand;
 use python_expand::*;
 
@@ -228,6 +232,7 @@ pub(super) fn accept_or_restore_with_snapshot(
         notes_path,
         keep,
         package,
+        &|| None,
     )
     .is_ok()
 }
@@ -246,6 +251,7 @@ pub(super) fn accept_or_restore_reasoned(
     notes_path: PathBuf,
     keep: &[String],
     package: &str,
+    origin: OriginSpec<'_>,
 ) -> Result<(), String> {
     accept_checked(
         spec_path,
@@ -258,6 +264,7 @@ pub(super) fn accept_or_restore_reasoned(
         keep,
         package,
         true,
+        origin,
     )
 }
 
@@ -289,6 +296,7 @@ pub(super) fn accept_wheel_switch(
         keep,
         package,
         false,
+        &|| None,
     )
     .is_ok()
 }
@@ -307,6 +315,7 @@ fn accept_checked(
     keep: &[String],
     package: &str,
     judge_removals: bool,
+    origin: OriginSpec<'_>,
 ) -> Result<(), String> {
     let after = std::fs::read_to_string(spec_path).unwrap_or_else(|_| before.to_string());
     // A fixup the edit adds needs a comment saying why (convention 40). Checked on the
@@ -514,6 +523,23 @@ fn accept_checked(
         reporter,
         notes_path.clone(),
         keep,
+    ) {
+        return Err(problem);
+    }
+
+    // An inherited dependency keeps its kind unless the release forces the change
+    // (convention 86). The scope is the default one: `--fix` is not set here.
+    if let Some(problem) = reject_inherited_kind_changes(
+        spec_path,
+        before,
+        origin,
+        snapshot,
+        step,
+        reporter,
+        notes_path.clone(),
+        keep,
+        &[],
+        false,
     ) {
         return Err(problem);
     }
