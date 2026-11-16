@@ -83,6 +83,7 @@ pub(crate) fn quilt_env(
     let mut env = vec![
         ("QUILT_PC", std::ffi::OsString::from(".pc")),
         ("QUILTRC", std::ffi::OsString::from("/dev/null")),
+        ("QUILT_DIFF_OPTS", std::ffi::OsString::from("-p")),
     ];
     if let Some(checkout) = checkout {
         env.push(("QUILT_PATCHES", checkout.as_os_str().to_owned()));

@@ -99,6 +99,8 @@ pub(super) fn run_check(
     env.insert("QUILTRC".into(), "/dev/null".into());
     env.insert("LC_ALL".into(), "C".into());
     env.insert("LANG".into(), "C".into());
+    // quilt's diff keeps the function context of each hunk (`@@ ... @@ def f`).
+    env.insert("QUILT_DIFF_OPTS".into(), "-p".into());
     let quilt = Quilt {
         root: root.clone(),
         patches: patches_dir.clone(),
