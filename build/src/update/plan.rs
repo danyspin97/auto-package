@@ -425,9 +425,10 @@ pub fn plan_each_watched(
     let read_specs: SpecCells = Mutex::new(HashMap::new());
     // The packages whose spec this plan read and stashed (see `stash_spec`).
     let stashed: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+    let known_revisions = spec_cache::known_revisions(project);
     let fetch_spec = |rpm_name: &str| {
         read_once(&read_specs, rpm_name, || {
-            let spec = spec_for_package(project, rpm_name, emit);
+            let spec = spec_cache::spec_for_package(project, rpm_name, &known_revisions, emit);
             stash_spec(project, rpm_name, spec.as_ref().ok());
             if spec.is_ok() {
                 stashed

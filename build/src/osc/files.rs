@@ -154,3 +154,24 @@ fn unexpanded_listing_if_missing_ok(
             .collect(),
     )
 }
+
+/// The revision of OBS package `pkg` as its listing gives it (see
+/// `expanded_revision`), when the listing holds a `.spec` file: a revision that
+/// changes whenever the package's content does. `None` when OBS cannot say, the
+/// names are not valid, or the package holds no spec of its own.
+pub fn package_spec_revision(project: &str, pkg: &str) -> Option<String> {
+    if ![project, pkg].iter().all(|n| is_valid_obs_name(n)) {
+        return None;
+    }
+    let xml = osc_api(&format!("/source/{project}/{pkg}?expand=1"))?;
+    spec_revision_of_listing(&xml)
+}
+
+/// The revision of an expanded listing (`?expand=1`) that holds a `.spec` file,
+/// see [`package_spec_revision`]. `None` for a listing without one.
+pub fn spec_revision_of_listing(listing_xml: &str) -> Option<String> {
+    if !listing_xml.contains(".spec\"") {
+        return None;
+    }
+    expanded_revision(listing_xml).filter(|r| !r.is_empty())
+}

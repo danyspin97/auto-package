@@ -3,7 +3,9 @@
 //!
 //! A sibling is found by its upstream, not its name (`influxdb2` for
 //! `influxdb`, `zookeeper-kit` for `zookeeper`), so every package of the
-//! project has to be read to know which ones are siblings. The index is built
+//! project has to be looked at to know which ones are siblings: its spec is
+//! read from OBS unless the work directory keeps it for the package's revision
+//! (see `spec_cache`). The index is built
 //! once per plan, the first time a check asks for it, on `jobs` threads. Each
 //! read goes through the plan's cache, so a package is asked of OBS once however
 //! many checks look at it, and the package's own check reuses its read.

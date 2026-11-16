@@ -70,6 +70,8 @@ mod published_binary_tests;
 pub use project_packages::*;
 
 mod files;
+mod source_revisions;
+pub use source_revisions::*;
 #[cfg(test)]
 mod project_packages_cache_tests;
 pub use files::*;

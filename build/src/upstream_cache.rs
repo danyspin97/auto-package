@@ -83,6 +83,11 @@ pub fn set_dir(dir: PathBuf) {
     let _ = DIR.set(dir);
 }
 
+/// The work directory the cache was given, when one was set.
+pub fn work_dir() -> Option<&'static Path> {
+    DIR.get().map(PathBuf::as_path)
+}
+
 /// Ask upstream for every version, ignoring what is kept (the answers are
 /// still stored).
 pub fn set_refresh(refresh: bool) {
