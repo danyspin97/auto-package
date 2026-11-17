@@ -353,9 +353,10 @@ fn a_post_step_does_not_hold_a_job_slot() {
         // Both slots are free again once the first two runs end, so `c` runs
         // while their post steps still wait.
         let started = wait_for(&fake, "start c");
-        let held = fake.log().contains(&"post held-a".to_string())
-            && fake.log().contains(&"post held-b".to_string())
-            && !fake.log().contains(&"post end held-a".to_string());
+        // Both post steps are logged before `held` is read: under load `c` can
+        // start before the second held run has logged its post.
+        let posted = wait_for(&fake, "post held-a") && wait_for(&fake, "post held-b");
+        let held = posted && !fake.log().contains(&"post end held-a".to_string());
         fake.release();
         (started, held, sched.finish())
     });
