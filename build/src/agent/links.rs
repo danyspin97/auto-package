@@ -7,8 +7,13 @@
 //! and the checkout, is undone and the turn rejected. Links that were there
 //! before the turn are the pipeline's and are not checked.
 //!
-//! Whether Claude Code's own permission matching sees the real path of a
-//! symlinked file is not known here; this check does not depend on it.
+//! Whether Claude Code's permission matching sees the real path of a symlinked
+//! file is not verified. A read-only investigation inferred that it does (the
+//! `package` link denies blocked every write to the checkout, the spec included),
+//! but that was not reproduced. The `package` denies in
+//! [`package_link_denied_tools`] therefore name each protected path under both
+//! the link and the checkout's canonical path, so they hold either way. This
+//! check does not depend on it.
 
 use super::tools::{CHECKOUT_METADATA_DIRS, REFRESH_SERIES};
 use std::collections::BTreeMap;
@@ -207,17 +212,59 @@ impl LinkGuard {
     }
 }
 
-/// Denies Edit, Write and NotebookEdit under the workspace's `package` link (see
-/// `Workspace::link_package`). The link leads to the checkout, and the denies on
-/// its metadata, series and `.changes` are written as checkout paths, which a
-/// write spelled through the link does not match. The turn lists and reads the
-/// package through the link; it edits only the spec, by its absolute path.
-pub(super) fn package_link_denied_tools(workspace: &Path) -> Vec<String> {
-    let p = super::response::permission_path(workspace);
+/// Denies Edit, Write and NotebookEdit on the checkout's protected names, under
+/// the workspace's `package` link (see `Workspace::link_package`) and under the
+/// checkout's canonical path. The turn lists and reads the package through the
+/// link and edits the spec by its absolute path, so no deny covers the whole
+/// link tree: a deny on `package/**` also matches the spec when the permission
+/// matching resolves the link, and then every edit of the spec is refused. The
+/// protected names are the metadata (`.osc`, `.git`), the quilt series and the
+/// `.changes` files, the files [`is_checkout_control_file`] guards. The spec and
+/// the patch files are not among them.
+pub(super) fn package_link_denied_tools(workspace: &Path, checkout: Option<&Path>) -> Vec<String> {
+    let mut bases = vec![format!(
+        "{}/package",
+        super::response::permission_path(workspace)
+    )];
+    if let Some(co) = checkout {
+        bases.push(super::response::permission_path(co));
+    }
+    let names = protected_names();
     let mut out = Vec::new();
-    for tool in ["Edit", "Write", "NotebookEdit"] {
-        out.push(format!("{tool}({p}/package)"));
-        out.push(format!("{tool}({p}/package/**)"));
+    for base in &bases {
+        for tool in ["Edit", "Write", "NotebookEdit"] {
+            for name in &names {
+                out.push(format!("{tool}({base}/{name})"));
+            }
+        }
     }
     out
+}
+
+/// The checkout-relative patterns [`package_link_denied_tools`] denies. The
+/// series and `.changes` names are denied at the root and in any subdirectory,
+/// as [`is_checkout_control_file`] checks them. The settings and MCP files are
+/// the ones `turn_denied_tools` denies by checkout path: here too, for the link
+/// spelling. `_service` is not among them: it depends on the turn's task (see
+/// `owned_files::service_denied_tools`).
+fn protected_names() -> Vec<String> {
+    let mut names = Vec::new();
+    for dir in CHECKOUT_METADATA_DIRS {
+        names.push(dir.to_string());
+        names.push(format!("{dir}/**"));
+    }
+    for file in ["series", REFRESH_SERIES, "*.changes"] {
+        names.push(file.to_string());
+        names.push(format!("**/{file}"));
+    }
+    names.extend(
+        [
+            ".claude/**",
+            ".mcp.json",
+            ".claude.json",
+            "**/.claude/settings*.json",
+        ]
+        .map(String::from),
+    );
+    names
 }

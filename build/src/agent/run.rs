@@ -28,7 +28,8 @@ pub(super) fn turn_inner(req: TurnRequest<'_>, web_hosts: &[String]) -> Result<T
         allowed_tools.push_str(&sibling_read_tools(req.sibling_dirs));
     }
     let mut denied_tools = turn_denied_tools(req.workspace, req.checkout_dir);
-    let mut service = super::owned_files::service_denied_tools(req.task, req.checkout_dir);
+    let mut service =
+        super::owned_files::service_denied_tools(req.task, req.workspace, req.checkout_dir);
     if req.task == Task::PatchReview {
         service.extend(review_denied_tools(req.checkout_dir));
     }

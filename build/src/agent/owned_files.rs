@@ -56,13 +56,26 @@ pub(super) fn may_edit_service(task: Task) -> bool {
 
 /// Denies Edit, Write and NotebookEdit on the checkout's `_service` for a turn
 /// that may not edit it (see [`may_edit_service`]). Empty for a turn that may.
-pub(super) fn service_denied_tools(task: Task, checkout: Option<&std::path::Path>) -> Vec<String> {
+/// The denial is written both as the checkout path and through the workspace's
+/// `package` link, which the path rules of the checkout do not match.
+pub(super) fn service_denied_tools(
+    task: Task,
+    workspace: &std::path::Path,
+    checkout: Option<&std::path::Path>,
+) -> Vec<String> {
     let Some(checkout) = checkout.filter(|_| !may_edit_service(task)) else {
         return Vec::new();
     };
-    let p = permission_path(checkout);
-    ["Edit", "Write", "NotebookEdit"]
-        .into_iter()
-        .map(|tool| format!("{tool}({p}/_service)"))
+    let bases = [
+        permission_path(checkout),
+        format!("{}/package", permission_path(workspace)),
+    ];
+    bases
+        .iter()
+        .flat_map(|p| {
+            ["Edit", "Write", "NotebookEdit"]
+                .into_iter()
+                .map(move |tool| format!("{tool}({p}/_service)"))
+        })
         .collect()
 }
