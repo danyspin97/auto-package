@@ -88,6 +88,7 @@ fn config(pkg: &str, version: &str, arch: &str) -> PipelineConfig {
         branch_build: false,
         lint_review: false,
         lint_scoped: false,
+        scheme: crate::version::Scheme::Generic,
         run_id: "test".into(),
         source_urls: Default::default(),
         python_flavors: Default::default(),

@@ -418,6 +418,7 @@ fn build_item(
             && a.backport_job.is_none()
             && a.fix_task.is_none(),
         bug_fix: a.fix_task.clone(),
+        scheme: super::existing::scheme_of_ecosystem(&item.ecosystem),
     };
     let distro = crate::choose_distro(a.distro.as_deref(), branch, &a.arch);
     catch_panic(|| {

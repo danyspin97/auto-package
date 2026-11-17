@@ -200,8 +200,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
         &ctx.checkout_dir,
         &ctx.config.project,
         &ctx.obs_name,
-        // The pipeline does not carry the package's ecosystem: the generic order.
-        None,
+        leftover_scheme(&ctx.config),
         &named,
         ctx.config.no_agent,
         Emit::new(ctx.reporter, commit_step.id),
@@ -289,6 +288,12 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     }
     commit_step.finish(StepOutcome::Ok);
     Ok(())
+}
+
+/// The version scheme the leftover cleanup of the commit step compares in: the
+/// run's own (`PipelineConfig::scheme`), as the update's tidy uses it.
+pub(super) fn leftover_scheme(config: &PipelineConfig) -> Option<crate::version::Scheme> {
+    Some(config.scheme)
 }
 
 /// The `osc ci` message: "auto-package", and when the newest `.changes`

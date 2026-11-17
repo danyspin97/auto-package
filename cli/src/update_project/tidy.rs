@@ -111,7 +111,8 @@ pub(super) fn tidy_item(
                 commit_files.push(changes.clone());
             }
         }
-        // The leftovers the build commit cleans too, so both leave the same ones.
+        // The leftovers the build commit cleans too, so both leave the same ones
+        // in the same scheme: the build's `PipelineConfig::scheme` is this item's.
         let named = osc::spec_source_names(&after);
         cleaned = osc::clean_branch_leftovers(
             &dir,

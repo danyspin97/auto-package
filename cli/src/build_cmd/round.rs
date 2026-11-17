@@ -375,6 +375,7 @@ mod tests {
             branch_build: false,
             lint_review: false,
             lint_scoped: false,
+            scheme: ap_build::version::Scheme::Generic,
             run_id: "test".into(),
             source_urls: Default::default(),
             python_flavors: Default::default(),

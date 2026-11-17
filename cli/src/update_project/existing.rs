@@ -46,7 +46,7 @@ pub(super) fn scheme_of(item: &Item) -> Scheme {
 }
 
 /// The version scheme of a package of `ecosystem`.
-pub(super) fn scheme_of_ecosystem(ecosystem: &Ecosystem) -> Scheme {
+pub(crate) fn scheme_of_ecosystem(ecosystem: &Ecosystem) -> Scheme {
     match ecosystem {
         Ecosystem::Pypi { .. } => Scheme::Pep440,
         _ => Scheme::Generic,

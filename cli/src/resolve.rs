@@ -185,6 +185,7 @@ pub(super) fn resolve_dependency_config(
                     update: false,
                     branch_version: None,
                     unknown_build_system: false,
+                    scheme: ap_build::version::Scheme::Generic,
                     ..config.clone()
                 })
             }
@@ -229,6 +230,7 @@ pub(super) fn resolve_dependency_config(
                 update: false,
                 branch_version: None,
                 unknown_build_system: false,
+                scheme: ap_build::version::Scheme::Generic,
                 ..config.clone()
             });
         }
@@ -354,6 +356,7 @@ pub(super) fn resolve_dependency_config(
                 update: false,
                 branch_version: None,
                 unknown_build_system: false,
+                scheme: ap_build::version::Scheme::Generic,
                 ..config.clone()
             });
         }

@@ -50,7 +50,7 @@ mod deps_tests;
 mod dry_run;
 mod routes;
 use routes::*;
-mod existing;
+pub(crate) mod existing;
 mod existing_lint;
 mod fix_landed;
 #[cfg(test)]

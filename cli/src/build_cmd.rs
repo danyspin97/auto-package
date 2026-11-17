@@ -202,6 +202,7 @@ pub(crate) fn cmd_build(
         branch_build: branch.is_some(),
         lint_review: branch.is_some_and(|b| b.lint),
         lint_scoped: branch.is_some_and(|b| b.scoped),
+        scheme: branch.map_or(ap_build::version::Scheme::Generic, |b| b.scheme),
     };
 
     let mut config = config;

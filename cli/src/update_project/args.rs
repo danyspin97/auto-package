@@ -381,6 +381,8 @@ pub struct BranchBuild {
     pub update: bool,
     /// `fix`: the bug to fix in this package, at the version it has.
     pub bug_fix: Option<Arc<ap_build::bugfix::FixTask>>,
+    /// The version scheme of the package's ecosystem (`PipelineConfig::scheme`).
+    pub scheme: ap_build::version::Scheme,
 }
 
 impl BranchBuild {

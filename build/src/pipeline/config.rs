@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::version::Scheme;
+
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
     pub pkg_name: String,
@@ -121,6 +123,10 @@ pub struct PipelineConfig {
     /// without `--fix`: the review's scope note says to change only what the
     /// package's own diff shows (see `build_round::post_review_scope`).
     pub lint_scoped: bool,
+    /// The version scheme of the package's ecosystem: the leftover cleanup of
+    /// its branch at commit compares versions in it. `Generic` unless the
+    /// caller knows the ecosystem (an update of a PyPI package is `Pep440`).
+    pub scheme: Scheme,
 }
 
 /// The reserved `--source-url <package>=wheel` value: package this one from the

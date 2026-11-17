@@ -339,6 +339,8 @@ mod commit_gate_tests;
 #[cfg(test)]
 mod commit_message_tests;
 #[cfg(test)]
+mod commit_scheme_tests;
+#[cfg(test)]
 mod commit_summary_tests;
 pub mod keyring_accept;
 #[cfg(test)]

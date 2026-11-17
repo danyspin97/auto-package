@@ -490,6 +490,7 @@ fn branch_build(update: bool, improve: Option<&str>) -> BranchBuild {
         upstream_tag: None,
         update,
         bug_fix: None,
+        scheme: ap_build::version::Scheme::Generic,
     }
 }
 

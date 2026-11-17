@@ -379,6 +379,8 @@ fn cmd_update(
             upstream_tag: None,
             update: true,
             bug_fix: None,
+            // Set below, once the decision names the ecosystem.
+            scheme: ap_build::version::Scheme::Generic,
         };
         let ap_build::update::Decision::Update {
             ecosystem,
@@ -429,6 +431,7 @@ fn cmd_update(
         let existing = update_project::BranchBuild {
             from_version: Some(old_version),
             upstream_tag,
+            scheme: update_project::existing::scheme_of_ecosystem(&ecosystem),
             ..existing
         };
         let r = cmd_build(
