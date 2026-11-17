@@ -290,7 +290,7 @@ replaces a patch: it writes the header and reports a moved request as
 Under its `Update to <version>` bullet the entry lists what upstream says
 changed: the changelog section of the new source archive, else the notes of
 the releases between the old and the new version on the forge. Short bullet
-notes are listed as they are (each cut to 200 characters), long or prose notes
+notes are listed as they are (each cut to 160 characters), long or prose notes
 are condensed by one model call, and when they stay too many the entry links
 the release pages or names the changelog file. `--no-agent` makes no model call
 and uses those links or that file line.
@@ -314,21 +314,24 @@ release than the spec's goes. A release with no notes gets no bullet and no
 placeholder.
 
 Within those limits, a recap over several releases lists at most 12 bullets per
-release and 40 in all, each bullet at most 100 characters, cut at a word
-boundary with `...`. Security-fix lines (`CVE-`, `bsc#`, `boo#`, `gh#`
-references) are never cut and never dropped. Breaking-looking bullets come
-first in their release, then security fixes, then the rest.
+release and 40 in all, and at most 40 wrapped lines for each release. Each
+bullet is at most 160 characters, cut at a sentence or clause end (no `...`);
+a bullet with neither end is kept whole up to 400 characters, and a longer one
+is cut at a word. Security-fix lines (`CVE-`, `bsc#`, `boo#`, `gh#` references)
+are never cut and never dropped. Breaking-looking bullets come first in their
+release, then security fixes, then the rest.
 
 When the notes are too many or too long for those limits (prose notes, or more
-bullets than fit), one model call condenses them per release, newest first,
-with breaking changes first and marked with the plain prefix `Breaking:`. The
-answer is used only when it names each release that has notes, in order, nothing
-else, lists only bullets within the limits, and keeps every security reference
-of the notes; otherwise, or when the model fails, the releases are shrunk. With
-`--no-agent` no model is called and the shrink is used: the newest release keeps
-its 12 lines, the older ones go to 6 bullets each, oldest first, and then to a
-single `see <release page or changelog file>` line each. A recap that fits the
-limits is never sent to the model.
+bullets or lines than fit), one model call condenses them per release, newest
+first, with breaking changes first and marked with the plain prefix `Breaking:`.
+The answer is used only when it names each release that has notes, in order,
+nothing else, lists only bullets within the limits, and keeps every security
+reference of the notes; otherwise, or when the model fails, the releases are
+shrunk. With `--no-agent` no model is called and the shrink is used: the newest
+release keeps its 12 lines (or its link when they wrap past 40 lines), the older
+ones go to 6 bullets each, oldest first, and then to a single
+`see <release page or changelog file>` line each. A recap that fits the limits
+is never sent to the model.
 
 A package packaged for the first time gets the recap of its own version only
 when it is a Rust package built from a `tar_scm` service, today. Other new

@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 
 use super::caps::{BULLET_CHARS, PER_RELEASE, TOTAL, head, is_security, rank};
 use super::per_release::Release;
+use super::render::fits_lines;
 
 /// The most characters of the notes the model is given.
 const MAX_NOTES_CHARS: usize = 20_000;
@@ -100,6 +101,9 @@ pub(super) fn checked(
             .any(|i| !is_security(i) && i.chars().count() > BULLET_CHARS)
         {
             return Err("a bullet is longer than its limit");
+        }
+        if !fits_lines(&items) {
+            return Err("a release wraps to more lines than the limit");
         }
         lists.push(items);
     }

@@ -163,7 +163,9 @@ fn keep(items: &[String], n: usize) -> Vec<String> {
 /// Whether the lists fit the limits: no release over [`PER_RELEASE`] lines and
 /// all of them together within [`caps::TOTAL`].
 fn fits(lists: &[Vec<String>]) -> bool {
-    lists.iter().all(|l| l.len() <= caps::PER_RELEASE)
+    lists
+        .iter()
+        .all(|l| l.len() <= caps::PER_RELEASE && render::fits_lines(l))
         && lists.iter().map(Vec::len).sum::<usize>() <= caps::TOTAL
 }
 
@@ -187,6 +189,9 @@ pub(super) fn shrunk(releases: &[Release]) -> Vec<Vec<String>> {
     let n = lists.len();
     if let Some(newest) = lists.first_mut() {
         *newest = keep(newest, PER_RELEASE);
+        if !render::fits_lines(newest) {
+            *newest = only_link(&releases[0]);
+        }
     }
     for i in (1..n).rev() {
         if fits(&lists) {

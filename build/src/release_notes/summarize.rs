@@ -3,13 +3,11 @@
 use std::time::Duration;
 
 use super::caps::{BULLET_CHARS, PER_RELEASE, TOTAL, cut, head, is_security};
-use super::render::MAX_BULLETS;
+use super::render::{MAX_BULLETS, fits_lines};
 
 const MODEL: &str = "claude-sonnet-5-5";
 const BUDGET_USD: &str = "0.10";
 const TIMEOUT: Duration = Duration::from_secs(120);
-/// A bullet of the summary is cut to this many characters.
-const MAX_BULLET_CHARS: usize = 200;
 /// The most characters of a security line of the summary.
 const MAX_SECURITY_CHARS: usize = 1000;
 /// The summary's own cap, below [`MAX_BULLETS`] so it reads as a recap.
@@ -142,12 +140,12 @@ pub(super) fn parse_answer(stdout: &str) -> Option<Vec<String>> {
             let clean = if is_security(&clean) {
                 head(&clean, MAX_SECURITY_CHARS)
             } else {
-                cut(&clean, MAX_BULLET_CHARS)
+                cut(&clean, BULLET_CHARS)
             };
             clean.chars().any(char::is_alphanumeric).then_some(clean)
         })
         .collect();
-    (!bullets.is_empty() && bullets.len() <= MAX_BULLETS).then_some(bullets)
+    (!bullets.is_empty() && bullets.len() <= MAX_BULLETS && fits_lines(&bullets)).then_some(bullets)
 }
 
 #[cfg(test)]

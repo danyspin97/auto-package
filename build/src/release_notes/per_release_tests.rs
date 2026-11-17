@@ -258,6 +258,18 @@ fn a_recap_within_the_limits_is_not_shrunk() {
 }
 
 #[test]
+fn a_release_whose_bullets_wrap_past_the_lines_limit_shrinks_to_its_link() {
+    let long: Vec<String> = (0..10)
+        .map(|k| format!("Change {k} {}", "word ".repeat(60).trim_end()))
+        .collect();
+    let releases = vec![release(2, long), release(1, items(3, "b"))];
+    assert!(super::per_release::fitting(&releases).is_none());
+    let lists = super::per_release::shrunk(&releases);
+    assert_eq!(lists[0], ["see https://example.org/r/2"]);
+    assert_eq!(lists[1], items(3, "b"));
+}
+
+#[test]
 fn the_oldest_releases_shrink_first_to_six_bullets() {
     let releases: Vec<_> = (1..=4).rev().map(|v| release(v, items(12, "x"))).collect();
     assert!(super::per_release::fitting(&releases).is_none());
@@ -333,12 +345,17 @@ fn a_security_line_is_never_cut_or_dropped() {
 }
 
 #[test]
-fn a_bullet_is_cut_to_a_hundred_characters_at_a_word() {
+fn a_long_bullet_with_no_sentence_or_clause_end_is_kept_whole() {
     let bullet = "word ".repeat(60);
     let lists = super::per_release::fitting(&[release(1, vec![bullet.trim().into()])]).unwrap();
-    assert!(lists[0][0].chars().count() <= 100, "{:?}", lists[0]);
-    assert!(lists[0][0].ends_with("..."));
-    assert!(lists[0][0].trim_end_matches("...").ends_with("word"));
+    assert_eq!(lists[0][0], bullet.trim());
+}
+
+#[test]
+fn a_long_bullet_is_cut_at_its_clause_end_without_an_ellipsis() {
+    let bullet = format!("Add a parser option, {}", "word ".repeat(60));
+    let lists = super::per_release::fitting(&[release(1, vec![bullet.trim().into()])]).unwrap();
+    assert_eq!(lists[0][0], "Add a parser option");
 }
 
 #[test]
@@ -448,7 +465,7 @@ fn a_model_recap_that_breaks_a_rule_falls_back_to_the_shrunk_lists() {
             ]
         )
     );
-    let long = "x ".repeat(60);
+    let long = "x ".repeat(90);
     let many: String = (0..13).map(|i| format!("* item {i}\n")).collect();
     let bad = [
         // A release is dropped.
@@ -542,7 +559,7 @@ fn the_prompt_states_the_limits_once_from_caps() {
     let p = super::summarize::release_prompt("notes");
     assert!(p.contains("at most 12 bullets per release"), "{p}");
     assert!(p.contains("at most 40 bullets in all"), "{p}");
-    assert!(p.contains("at most 100 characters"), "{p}");
+    assert!(p.contains("at most 160 characters"), "{p}");
     assert!(p.contains("`Breaking: `"), "{p}");
 }
 

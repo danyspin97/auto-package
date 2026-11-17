@@ -1,7 +1,7 @@
 //! Turning the notes of releases into the lines of a `.changes` recap: the
 //! bullets of the notes, cleaned, or the link-only form when they are too many.
 
-use super::caps::{cut_bullet, head, is_security};
+use super::caps::{BULLET_CHARS, cut_bullet, head, is_security};
 use super::markdown::{is_rule, strip_comments, strip_emoji, strip_links};
 use super::routine::is_routine;
 use crate::sources::RepoRelease;
@@ -12,13 +12,11 @@ pub(super) const MAX_BULLETS: usize = 10;
 const MAX_LINKS: usize = 5;
 /// Width of a `.changes` line, including its two-space indent.
 const WIDTH: usize = 67;
-/// A single-release bullet is cut to this many characters: release bodies are
-/// untrusted.
-const MAX_BULLET_CHARS: usize = 200;
 /// A bullet's source is read up to this many characters.
 const MAX_SOURCE_CHARS: usize = 20_000;
-/// The most lines a recap takes.
-const MAX_LINES: usize = 40;
+/// The most lines a recap takes. A recap whose bullets wrap to more lines is
+/// not listed: it falls back to the link form, as too many bullets do.
+pub(super) const MAX_LINES: usize = 40;
 
 /// What the notes of the releases between two versions come to.
 #[derive(Debug, PartialEq, Eq)]
@@ -53,12 +51,13 @@ pub(super) fn classify(releases: &[RepoRelease]) -> Notes {
             return Notes::None;
         }
         if bullets.len() <= MAX_BULLETS {
-            return Notes::Bullets(
-                bullets
-                    .iter()
-                    .map(|b| cut_bullet(b, MAX_BULLET_CHARS))
-                    .collect(),
-            );
+            let cut: Vec<String> = bullets
+                .iter()
+                .map(|b| cut_bullet(b, BULLET_CHARS))
+                .collect();
+            if fits_lines(&cut) {
+                return Notes::Bullets(cut);
+            }
         }
     }
     let text: String = with_notes
@@ -249,14 +248,16 @@ fn tidy(item: &str) -> String {
 }
 
 /// The recap lines for `bullets`: each a `* ` item, wrapped to the width of a
-/// `.changes` line with continuation lines indented under the text, at most
-/// [`MAX_LINES`] of them.
+/// `.changes` line with continuation lines indented under the text. Every
+/// line is kept; whether they fit [`MAX_LINES`] is decided by the caller (see
+/// [`fits_lines`]).
 pub(super) fn bullet_lines(bullets: &[String]) -> Vec<String> {
-    bullets
-        .iter()
-        .flat_map(|b| wrap(b))
-        .take(MAX_LINES)
-        .collect()
+    bullets.iter().flat_map(|b| wrap(b)).collect()
+}
+
+/// Whether `bullets` wrap to at most [`MAX_LINES`] lines in all.
+pub(super) fn fits_lines(bullets: &[String]) -> bool {
+    bullets.iter().map(|b| wrap(b).len()).sum::<usize>() <= MAX_LINES
 }
 
 /// `text` as a `* ` item wrapped at [`WIDTH`] (the entry indents every line

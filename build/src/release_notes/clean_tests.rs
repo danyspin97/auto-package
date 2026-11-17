@@ -59,14 +59,26 @@ fn prose_without_a_model_answer_links_the_release() {
 }
 
 #[test]
+fn bullets_that_wrap_past_the_lines_limit_give_the_link_form_not_a_cut_list() {
+    let long = "word ".repeat(60);
+    let body: String = (0..10).map(|k| format!("- Change {k} {long}\n")).collect();
+    let lines = recap(None, &[rel("v2", &body)], |_| None);
+    assert_eq!(lines[0], "* Too many changes to list, see:", "{lines:?}");
+    assert!(
+        lines.iter().all(|l| !l.starts_with("* Change")),
+        "{lines:?}"
+    );
+}
+
+#[test]
 fn a_huge_bullet_is_cut_and_the_recap_stays_short() {
-    let body = format!("- {}\n- short\n", "word ".repeat(100_000));
+    let body = format!("- {}\n- short\n", "word, ".repeat(100_000));
     let lines = recap(None, &[rel("v2", &body)], never);
     assert!(lines.len() <= 6, "{lines:?}");
-    assert!(lines.iter().any(|l| l.ends_with("...")));
+    assert!(lines.iter().any(|l| l.ends_with("word")), "{lines:?}");
     assert!(lines.iter().all(|l| l.len() <= 70));
     let many: Vec<String> = (0..10).map(|_| "word ".repeat(60)).collect();
-    assert!(render::bullet_lines(&many).len() <= 40);
+    assert!(!render::fits_lines(&many));
 }
 
 #[test]

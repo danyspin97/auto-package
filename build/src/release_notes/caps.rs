@@ -6,8 +6,13 @@
 pub(super) const PER_RELEASE: usize = 12;
 /// Most bullets a recap over several releases lists in all.
 pub(super) const TOTAL: usize = 40;
-/// Most characters of a bullet, its `...` included, when it is cut.
-pub(super) const BULLET_CHARS: usize = 100;
+/// Most characters of a bullet that is cut: a longer bullet is cut at a
+/// sentence or clause end within this many characters (see [`cut`]).
+pub(super) const BULLET_CHARS: usize = 160;
+/// Most characters of a bullet with no sentence or clause end within
+/// [`BULLET_CHARS`]: it is kept whole up to this many, and above it is cut at
+/// the last word boundary before this many (see [`cut`]).
+pub(super) const BULLET_CEILING: usize = 400;
 /// The bullets an older release is shrunk to, oldest releases first, when the
 /// recap is over the limits. After that each one is a single `see` line.
 pub(super) const SHRUNK: usize = 6;
@@ -98,48 +103,74 @@ pub(super) fn head(text: &str, max: usize) -> String {
     }
 }
 
-/// `text` as a bullet of at most `limit` characters, the `...` included. A
-/// text that fits is kept. A longer one is cut at its last sentence end that
-/// fits, else at the last word boundary that fits, with `...` after it. A cut
-/// never ends on a dangling `,`, `;`, `:` or a joining word (see [`undangle`]).
+/// `text` as a bullet. A text of at most `limit` characters is kept. A longer
+/// one is cut at its last sentence end within `limit` characters, else at its
+/// last clause end (`, ` or `; `) within it, with no `...` added. A text with
+/// neither is kept whole up to [`BULLET_CEILING`] characters; a longer one is
+/// cut at the last word boundary before that. A cut never ends on a dangling
+/// `,`, `;`, `:` or a joining word (see [`undangle`]).
 pub(super) fn cut(text: &str, limit: usize) -> String {
     let text = text.trim();
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= limit {
         return undangle(text);
     }
-    if let Some(end) = sentence_end_within(&chars, limit) {
-        return chars[..=end].iter().collect();
-    }
-    let head: String = chars[..limit.saturating_sub(3)].iter().collect();
-    let whole_word = chars
-        .get(limit.saturating_sub(3))
-        .is_some_and(|c| c.is_whitespace());
-    let kept = if whole_word {
-        head.as_str()
-    } else {
-        match head.rfind(char::is_whitespace) {
-            Some(at) if at > 0 => &head[..at],
-            _ => head.as_str(),
-        }
+    let kept = match boundary_within(&chars, limit) {
+        Some(n) => n,
+        None if chars.len() <= BULLET_CEILING => chars.len(),
+        None => word_end_within(&chars, BULLET_CEILING),
     };
-    format!("{}...", undangle(kept))
+    let out = undangle(&chars[..kept].iter().collect::<String>());
+    if out.is_empty() { undangle(text) } else { out }
 }
 
-/// The index of the last `.` within the first `limit` characters that ends a
-/// sentence: a `.` followed by a space or by the end of the text, after a word
-/// of two letters or more (`e.g.` and `v1.2` are not sentence ends).
-fn sentence_end_within(chars: &[char], limit: usize) -> Option<usize> {
-    (0..limit.min(chars.len())).rev().find(|&i| {
+/// The number of characters of the longest prefix of `chars` that is at most
+/// `max` characters and ends at a word boundary: `max` itself when a whitespace
+/// follows it, else the last whitespace before it. A text with no whitespace
+/// before `max` is cut at `max`.
+fn word_end_within(chars: &[char], max: usize) -> usize {
+    if chars.get(max).is_some_and(|c| c.is_whitespace()) {
+        return max;
+    }
+    chars[..max]
+        .iter()
+        .rposition(|c| c.is_whitespace())
+        .filter(|&at| at > 0)
+        .unwrap_or(max)
+}
+
+/// The number of characters a cut keeps: up to the last sentence end within the
+/// first `limit` characters, else up to the last clause end there (the `,` or
+/// `;` itself is not kept). `None` when the text has neither.
+fn boundary_within(chars: &[char], limit: usize) -> Option<usize> {
+    let within = limit.min(chars.len());
+    let sentence = (0..within).rev().find(|&i| {
         chars[i] == '.' && chars.get(i + 1).is_none_or(|c| c.is_whitespace()) && {
-            let word: String = chars[..i]
-                .iter()
-                .rev()
-                .take_while(|c| !c.is_whitespace())
-                .collect();
+            let word = word_before(chars, i);
             word.chars().count() >= 2 && !word.contains('.')
         }
+    });
+    if let Some(end) = sentence {
+        return Some(end + 1);
+    }
+    (0..within).rev().find(|&i| {
+        matches!(chars[i], ',' | ';') && chars.get(i + 1).is_some_and(|c| c.is_whitespace()) && {
+            let word = word_before(chars, i);
+            word.chars().count() >= 2
+                && !word.contains('.')
+                && word.chars().any(char::is_alphabetic)
+        }
     })
+}
+
+/// The word that ends just before `chars[at]`, or the empty string when a
+/// whitespace or the start comes first.
+fn word_before(chars: &[char], at: usize) -> String {
+    chars[..at]
+        .iter()
+        .rev()
+        .take_while(|c| !c.is_whitespace())
+        .collect()
 }
 
 /// `text` without a dangling end: trailing `,`, `;` or `:` and a last word
@@ -174,35 +205,96 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_cut_is_at_a_word_boundary_and_within_the_limit() {
-        assert_eq!(cut("alpha beta gamma", 12), "alpha...");
-        assert_eq!(cut("alpha beta", 100), "alpha beta");
-        assert_eq!(cut("abcdefghij", 6), "abc...");
-        assert!(cut(&"word ".repeat(50), 100).chars().count() <= 100);
+    fn a_bullet_under_the_limit_is_untouched() {
+        assert_eq!(cut("alpha beta", BULLET_CHARS), "alpha beta");
+        let exact = "x".repeat(BULLET_CHARS);
+        assert_eq!(cut(&exact, BULLET_CHARS), exact);
+        let under = "word ".repeat(31);
+        assert_eq!(cut(&under, BULLET_CHARS), under.trim());
+    }
+
+    #[test]
+    fn a_long_single_sentence_bullet_is_kept_whole() {
+        let text = "word ".repeat(60);
+        let text = text.trim();
+        assert!(text.chars().count() > BULLET_CHARS);
+        assert_eq!(cut(text, BULLET_CHARS), text);
+    }
+
+    #[test]
+    fn a_long_bullet_is_cut_at_a_clause_end_without_an_ellipsis() {
+        let text = format!("Add a new option to the parser, {}", "word ".repeat(40));
+        let got = cut(text.trim(), BULLET_CHARS);
+        assert_eq!(got, "Add a new option to the parser");
+        assert!(!got.contains("..."), "{got}");
+    }
+
+    #[test]
+    fn a_bullet_of_three_hundred_characters_with_no_boundary_is_kept_whole() {
+        let text = "word ".repeat(61);
+        let text = text.trim();
+        assert_eq!(text.chars().count(), 304);
+        assert_eq!(cut(text, BULLET_CHARS), text);
+    }
+
+    #[test]
+    fn a_bullet_over_the_ceiling_with_no_boundary_is_cut_at_a_word() {
+        let text = "word ".repeat(120);
+        let text = text.trim();
+        let got = cut(text, BULLET_CHARS);
+        assert!(got.chars().count() <= BULLET_CEILING, "{got}");
+        assert!(got.ends_with("word"), "{got}");
+        assert!(!got.contains("..."), "{got}");
+        assert!(text.starts_with(&got));
+    }
+
+    #[test]
+    fn e_g_is_not_a_sentence_end() {
+        let text = format!("Use the flag e.g. for the new mode {}", "word ".repeat(30));
+        let text = text.trim();
+        assert!(text.chars().count() > BULLET_CHARS);
+        assert_eq!(cut(text, BULLET_CHARS), text);
     }
 
     #[test]
     fn a_cut_at_a_sentence_end_that_fits_keeps_the_sentence() {
         let long = "First one. Second part is long enough to need cutting for the limit here";
         assert_eq!(cut(long, 60), "First one.");
-        assert_eq!(
-            cut("Use e.g. this option, then more words here", 20),
-            "Use e.g. this..."
-        );
+        assert_eq!(cut(long, BULLET_CHARS), long);
     }
 
     #[test]
     fn a_cut_never_ends_on_a_dangling_mark_or_joining_word() {
-        assert_eq!(cut("alpha, beta gamma", 11), "alpha...");
-        assert_eq!(cut("alpha and beta gamma", 12), "alpha...");
+        assert_eq!(cut("alpha, beta gamma", 11), "alpha");
+        assert_eq!(cut("alpha and, beta gamma", 12), "alpha");
+        let words = "word ".repeat(40);
+        assert_eq!(
+            cut(&format!("Add a thing and, {words}"), BULLET_CHARS),
+            "Add a thing"
+        );
+        assert_eq!(
+            cut(&format!("Add a thing, {words}"), BULLET_CHARS),
+            "Add a thing"
+        );
+        assert_eq!(
+            cut(&format!("Add a thing and {words}"), BULLET_CHARS),
+            format!("Add a thing and {}", words.trim())
+        );
         assert_eq!(cut("Add a thing,", 100), "Add a thing");
         assert_eq!(cut("Add a thing and", 100), "Add a thing");
         assert_eq!(cut("Keep x; then", 100), "Keep x; then");
         let text = "Preserve constructor signatures on deprecated classes, including in Sphinx autodoc, instead of displaying the warning wrapper's generic arguments.";
         let got = cut(text, 100);
         assert!(got.chars().count() <= 100, "{got}");
-        assert!(got.ends_with("..."), "{got}");
-        assert!(!got.contains(",..."), "{got}");
+        assert!(!got.ends_with(','), "{got}");
+        assert!(!got.contains("..."), "{got}");
+    }
+
+    #[test]
+    fn a_version_list_is_not_cut_at_its_commas() {
+        let text = format!("Support 1.2, 1.3 and 1.4 {}", "word ".repeat(40));
+        let got = cut(text.trim(), BULLET_CHARS);
+        assert_eq!(got, text.trim());
     }
 
     #[test]
@@ -229,7 +321,10 @@ mod tests {
             "and more words ".repeat(20)
         );
         assert_eq!(cut_bullet(&line, 200), line.trim());
-        assert!(cut_bullet("Add a long thing and more words here", 12).ends_with("..."));
+        assert_eq!(
+            cut_bullet("Add a long thing and more words here", 12),
+            "Add a long thing and more words here"
+        );
     }
 
     #[test]
