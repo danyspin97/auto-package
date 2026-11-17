@@ -158,12 +158,13 @@ pub(super) fn branch_item(
                     } else {
                         None
                     };
-                    match missing_in_origin(&item.pkg, &e, gone.as_ref().map(|o| o.project.as_str())) {
+                    match missing_in_origin(
+                        &item.pkg,
+                        &e,
+                        gone.as_ref().map(|o| o.project.as_str()),
+                    ) {
                         Some(why) => return Err(why),
-                        None => ctx.warn(format!(
-                            "could not rebase {branch}/{} onto its origin, building it as it is: {e}",
-                            item.pkg
-                        )),
+                        None => ctx.warn(osc::stale_branch_warning(branch, &item.pkg, &e)),
                     }
                 }
             }

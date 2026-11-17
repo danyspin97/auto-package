@@ -64,20 +64,85 @@ pub fn rebase_package(project: &str, pkg: &str, emit: Emit<'_>) -> Result<Rebase
         return check_link(project, pkg, emit);
     }
     let path = rebase_api_path(project, pkg);
-    let out = api_call(Some("POST"), &path, None, emit)?;
+    let out = rebase_post(&path, emit)?;
     if !out.success() {
-        let stderr = if is_not_found(&out.stderr) {
-            format!("{}\n{seen}", out.stderr.trim_end())
-        } else {
-            out.stderr
-        };
         return Err(Error::OscFailed {
             cmd: format!("api -X POST {path}"),
             code: out.code,
-            stderr,
+            stderr: rebase_failure_text(&out.stderr, &seen),
         });
     }
     check_link(project, pkg, emit)
+}
+
+/// The rebase request. It runs `osc --debug`: plain `osc api` prints only the
+/// status line and the `<summary>` of an error, and the rest of OBS's answer
+/// is only logged in debug mode. The request is sent once, never repeated.
+fn rebase_post(path: &str, emit: Emit<'_>) -> Result<Captured, Error> {
+    let args = ["--debug", "api", "-X", "POST", path];
+    proc::capture_with_timeout("osc", &args, &anywhere(), emit, Duration::from_secs(120))
+        .map_err(during(format!("api {path}")))
+}
+
+/// The text of a failed rebase request: osc's own lines (without its debug
+/// log), the response body OBS sent, and the `<linkinfo>` values compared.
+pub(super) fn rebase_failure_text(stderr: &str, seen: &str) -> String {
+    let mut lines: Vec<String> = stderr
+        .lines()
+        .filter(|l| !l.contains("DEBUG:") && !l.trim().is_empty())
+        .map(|l| l.trim_end().to_string())
+        .collect();
+    match obs_response_body(stderr) {
+        Some(body) => lines.push(format!("OBS response body: {body}")),
+        None => lines.push("OBS response body: not in osc's output".into()),
+    }
+    lines.push(seen.to_string());
+    lines.join("\n")
+}
+
+/// The response body `osc --debug` logs for a failed request, as one line of
+/// text trimmed to a few hundred characters. The log holds it as a Python
+/// bytes literal (`DEBUG: b'<status code="...">\n ...'`), which is undone here.
+pub(super) fn obs_response_body(stderr: &str) -> Option<String> {
+    const LIMIT: usize = 300;
+    let raw = stderr
+        .lines()
+        .rev()
+        .find_map(|l| l.split_once("DEBUG: b'").map(|(_, rest)| rest))?
+        .trim_end();
+    let raw = raw.strip_suffix('\'')?;
+    let mut text = String::new();
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            text.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n' | 't' | 'r') => text.push(' '),
+            Some(other) => text.push(other),
+            None => {}
+        }
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return None;
+    }
+    if text.chars().count() <= LIMIT {
+        return Some(text);
+    }
+    let cut: String = text.chars().take(LIMIT).collect();
+    Some(format!("{cut}..."))
+}
+
+/// The warning for a branch whose rebase failed and that is built as it is.
+/// Its stored files are the old ones; the expanded view OBS builds still
+/// merges the origin's current sources, so the two disagree.
+pub fn stale_branch_warning(project: &str, pkg: &str, e: &Error) -> String {
+    format!(
+        "could not rebase {project}/{pkg} onto its origin: the branch's stored files are stale \
+         (the expanded view OBS builds is still merged); building it as it is: {e}"
+    )
 }
 
 /// The package `project/pkg` is linked from: the `project` and the `package` of
@@ -366,5 +431,77 @@ mod missing_origin_tests {
             "<html><h1>404 Not Found</h1><hr>nginx</html>"
         ));
         assert!(!names_missing(""));
+    }
+}
+
+#[cfg(test)]
+mod rebase_failure_tests {
+    use super::*;
+
+    /// What `osc --debug api -X POST` prints for a 404 whose body has a summary.
+    const DEBUG_404: &str = "Server returned an error: HTTP Error 404: Not Found\n\
+        Package not found: home:u:branches:S/p\n\
+        [2026-11-17 14:10:12] DEBUG: HTTPHeaderDict({'status': '404 Not Found', 'x-opensuse-errorcode': 'unknown_package'})\n\
+        [2026-11-17 14:10:12] DEBUG: b'<status code=\"unknown_package\">\\n  <summary>Package not found: home:u:branches:S/p</summary>\\n</status>\\n'\n";
+
+    #[test]
+    fn the_body_is_read_from_the_debug_log_and_unescaped() {
+        assert_eq!(
+            obs_response_body(DEBUG_404).as_deref(),
+            Some(
+                "<status code=\"unknown_package\"> <summary>Package not found: home:u:branches:S/p</summary> </status>"
+            )
+        );
+    }
+
+    #[test]
+    fn a_body_longer_than_the_limit_is_cut() {
+        let long = "x".repeat(500);
+        let stderr = format!("DEBUG: b'{long}'\n");
+        let body = obs_response_body(&stderr).unwrap();
+        assert_eq!(body.chars().count(), 303);
+        assert!(body.ends_with("..."));
+    }
+
+    #[test]
+    fn no_debug_body_is_none() {
+        assert_eq!(
+            obs_response_body("Server returned an error: HTTP Error 500"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_failure_text_keeps_osc_lines_and_the_body_without_the_debug_log() {
+        let text = rebase_failure_text(DEBUG_404, "linkinfo srcmd5=aa baserev=bb behind=true");
+        assert_eq!(
+            text,
+            "Server returned an error: HTTP Error 404: Not Found\n\
+             Package not found: home:u:branches:S/p\n\
+             OBS response body: <status code=\"unknown_package\"> <summary>Package not found: home:u:branches:S/p</summary> </status>\n\
+             linkinfo srcmd5=aa baserev=bb behind=true"
+        );
+        assert!(is_not_found(&text));
+    }
+
+    #[test]
+    fn the_warning_says_the_stored_files_are_stale_and_carries_the_body() {
+        let e = Error::OscFailed {
+            cmd: "api -X POST /source/B/p?cmd=rebase".into(),
+            code: 1,
+            stderr: rebase_failure_text(DEBUG_404, "linkinfo srcmd5=aa baserev=bb behind=true"),
+        };
+        let msg = stale_branch_warning("B", "p", &e);
+        assert!(
+            msg.starts_with("could not rebase B/p onto its origin"),
+            "{msg}"
+        );
+        assert!(msg.contains("the branch's stored files are stale"), "{msg}");
+        assert!(
+            msg.contains("the expanded view OBS builds is still merged"),
+            "{msg}"
+        );
+        assert!(msg.contains("building it as it is"), "{msg}");
+        assert!(msg.contains("<summary>Package not found"), "{msg}");
     }
 }
