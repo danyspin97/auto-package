@@ -129,8 +129,9 @@ pub fn ensure_package(
 
 /// What an osc failure says, for a message: an uncaught Python exception is
 /// reduced to its last lines (the traceback names osc's own source, not the
-/// cause), and a full disk is called what it is, since every package that
-/// downloads or checks out then fails the same way.
+/// cause; a failed service keeps the lines it printed before the traceback),
+/// and a full disk is called what it is, since every package that downloads or
+/// checks out then fails the same way.
 pub(super) fn osc_error_text(stderr: &str) -> String {
     let text = match stderr.find("Traceback (most recent call last):") {
         Some(at) => {
@@ -138,7 +139,19 @@ pub(super) fn osc_error_text(stderr: &str) -> String {
                 .lines()
                 .filter(|l| !l.trim().is_empty())
                 .collect();
-            lines[lines.len().saturating_sub(2)..].join("\n")
+            let tail = lines[lines.len().saturating_sub(2)..].join("\n");
+            // A service that failed (`service <name> failed:`) wrote its own
+            // lines before the exception, and they say why it failed; its
+            // traceback only says where it gave up (tar_scm printed
+            // "No such revision" and then died decoding git's missing output).
+            let first = stderr.lines().next().unwrap_or_default();
+            let own = first.starts_with("service ") && first.ends_with(" failed:");
+            let before = stderr[..at].trim_end();
+            if own && !before.is_empty() {
+                format!("{before}\n{tail}")
+            } else {
+                tail
+            }
         }
         None => stderr.trim_end().to_string(),
     };
