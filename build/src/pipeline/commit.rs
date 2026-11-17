@@ -248,7 +248,7 @@ pub(super) fn commit_step(ctx: &RunCtx, st: &mut RunState) -> Result<(), Pipelin
     for name in &removed {
         ctx.reporter.report(&Event::Progress {
             step: Some(commit_step.id),
-            message: format!("removing '{name}' from OBS: the package does not use it"),
+            message: format!("removing '{name}' from OBS: it is no longer in the checkout"),
         });
     }
     for name in osc::discard_untracked_archives(&ctx.checkout_dir, &plan.skipped, &named) {
