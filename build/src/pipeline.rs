@@ -147,6 +147,8 @@ mod carried_origin_tests;
 mod generate_service_tests;
 #[cfg(test)]
 mod lint_review_tests;
+#[cfg(test)]
+mod render_service_tests;
 mod sdist_stage;
 #[cfg(test)]
 mod sdist_stage_tests;

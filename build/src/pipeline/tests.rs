@@ -446,6 +446,7 @@ fn service_files_escape_values_taken_from_upstream() {
     assert!(xml.contains("a&amp;b&lt;/param&gt;"), "{xml}");
     let xml = render_service_file(
         "https://example.org/o/r?a=1&b=2",
+        "v1.0",
         "1.0",
         "r",
         Some("A & B <a@example.org>"),
@@ -456,7 +457,7 @@ fn service_files_escape_values_taken_from_upstream() {
         "{xml}"
     );
     assert!(!xml.contains("YOUR EMAIL"), "{xml}");
-    let xml = render_service_file("https://example.org/o/r", "1.0", "r", None);
+    let xml = render_service_file("https://example.org/o/r", "v1.0", "1.0", "r", None);
     assert!(
         !xml.contains("changesgenerate") && !xml.contains("changesauthor"),
         "{xml}"

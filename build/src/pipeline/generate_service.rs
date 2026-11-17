@@ -60,8 +60,21 @@ pub(super) fn osc_service_stage(
                 super::author_gate::host_author(Some(checkout_dir)),
             )
             .map_err(|why| ctx.failed_as(FailureKind::Environment, why))?;
+            // The revision must be a tag the repository has: some name it
+            // `v1.2.3`, others `1.2.3`. Without an answer from the forge, `v`.
+            let (tag, assumed) = service_tag(
+                crate::sources::tag_for_version(repo_url, &config.version),
+                &config.version,
+            );
+            if let Some(message) = assumed {
+                reporter.report(&Event::Warning {
+                    step: Some(step.id),
+                    message,
+                });
+            }
             let service_xml = render_service_file(
                 repo_url,
+                &tag,
                 &config.version,
                 &config.pkg_name,
                 author.map(|a| a.to_string()).as_deref(),

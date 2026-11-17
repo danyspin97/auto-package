@@ -4,13 +4,15 @@ use super::*;
 
 /// Render the OBS `_service` XML for a Rust package.
 ///
-/// `github_url` is the project URL (without `.git`), `version` is the crate
-/// version, and `pkg_name` is used as the `cargo_vendor` `src` directory name
-/// (the directory `tar_scm` creates matches the repo name). `author` is the
+/// `github_url` is the project URL (without `.git`), `tag` is the git tag of
+/// the release (the repository's own name for it: `v1.2.3`, `release-1.2.3`,
+/// `1.2.3`), `version` is the version the spec gives it, and `pkg_name` is
+/// used as the `cargo_vendor` `src` directory name (the directory `tar_scm` creates matches the repo name). `author` is the
 /// `Name <email>` `tar_scm` puts on the changelog entry it writes; with
 /// `None` it writes no entry (a local build, which commits nothing).
 pub(super) fn render_service_file(
     github_url: &str,
+    tag: &str,
     version: &str,
     pkg_name: &str,
     author: Option<&str>,
@@ -28,10 +30,11 @@ pub(super) fn render_service_file(
 
     // Every value lands in element text: a `&` or `<` in a URL or a tag would
     // make the file malformed or add elements.
-    let (git_url, repo_name, version) = (
+    let rewrite = version_rewrite(tag, version);
+    let (git_url, repo_name, tag) = (
         crate::obs_xml::escape(&git_url),
         crate::obs_xml::escape(repo_name),
-        crate::obs_xml::escape(version),
+        crate::obs_xml::escape(tag),
     );
     let changes = author.map_or_else(String::new, |a| {
         format!(
@@ -46,10 +49,9 @@ pub(super) fn render_service_file(
          \x20   <param name=\"url\">{git_url}</param>\n\
          \x20   <param name=\"versionformat\">@PARENT_TAG@</param>\n\
          \x20   <param name=\"scm\">git</param>\n\
-         \x20   <param name=\"revision\">v{version}</param>\n\
+         \x20   <param name=\"revision\">{tag}</param>\n\
          \x20   <param name=\"match-tag\">*</param>\n\
-         \x20   <param name=\"versionrewrite-pattern\">v(\\d+\\.\\d+\\.\\d+)</param>\n\
-         \x20   <param name=\"versionrewrite-replacement\">\\1</param>\n\
+         {rewrite}\
          {changes}\
          \x20 </service>\n\
          \x20 <service mode=\"manual\" name=\"recompress\">\n\
@@ -63,6 +65,38 @@ pub(super) fn render_service_file(
          \x20    <param name=\"update\">true</param>\n\
          \x20 </service>\n\
          </services>\n"
+    )
+}
+
+/// The tag for the service revision: the one the forge listed, else
+/// `v<version>` with a message saying that it is an assumption.
+pub(super) fn service_tag(found: Option<String>, version: &str) -> (String, Option<String>) {
+    match found {
+        Some(tag) => (tag, None),
+        None => (
+            format!("v{version}"),
+            Some(format!(
+                "the forge lists no tag for {version}: assuming the tag v{version}"
+            )),
+        ),
+    }
+}
+
+/// The `tar_scm` params that turn the tag into the spec's version: the part of
+/// the tag before the version (`v`, `release-`, `repo-v`) is cut, matched
+/// exactly (`^prefix(version)$`). None when the tag is the version, and none
+/// when it does not end with the version (`1.0.0-rc1` for `1.0.0~rc1`): the
+/// tarball version is then the tag as it is.
+fn version_rewrite(tag: &str, version: &str) -> String {
+    let prefix = match tag.strip_suffix(version) {
+        Some(p) if !p.is_empty() => p,
+        _ => return String::new(),
+    };
+    let pattern = format!("^{}({})$", regex::escape(prefix), regex::escape(version));
+    format!(
+        "\x20   <param name=\"versionrewrite-pattern\">{}</param>\n\
+         \x20   <param name=\"versionrewrite-replacement\">\\1</param>\n",
+        crate::obs_xml::escape(&pattern)
     )
 }
 
