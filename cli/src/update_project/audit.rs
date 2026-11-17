@@ -258,6 +258,7 @@ impl Audit {
                                 };
                                 let route = Route {
                                     style_only,
+                                    tidy_first: tidy_first_of(&findings, tidy_blocked),
                                     tool: gate.tool_names(),
                                     recap: gate.recap.clone(),
                                     headers: header_scope,

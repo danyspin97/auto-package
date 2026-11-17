@@ -15,6 +15,8 @@ pub(super) struct Job {
     pub(super) mechanical: bool,
     /// The patches whose headers the tidy rewrites (see `Route::headers`).
     pub(super) headers: Vec<String>,
+    /// Its mechanical findings are tidied before the pipeline builds it.
+    pub(super) tidy_first: bool,
     /// The names the item is known by (see `visit_key`), before and after
     /// the branch call, which may change its origin.
     pub(super) keys: Vec<String>,
@@ -33,6 +35,7 @@ impl Job {
             item,
             mechanical: false,
             headers: Vec::new(),
+            tidy_first: false,
             keys,
             after,
         }
@@ -133,7 +136,14 @@ impl<'a, 'c> BuildWork<'a, 'c> {
                     Err(e) => Err(e),
                 }
             } else {
-                build_item(&item)
+                // The tidy commits the mechanical fixes first, so the build is of the
+                // tidied spec. A tidy that fails fails the item, as on the other route.
+                let tidied = if job.tidy_first {
+                    tidy_of(a, branch, &item, ctx, true, &job.headers).map(|_| ())
+                } else {
+                    Ok(())
+                };
+                tidied.and_then(|()| build_item(&item))
             }
         } else {
             ctx.say(format!(
@@ -310,6 +320,7 @@ pub(super) fn hand_over(
     for job in &mut batch {
         job.mechanical = routes.mechanical(&job.item.pkg);
         job.headers = routes.headers(&job.item.pkg).to_vec();
+        job.tidy_first = routes.tidy_first(&job.item.pkg);
     }
     builds.submit(batch, report.results.len());
 }
