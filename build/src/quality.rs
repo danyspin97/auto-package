@@ -46,6 +46,10 @@ pub enum Kind {
     /// (convention 111). Lint writes the header and reports the status; tidy
     /// commits it with no build and no `.changes` bullet.
     PatchProvenance,
+    /// A patch whose headers name quilt's `source/` directory (or
+    /// `source.orig/`) rather than the archive's top directory. Tidy rewrites
+    /// the prefixes (see `patch_check::rewrite_header_prefixes`).
+    PatchHeaders,
     /// A carried patch whose upstream request is merged and in the packaged
     /// release: lint removes it only with the removal proof (the pipeline
     /// checks it); without the proof it stays with a warning.
@@ -82,6 +86,7 @@ impl Kind {
             Kind::RpmlintrcName => "rpmlintrc-name",
             Kind::RpmlintrcUnnamed => "rpmlintrc-unnamed",
             Kind::PatchProvenance => "patch-provenance",
+            Kind::PatchHeaders => "patch-headers",
             Kind::PatchUpstreamMerged => "patch-upstream-merged",
             Kind::PatchUpstreamMoved => "patch-upstream-moved",
             Kind::PatchUpstreamReleased => "patch-upstream-released",
@@ -94,7 +99,11 @@ impl Kind {
     pub fn is_mechanical(self) -> bool {
         matches!(
             self,
-            Kind::SpecStyle | Kind::SpecHygiene | Kind::RpmlintrcStyle | Kind::PatchProvenance
+            Kind::SpecStyle
+                | Kind::SpecHygiene
+                | Kind::RpmlintrcStyle
+                | Kind::PatchProvenance
+                | Kind::PatchHeaders
         )
     }
 

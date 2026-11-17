@@ -7,7 +7,8 @@ use super::*;
 /// run's `--no-agent`, which the upstream recap of the entry is filled in under.
 /// Without `style` (a source auto-package does not recognise, see
 /// `unrecognised`) the spec, the rpmlintrc files and the upstream headers are
-/// left as they are: only the leftover cleanup and the recap run.
+/// left as they are: only the leftover cleanup and the recap run. `headers` are
+/// the patches whose headers are rewritten (the others keep theirs).
 pub(super) fn tidy_item(
     branch: &str,
     item: &Item,
@@ -15,6 +16,7 @@ pub(super) fn tidy_item(
     ldconfig: bool,
     no_agent: bool,
     style: bool,
+    headers: &[String],
 ) -> Result<TidyDone, String> {
     let _obs_write = ap_build::proc::obs_write();
     let emit = Emit::run(ctx.reporter.as_ref());
@@ -40,9 +42,17 @@ pub(super) fn tidy_item(
         Vec::new()
     };
     // The provenance of the upstream patches: headers and spec comments. They
-    // are not style changes, so they get no `.changes` bullet.
+    // are not style changes, so they get no `.changes` bullet. The patch
+    // headers' quilt prefixes are made the archive's top directory with them.
+    let originals = if style {
+        super::patch_headers::scoped(super::provenance::checkout_patches(&dir, &tidied), headers)
+    } else {
+        Vec::new()
+    };
+    let headers_changed = !super::patch_headers::due(&item.pkg, &tidied, &originals).is_empty();
     let edits = if style {
-        provenance_edits(&dir, &item.pkg, &files, &tidied)
+        let edits = provenance_edits(&dir, &item.pkg, &files, &tidied);
+        super::patch_headers::with_edits(&item.pkg, &tidied, &originals, edits)
     } else {
         super::provenance::ProvenanceEdits {
             spec: before.clone(),
@@ -147,6 +157,7 @@ pub(super) fn tidy_item(
             &commit_message(
                 tidy_changed || !rpm_fixes.is_empty(),
                 provenance_changed,
+                headers_changed,
                 cleanup,
                 recap,
             ),
@@ -276,13 +287,22 @@ fn tidy_done(
 }
 
 /// The commit message of a tidy: each change it makes, in order.
-fn commit_message(tidy: bool, provenance: bool, cleanup: bool, recap: bool) -> String {
+fn commit_message(
+    tidy: bool,
+    provenance: bool,
+    headers: bool,
+    cleanup: bool,
+    recap: bool,
+) -> String {
     let mut parts = Vec::new();
     if tidy {
         parts.push("Tidy the spec (auto-package lint)");
     }
     if provenance {
         parts.push("Add upstream provenance to patch headers (auto-package lint)");
+    }
+    if headers {
+        parts.push("Use the top directory in patch headers (auto-package lint)");
     }
     if cleanup {
         parts.push("Clean the branch leftovers (auto-package lint)");

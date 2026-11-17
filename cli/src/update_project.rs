@@ -65,6 +65,7 @@ mod origin;
 mod parked;
 #[cfg(test)]
 mod parked_tests;
+mod patch_headers;
 mod provenance;
 mod ready;
 #[cfg(test)]

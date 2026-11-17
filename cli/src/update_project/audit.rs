@@ -129,7 +129,9 @@ impl Audit {
                         ecosystem_of,
                         emit,
                     );
-                    let (mut findings, inherited) = match &carrying {
+                    let source_patches =
+                        super::provenance::read_patches(&source, pkg, &spec, emit, &|m| warn(m));
+                    let (mut findings, mut inherited) = match &carrying {
                         Some(carry) => {
                             match audit_work(carry, pkg, ldconfig, fix_inherited, emit) {
                                 Ok(split) => split,
@@ -144,6 +146,19 @@ impl Audit {
                         }
                         None => (quality::audit_spec(&spec, ldconfig), Vec::new()),
                     };
+                    let headers = super::patch_headers::audit(
+                        carrying.as_ref(),
+                        &source,
+                        pkg,
+                        &spec,
+                        &source_patches,
+                        fix_inherited,
+                        emit,
+                        &|m| warn(m),
+                    );
+                    findings.extend(headers.own);
+                    inherited.extend(headers.inherited);
+                    let header_scope = headers.scope;
                     if let Some(carry) = &carrying {
                         for f in &inherited {
                             say(format!(
@@ -158,8 +173,8 @@ impl Audit {
                         &source,
                         pkg,
                         &spec,
+                        &source_patches,
                         emit,
-                        &|m| warn(m),
                         &hosts,
                     ));
                     findings.extend(super::rpmlint_audit::findings(
@@ -245,6 +260,7 @@ impl Audit {
                                     style_only,
                                     tool: gate.tool_names(),
                                     recap: gate.recap.clone(),
+                                    headers: header_scope,
                                 };
                                 // A closed channel means the run gave up.
                                 go_on = tx.send((item, route)).is_ok();
@@ -386,7 +402,11 @@ fn without_line(detail: &str) -> &str {
 fn fixable_lines(findings: &[quality::Finding]) -> Vec<String> {
     findings
         .iter()
-        .filter(|f| !f.kind.is_report_only() && !f.kind.is_provenance())
+        .filter(|f| {
+            !f.kind.is_report_only()
+                && !f.kind.is_provenance()
+                && f.kind != quality::Kind::PatchHeaders
+        })
         .map(|f| format!("{}: {}", f.kind.label(), f.detail))
         .collect()
 }

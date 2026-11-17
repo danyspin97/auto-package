@@ -6,30 +6,44 @@ use super::*;
 use ap_build::patch_provenance::{self, Inputs, LiveForge};
 use std::path::Path;
 
-/// The findings for the patches of `pkg`'s spec, read from `source`. A patch
-/// or the `.changes` file that cannot be read is a warning; the audit goes on.
-pub(super) fn provenance_findings(
+/// The plain patches of `pkg`'s spec, read from `source` (see `plain_patch_names`).
+/// A patch that cannot be read is a warning and is left out.
+pub(super) fn read_patches(
     source: &str,
     pkg: &str,
     spec: &str,
     emit: Emit<'_>,
     warn: &dyn Fn(String),
+) -> Vec<(String, String)> {
+    plain_patch_names(spec)
+        .into_iter()
+        .filter_map(|name| match osc::cat_file(source, pkg, &name, emit) {
+            Some(text) => Some((name, text)),
+            None => {
+                warn(format!(
+                    "could not read {name} of {pkg}, so it is not checked"
+                ));
+                None
+            }
+        })
+        .collect()
+}
+
+/// The findings for `patches` (read by `read_patches`) of `pkg`'s spec, read
+/// from `source`. The `.changes` file that cannot be read is left out.
+pub(super) fn provenance_findings(
+    source: &str,
+    pkg: &str,
+    spec: &str,
+    patches: &[(String, String)],
+    emit: Emit<'_>,
     hosts: &ap_build::allowed_hosts::AllowedHosts,
 ) -> Vec<quality::Finding> {
-    let mut patches: Vec<(String, String)> = Vec::new();
-    for name in plain_patch_names(spec) {
-        match osc::cat_file(source, pkg, &name, emit) {
-            Some(text) => patches.push((name, text)),
-            None => warn(format!(
-                "could not read {name} of {pkg}, so its upstream provenance is not checked"
-            )),
-        }
-    }
     if patches.is_empty() {
         return Vec::new();
     }
     let changes = changes_text(source, pkg, emit).unwrap_or_default();
-    patch_provenance::lint_findings(&assess_patches(pkg, spec, &changes, &patches, hosts))
+    patch_provenance::lint_findings(&assess_patches(pkg, spec, &changes, patches, hosts))
 }
 
 /// The provenance of the patches (name, text) of `spec`, assessed against the

@@ -14,6 +14,8 @@ pub(super) struct Route {
     pub(super) tool: Vec<String>,
     /// The versions the tool fills the missing upstream recap for (`1.7.5..1.9.0`).
     pub(super) recap: Option<String>,
+    /// The patches whose headers the tidy rewrites (see `patch_headers::split`).
+    pub(super) headers: Vec<String>,
 }
 
 /// The routes of the packages prepared in a run, by package name.
@@ -28,6 +30,11 @@ impl Routes {
     /// Whether `pkg` is committed without a build.
     pub(super) fn mechanical(&self, pkg: &str) -> bool {
         self.0.get(pkg).is_some_and(|r| r.style_only)
+    }
+
+    /// The patches of `pkg` whose headers the tidy rewrites.
+    pub(super) fn headers(&self, pkg: &str) -> &[String] {
+        self.0.get(pkg).map_or(&[], |r| r.headers.as_slice())
     }
 
     /// The branch leftovers the tool cleans in `pkg`.
@@ -52,6 +59,7 @@ mod tests {
             "cookiecutter",
             Route {
                 style_only: true,
+                headers: Vec::new(),
                 tool: vec!["changes.dependency-bullet".to_string(), "FLAG".to_string()],
                 recap: None,
             },

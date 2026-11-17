@@ -13,6 +13,8 @@ pub(super) struct Job {
     pub(super) item: Item,
     /// Its findings are style slips only, committed without a build.
     pub(super) mechanical: bool,
+    /// The patches whose headers the tidy rewrites (see `Route::headers`).
+    pub(super) headers: Vec<String>,
     /// The names the item is known by (see `visit_key`), before and after
     /// the branch call, which may change its origin.
     pub(super) keys: Vec<String>,
@@ -30,6 +32,7 @@ impl Job {
         Job {
             item,
             mechanical: false,
+            headers: Vec::new(),
             keys,
             after,
         }
@@ -109,7 +112,7 @@ impl<'a, 'c> BuildWork<'a, 'c> {
         } else if a.improve {
             ctx.say(format!("improving {} in {branch}", item.pkg));
             if job.mechanical {
-                match tidy_of(a, branch, &item, ctx, true) {
+                match tidy_of(a, branch, &item, ctx, true, &job.headers) {
                     Ok(done) => {
                         skip = super::tidy::tidy_skip(done).map(str::to_string);
                         Ok(())
@@ -122,7 +125,7 @@ impl<'a, 'c> BuildWork<'a, 'c> {
             } else if super::unrecognised::unrecognised(&item, &super::unrecognised::probe_archive)
             {
                 // The tool's cleanups only: the pipeline would refuse the source.
-                match tidy_of(a, branch, &item, ctx, false) {
+                match tidy_of(a, branch, &item, ctx, false, &[]) {
                     Ok(_) => {
                         skip = Some(super::unrecognised::SKIPPED.to_string());
                         Ok(())
@@ -306,6 +309,7 @@ pub(super) fn hand_over(
     batch.sort_by_key(|j| j.item.dependency_of.is_none());
     for job in &mut batch {
         job.mechanical = routes.mechanical(&job.item.pkg);
+        job.headers = routes.headers(&job.item.pkg).to_vec();
     }
     builds.submit(batch, report.results.len());
 }
@@ -357,17 +361,19 @@ fn lint_scoped(a: &UpdateProjectArgs, branch: &str, item: &Item, ctx: &Ctx<'_>) 
 }
 
 /// The tidy of `item` in `branch` (see `tidy_item`), with the ldconfig macro of
-/// the branch's target. `style` says whether its style fixes are made too.
+/// the branch's target. `style` says whether its style fixes are made too, and
+/// `headers` which patches' headers are rewritten.
 fn tidy_of(
     a: &UpdateProjectArgs,
     branch: &str,
     item: &Item,
     ctx: &Ctx<'_>,
     style: bool,
+    headers: &[String],
 ) -> Result<super::tidy::TidyDone, String> {
     let target = osc::choose_repository(branch, a.distro.as_deref(), &a.arch).0;
     let ldconfig = ap_build::spec_tidy::hygiene::ldconfig_macro_defined(&target);
-    super::tidy::tidy_item(branch, item, ctx, ldconfig, a.no_agent, style)
+    super::tidy::tidy_item(branch, item, ctx, ldconfig, a.no_agent, style, headers)
 }
 
 /// Build `item` in the branch project with the ordinary pipeline.
